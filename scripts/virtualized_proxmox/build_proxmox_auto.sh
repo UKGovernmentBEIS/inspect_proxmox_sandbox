@@ -187,7 +187,12 @@ echo "PROXMOX_VERIFY_TLS=0"
 EOFVEND
 chmod +x ./vend.sh
 
-run-one-until-failure bash -c 'sleep 5; sudo tmux list-windows -t virt-inst-proxmox' > /dev/null
+echo "Monitoring Proxmox installation progress (last 4 lines):"
+while sudo tmux has-session -t virt-inst-proxmox 2>/dev/null; do
+  echo "----- $(date +"%H:%M:%S") -----"
+  sudo tmux capture-pane -pt virt-inst-proxmox:0.0 | tail -n 4
+  sleep 3
+done
 
 virsh list --all
 echo 'Script complete. Run ./vend.sh 1 to create a fresh clone of the Proxmox VM.'
