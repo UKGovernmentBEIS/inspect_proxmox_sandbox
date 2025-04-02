@@ -39,6 +39,7 @@ source = "from-dhcp"
 [disk-setup]
 filesystem = "ext4"
 disk_list = ["vda"]
+lvm.maxroot = 250
 
 [first-boot]
 source = "from-iso"
