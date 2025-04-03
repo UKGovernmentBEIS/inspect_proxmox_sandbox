@@ -186,22 +186,6 @@ to convert it into an OVA.
 
 Note, if you are having problems, then setting Inspect's `sandbox_cleanup=False` will be helpful.
 
-<details>
-<summary>AISI-specific instructions </summary>
-
-To access the Proxmox UI, at the moment you need to forward the port as follows.
-
-Suppose your developer VM is called `my-dev-vm`, and assuming you copy your `.env` file onto your Mac, you can run on your Mac:
-
-`set -a; source .env; set +a`
-
-Then you can ssh as follows
-
-`ssh -L "localhost:8006:$PROXMOX_HOST:$PROXMOX_PORT" my-dev-vm`
-
-Then open the page https://locahost:8006, accept the certificate warning, and log in with the username and password from the .env file
-</details>
-
 ### Logging in
 
 If you want to log into a sandbox VM, the Proxmox UI lets you open a console window, but you might not know the password.
