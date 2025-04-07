@@ -1,6 +1,6 @@
 [project]
 name = "inspect-proxmox-sandbox"
-version = "0.3.1"
+version = "0.4.0"
 description = "A Proxmox Sandbox Environment for Inspect"
 readme = "README.md"
 authors = [
@@ -15,7 +15,8 @@ dependencies = [
     "pydantic-extra-types>=2.10.2",
     "pycurl>=7.45.0",
     "inspect_ai>=0.3.79",
-    "rich>=13.9"
+    "rich>=13.9",
+    "platformdirs>=4.3.7",
 ]
 
 [project.entry-points."inspect_ai"]

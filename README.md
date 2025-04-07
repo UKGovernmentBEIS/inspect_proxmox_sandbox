@@ -83,6 +83,8 @@ sandbox=SandboxEnvironmentSpec(
                 vcpus=4, # optional, default is 2. No attempt is made to check that this will fit in the Proxmox host.
                 uefi_boot=True, # optional, default is False. Generally only needed for Windows VMs.
                 is_sandbox=False, # optional, default is True. A virtual machine that is not a sandbox; the qemu-guest-agent need not be installed.
+                disk_controller="scsi", # optional, default will be SCSI. Can also use "ide" for older VM images.
+                nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
                 # You can assign more than one, to give the VM more than one network interface.
                 # If you leave this blank, your VM will be assigned to the first VNet.
@@ -204,6 +206,13 @@ pvesh create "/nodes/$PROXMOX_NODE/qemu/$VM_ID/agent/exec" --command bash --comm
 
 QEMU, the virtualization library used by Proxmox, allows you to snapshot a running virtual machine, 
 including the running processes. See [snapshots.py](./src/proxmoxsandbox/experimental/snapshots.py) for example tools that use this.
+
+## Sample eval
+
+See [ctf4.py](./src/proxmoxsandbox/experimental/ctf4.py) for an example capture-the-flag eval with:
+
+- A VM for the agent
+- A victim VM which the agent must hack into and obtain the root password
 
 ## Identifying created resources
 

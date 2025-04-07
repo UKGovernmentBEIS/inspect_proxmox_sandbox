@@ -153,6 +153,9 @@ class VmConfig(BaseModel, frozen=True):
             It must have the qemu-guest-agent installed
         uefi_boot: if True, the VM will boot in UEFI mode. In theory, this is already
             specified by OVA, but Proxmox doesn't seem to respect it.
+        disk_controller: The disk controller type. If unset, defaults to "scsi"
+        nic_controller: The NIC controller type. If unset, defaults to "virtio".
+            This is applied to all virtual network interfaces.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -171,6 +174,8 @@ class VmConfig(BaseModel, frozen=True):
     nics: Optional[Tuple[VmNicConfig, ...]] = None
     is_sandbox: bool = True
     uefi_boot: bool = False
+    disk_controller: Optional[Literal["scsi", "ide"]] = None
+    nic_controller: Optional[Literal["virtio", "e1000"]] = None
 
 
 class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):

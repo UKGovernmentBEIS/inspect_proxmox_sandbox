@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0 - 2025-04-07
+
+- Allow vmdk in convert_ova.sh
+- Allow ide disk controller and e1000 network controller
+- Sample CTF eval
+
 ## 0.3.1 - 2025-04-04
 
 - Create 250G root space by default

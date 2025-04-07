@@ -135,7 +135,7 @@ class QemuCommands(abc.ABC):
         )
 
     async def find_next_available_vm_id(self) -> int:
-        return await self.async_proxmox.request("GET", "/cluster/nextid")   
+        return await self.async_proxmox.request("GET", "/cluster/nextid")
 
     async def start_and_await(
         self,
@@ -167,6 +167,12 @@ class QemuCommands(abc.ABC):
         built_in_vm_ids: Dict[str, int],
     ) -> int:
         new_vm_id: int | None = None
+
+        if (
+            vm_config.disk_controller is not None
+            and vm_config.vm_source_config.ova is None
+        ):
+            raise NotImplementedError("disk_controller is only supported for OVA")
 
         if vm_config.vm_source_config.existing_backup_name:
             new_vm_id = await self.find_next_available_vm_id()
@@ -233,6 +239,12 @@ class QemuCommands(abc.ABC):
                     "start": False,
                 }
 
+                disk_prefix = (
+                    "scsi"
+                    if vm_config.disk_controller is None
+                    else vm_config.disk_controller
+                )
+
                 self.other_config_json(vm_config, json_for_create)
 
                 vmdks = []
@@ -246,7 +258,7 @@ class QemuCommands(abc.ABC):
                 # this logic is reverse-engineered from the Proxmox GUI
                 # and may be brittle
                 for i, vmdk in enumerate(vmdks):
-                    json_for_create[f"scsi{i}"] = (
+                    json_for_create[f"{disk_prefix}{i}"] = (
                         f"local-lvm:0,import-from={self.storage}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
                     )
 
@@ -341,6 +353,13 @@ class QemuCommands(abc.ABC):
     ) -> None:
         async def update_network() -> None:
             network_update_json: ProxmoxJsonDataType = {}
+
+            nic_prefix = (
+                "virtio"
+                if vm_config.nic_controller is None
+                else vm_config.nic_controller
+            )
+
             if vm_config.nics is None:
                 if (
                     vm_config.vm_source_config.built_in
@@ -348,7 +367,9 @@ class QemuCommands(abc.ABC):
                 ):
                     await self.remove_existing_nics(vm_id)
                     first_vnet_id = sdn_vnet_aliases[0][0]
-                    network_update_json["net0"] = f"virtio,bridge={first_vnet_id}"
+                    network_update_json["net0"] = (
+                        f"{nic_prefix},bridge={first_vnet_id}"
+                    )
                 # for other vm_source_configs, we *do not touch* networking config
                 # - so the user must have set it up correctly!
             else:
@@ -357,7 +378,7 @@ class QemuCommands(abc.ABC):
                 # note: vm_config.nics can be the empty tuple here - this is deliberate:
                 # you will end up with no nics in the VM
                 for i, nic in enumerate(vm_config.nics):
-                    netx = f"virtio,bridge={alias_mapping[nic.vnet_alias]}"
+                    netx = f"{nic_prefix},bridge={alias_mapping[nic.vnet_alias]}"
                     if nic.mac:
                         netx += f",macaddr={nic.mac}"
                     network_update_json[f"net{i}"] = netx

@@ -1,24 +1,25 @@
 #!/bin/bash
 # This script runs inside a Docker container, so don't try to run it yourself
-set -eu
 
 SOURCE_DIR="/source"
 OUTPUT_DIR="/output"
-TEMP_DIR="/tmp/qcow2_to_ova_conversion"
-UEFI_MODE=$1
+TEMP_DIR="/tmp/source_disk_to_ova_conversion"
+SOURCE_TYPE=$1
+UEFI_MODE=$2
 
+set -eu
 mkdir -p "$TEMP_DIR"
 
-for qcow2_file in "$SOURCE_DIR"/*.qcow2; do
-    if [ ! -f "$qcow2_file" ]; then
-        echo "No qcow2 files found in $SOURCE_DIR"
+for source_disk_file in "$SOURCE_DIR"/*."$SOURCE_TYPE"; do
+    if [ ! -f "$source_disk_file" ]; then
+        echo "No $SOURCE_TYPE files found in $SOURCE_DIR"
         exit 1
     fi
 
-    filename=$(basename "$qcow2_file" .qcow2)
+    filename=$(basename "$source_disk_file" .$SOURCE_TYPE)
     echo "Processing: $filename"
 
-    qemu-img convert -f qcow2 -O vdi "$qcow2_file" "$TEMP_DIR/$filename.vdi"
+    qemu-img convert -f $SOURCE_TYPE -O vdi "$source_disk_file" "$TEMP_DIR/$filename.vdi"
     VBoxManage createvm --name "$filename" --ostype Linux26_64 --register
     VBoxManage modifyvm "$filename" --memory 2048 --cpus 2 --acpi on --boot1 disk
     if [ $UEFI_MODE -eq 1 ]; then
