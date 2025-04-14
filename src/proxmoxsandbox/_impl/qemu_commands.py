@@ -174,6 +174,9 @@ class QemuCommands(abc.ABC):
         ):
             raise NotImplementedError("disk_controller is only supported for OVA")
 
+        if (vm_config.os_type != "l26") and (vm_config.vm_source_config.ova is None):
+            raise NotImplementedError("os_type is only supported for OVA")
+
         if vm_config.vm_source_config.existing_backup_name:
             new_vm_id = await self.find_next_available_vm_id()
             with trace_action(
@@ -234,7 +237,7 @@ class QemuCommands(abc.ABC):
                 json_for_create: ProxmoxJsonDataType = {
                     "node": self.node,
                     "cpu": "host",
-                    "ostype": "l26",
+                    "ostype": vm_config.os_type,
                     "scsihw": "virtio-scsi-single",
                     "start": False,
                 }
@@ -367,9 +370,7 @@ class QemuCommands(abc.ABC):
                 ):
                     await self.remove_existing_nics(vm_id)
                     first_vnet_id = sdn_vnet_aliases[0][0]
-                    network_update_json["net0"] = (
-                        f"{nic_prefix},bridge={first_vnet_id}"
-                    )
+                    network_update_json["net0"] = f"{nic_prefix},bridge={first_vnet_id}"
                 # for other vm_source_configs, we *do not touch* networking config
                 # - so the user must have set it up correctly!
             else:
