@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0 - 2025-04-17
+
+- Add machine type option (Linux, Windows, etc.)
+- Upgrade scripted Proxmox build to version 8.4
+
 ## 0.4.0 - 2025-04-07
 
 - Allow vmdk in convert_ova.sh

@@ -31,14 +31,15 @@ country = "gb"
 fqdn = "proxmox.local"
 mailto = "root@localhost"
 timezone = "Europe/London"
-root_password = "Password2.0"
+root-password = "Password2.0"
+reboot-mode = "power-off"
 
 [network]
 source = "from-dhcp"
 
 [disk-setup]
 filesystem = "ext4"
-disk_list = ["vda"]
+disk-list = ["vda"]
 lvm.maxroot = 250
 
 [first-boot]
@@ -67,6 +68,7 @@ apt install -y dnsmasq xterm
 systemctl disable --now dnsmasq
 
 # shut down to signal to virt-install that installation is complete
+# in theory this isn't necessary because of 'reboot-mode = "power-off"' but that doesn't seem to work.
 poweroff
 EOFONFIRSTBOOT
 
@@ -81,7 +83,7 @@ RUN apt-get update && apt-get install -y \
 
 RUN mkdir -p /iso
 
-RUN wget -q -O /iso/proxmox.iso https://enterprise.proxmox.com/iso/proxmox-ve_8.3-1.iso
+RUN wget -q -O /iso/proxmox.iso https://enterprise.proxmox.com/iso/proxmox-ve_8.4-1.iso
 
 RUN echo "deb http://download.proxmox.com/debian/pve/ bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve.list
 RUN wget -O- http://download.proxmox.com/debian/proxmox-release-bookworm.gpg | apt-key add -

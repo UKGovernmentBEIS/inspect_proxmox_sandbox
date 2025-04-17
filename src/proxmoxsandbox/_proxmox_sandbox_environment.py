@@ -488,6 +488,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         CHUNK_SIZE = (
             40 * 1024
         )  # 40KB chunks to be safe, to take base64 encoding into account
+        # note this 40KB limit was based on the Proxmox <=8.3 limit of
+        # 60Kb, but this was increased in Proxmox 8.4, so could 
+        # potentially be increased here. Would need to check the
+        # version number to ensure backward compatibility.
 
         await self.exec(cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())])
 
@@ -506,10 +510,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         tmp_start = f"/tmp/{__name__}_write_file_{time.time_ns()}_"
 
-        # Create temporary directory path
         temp_dir = f"{tmp_start}split_{Path(file).name}"
         try:
-            # Create temp directory
             await self.exec(cmd=["mkdir", "-p", "--", temp_dir])
 
             # Write chunks to temp files with zero-padded numbers
@@ -528,7 +530,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             await self.exec(cmd=["sh", combine_script_path])
 
         finally:
-            # Clean up temporary files
             await self.exec(cmd=["rm", "-rf", temp_dir])
 
     @override

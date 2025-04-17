@@ -105,6 +105,7 @@ sandbox=SandboxEnvironmentSpec(
                 vm_source_config=VmSourceConfig(
                     ova=Path("./tests/oVirtTinyCore64-13.11.ova")
                 ),
+                os_type: "win10" # optional, default "l26".
             ),
             # A virtual machine to clone from an existing template VM.
             # This is *not recommended* since it is dependent on configuring a 

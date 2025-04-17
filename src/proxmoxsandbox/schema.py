@@ -156,7 +156,7 @@ class VmConfig(BaseModel, frozen=True):
         disk_controller: The disk controller type. If unset, defaults to "scsi"
         nic_controller: The NIC controller type. If unset, defaults to "virtio".
             This is applied to all virtual network interfaces.
-        os_type: The OS type. If unset, defaults to "l26". See
+        os_type: The OS type. If unset, defaults to "l26". Only for OVA. See
             https://pve.proxmox.com/wiki/Manual:_qm.conf for more details
 
     Note on nics configuration:
