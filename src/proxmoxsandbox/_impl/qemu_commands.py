@@ -317,6 +317,9 @@ class QemuCommands(abc.ABC):
                     await self.task_wrapper.do_action_and_wait_for_tasks(
                         convert_to_template
                     )
+
+                    await self.remove_existing_nics(new_vm_template_id)
+
                 else:
                     new_vm_template_id = found_existing_template
 
