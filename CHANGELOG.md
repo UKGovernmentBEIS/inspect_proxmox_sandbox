@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 - 2025-05-13
+
+- Fix sandbox_cleanup=False being ignored when sample setup fails
+ 
 ## 0.5.0 - 2025-04-17
 
 - Add machine type option (Linux, Windows, etc.)
