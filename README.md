@@ -185,6 +185,14 @@ from a Proxmox server in qcow2 format (instructions for this can be found online
 Once you have the disk images locally, you can use the convenience script `src/proxmoxsandbox/scripts/ova/convert_ova.sh`
 to convert it into an OVA.
 
+This provider creates a template VM for every OVA-type VM specified in an eval.
+Next time you run the eval, a linked clone of the template VM will be created.
+This is for performance. If you change the OVA, as long as the filesize changes, 
+a new template VM will be created.
+
+These template VMs are *not* cleaned up because that needs to happen outside
+the lifecycle of an Inspect eval. You need to do this manually at the moment.
+
 ## Observing the VMs
 
 Note, if you are having problems, then setting Inspect's `sandbox_cleanup=False` will be helpful.
@@ -243,12 +251,10 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 ## Feature Roadmap
 
 - Proxmox server health and config check
-- Demo evals
 - Normalize having a pfSense VM as the default route for networking
 - Firewall off the SDN from the Proxmox server and from other SDNs
 - Add more built-in VMs (Debian, Kali)
 - Support cloud-init for VM definition
-- Cache VM definition as tagged template VMs
 - Escape hatch for Proxmox API so you can specify arbitrary parameters during VM / SDN creation 
 
 ## Tech debt

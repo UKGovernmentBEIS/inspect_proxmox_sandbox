@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0 - 2025-05-14
+
+- Performance enhancement: OVAs generate template VMs, per-sample VMs are now linked clones.
+
 ## 0.5.1 - 2025-05-13
 
 - Fix sandbox_cleanup=False being ignored when sample setup fails

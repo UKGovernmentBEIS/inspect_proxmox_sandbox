@@ -370,7 +370,7 @@ runcmd:
                         + "format=qcow2,cache=writeback",
                         "scsihw": "virtio-scsi-single",
                         "net0": f"virtio,bridge={vnet_id}",
-                        "serial0" : "socket",
+                        "serial0": "socket",
                         "start": False,
                         "agent": "enabled=1",
                     },
