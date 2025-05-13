@@ -52,6 +52,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     vm_id: int
     all_vm_ids: Tuple[int, ...]
     sdn_zone_id: str | None
+    proxmox_version: Dict | None = None
+    proxmox_api: AsyncProxmoxAPI
 
     def __init__(
         self,
@@ -71,6 +73,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.vm_id = vm_id
         self.all_vm_ids = all_vm_ids
         self.sdn_zone_id = sdn_zone_id
+        self.proxmox_api = proxmox
+        self.proxmox_version = None
 
     # originally from k8s sandbox
     def _pipe_user_input(self, stdin: str | bytes) -> str:
@@ -481,17 +485,39 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 raise ex
 
     @override
+    async def _get_chunk_size(self) -> int:
+        """Determine the appropriate chunk size based on Proxmox version.
+        
+        Returns:
+            int: Chunk size in bytes
+        """
+        try:
+            # Cache the version info to avoid repeated API calls
+            if self.proxmox_version is None:
+                self.proxmox_version = await self.proxmox_api.get_version()
+            
+            # Parse version string (e.g., "8.4.5")
+            version_str = self.proxmox_version.get("version", "0.0.0")
+            major, minor, *_ = [int(v) for v in version_str.split(".") + ["0", "0"]]
+            
+            # Proxmox 8.4+ has a 512 KiB limit, older versions have 64 KiB limit
+            if major > 8 or (major == 8 and minor >= 4):
+                # Use 300 KiB for Proxmox 8.4+, keeping some margin for safety
+                return 300 * 1024
+            else:
+                # Use 40 KiB for older Proxmox, keeping safe margin for base64 encoding
+                return 40 * 1024
+        except Exception as e:
+            # If we can't determine the version, use the safe default
+            self.logger.warning(f"Failed to determine Proxmox version: {e}")
+            return 40 * 1024
+
     async def write_file(self, file: str, contents: str | bytes) -> None:
         # Writes contents to file, handling large files by splitting them into chunks
         # and recombining using cat.
 
-        CHUNK_SIZE = (
-            40 * 1024
-        )  # 40KB chunks to be safe, to take base64 encoding into account
-        # note this 40KB limit was based on the Proxmox <=8.3 limit of
-        # 60Kb, but this was increased in Proxmox 8.4, so could 
-        # potentially be increased here. Would need to check the
-        # version number to ensure backward compatibility.
+        # Determine chunk size based on Proxmox version
+        CHUNK_SIZE = await self._get_chunk_size()
 
         await self.exec(cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())])
 
