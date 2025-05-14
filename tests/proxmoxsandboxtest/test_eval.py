@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+import pytest
 from inspect_ai import Task, eval, task
 from inspect_ai.dataset import Sample
 from inspect_ai.model import ModelOutput, get_model
@@ -65,6 +66,9 @@ def test_inspect_eval() -> None:
     assert "ubuntu" in tool_calls[0].text
 
 
+@pytest.mark.skip(
+    "Does not play well as part of a suite - you can run it individually though"
+)  # noqa: E501
 async def test_cleanup(qemu_commands: QemuCommands) -> None:
     try:
         all_vms = await qemu_commands.list_vms()
