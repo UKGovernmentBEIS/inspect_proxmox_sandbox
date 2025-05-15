@@ -177,7 +177,6 @@ runcmd:
                 await self.storage_commands.upload_file_to_storage(
                     file=temp_file_path,
                     content_type="iso",
-                    overwrite=True,
                     filename=filename,
                 )
 

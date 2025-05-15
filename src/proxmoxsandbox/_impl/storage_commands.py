@@ -28,27 +28,28 @@ class StorageCommands(abc.ABC):
         file: Path,
         content_type: Literal["iso", "vztmpl", "import"],
         filename: Optional[str] = None,
-        overwrite: bool = False,
+        size_check: Optional[int] = None,
     ) -> None:
         """
         Uploads a file to Proxmox storage.
 
         Args:
-            storage: The storage name in Proxmox
-            file: Path to the file
+            storage: The storage name in Proxmox, e.g. 'local'
+            file: local path to the file
             content_type: One of the file types supported by Proxmox
-            filename: The filename to use for the file in Proxmox storage.
+            filename: The filename to use for the remote file in Proxmox storage.
                 If not provided, the filename of the file will be used.
-            overwrite: Whether to overwrite the file if it already exists.
-                If False, this function will return immediately
-                if the file already exists.
+            size_check: If provided, the file will be uploaded only if
+                if it does not exist remotely already, or if it does exist and the
+                local file size is different from the remote.
+                If not provided, the file will be uploaded always.
         """
         if not isinstance(file, Path):
             raise ValueError(f"{file=} must be a Path; got {type(file)}")
 
         if filename is None:
             filename = file.name
-        if not overwrite:
+        if size_check is not None:
             existing_content = await self.async_proxmox.request(
                 "GET",
                 f"/nodes/{self.node}/storage/{self.storage}/content?content={content_type}",
@@ -57,11 +58,14 @@ class StorageCommands(abc.ABC):
                 if "volid" in existing_file and existing_file["volid"].endswith(
                     filename
                 ):
+                    size_match = existing_file["size"] == size_check
                     self.logger.debug(
                         f"File {filename} already exists in storage {self.storage}"
-                        + f" on node {self.node} at {existing_file['volid']}"
+                        + f" on node {self.node} at {existing_file['volid']};"
+                        + f" {size_match=}"
                     )
-                    return
+                    if size_match:
+                        return
 
         async def do_upload():
             await self.async_proxmox.upload_file_with_curl(

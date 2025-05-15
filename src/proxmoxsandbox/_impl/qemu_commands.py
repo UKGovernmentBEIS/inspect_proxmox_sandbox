@@ -252,6 +252,7 @@ class QemuCommands(abc.ABC):
                     await self.storage_commands.upload_file_to_storage(
                         file=vm_config.vm_source_config.ova,
                         content_type="import",
+                        size_check=ova_size,
                     )
 
                     json_for_create: ProxmoxJsonDataType = {
