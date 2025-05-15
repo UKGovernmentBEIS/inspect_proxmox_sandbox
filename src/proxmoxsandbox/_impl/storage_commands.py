@@ -1,7 +1,7 @@
 import abc
 from logging import getLogger
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
@@ -40,7 +40,7 @@ class StorageCommands(abc.ABC):
             filename: The filename to use for the remote file in Proxmox storage.
                 If not provided, the filename of the file will be used.
             size_check: If provided, the file will be uploaded only if
-                if it does not exist remotely already, or if it does exist and the
+                it does not exist remotely already, or if it does exist and the
                 local file size is different from the remote.
                 If not provided, the file will be uploaded always.
         """
@@ -74,7 +74,7 @@ class StorageCommands(abc.ABC):
 
         await self.task_wrapper.do_action_and_wait_for_tasks(do_upload)
 
-    async def list_storage(self) -> list[dict[str, str]]:
+    async def list_storage(self) -> list[dict[str, Any]]:
         return await self.async_proxmox.request(
             "GET", f"/nodes/{self.node}/storage/{self.storage}/content"
         )
