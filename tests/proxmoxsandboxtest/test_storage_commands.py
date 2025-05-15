@@ -14,11 +14,7 @@ async def test_upload_size_check_different(
 ) -> None:
     test_iso_name = "test_upload_size_check_different.iso"
 
-    await async_proxmox_api.request(
-        method="DELETE",
-        path=f"/nodes/{storage_commands.node}/storage/{storage_commands.storage}/content/local:iso/{test_iso_name}",
-        raise_errors=True,  # this does *not* error if the file does not exist; rather this is a sanity check that the connection, auth etc. is working  # noqa: E501
-    )
+    await delete_existing_iso(storage_commands, async_proxmox_api, test_iso_name)
 
     try:
         temp_iso = await create_temp_iso("abc")
@@ -55,11 +51,7 @@ async def test_upload_size_check_same(
 ) -> None:
     test_iso_name = "test_upload_size_check_same.iso"
 
-    await async_proxmox_api.request(
-        method="DELETE",
-        path=f"/nodes/{storage_commands.node}/storage/{storage_commands.storage}/content/local:iso/{test_iso_name}",
-        raise_errors=True,  # this does *not* error if the file does not exist; rather this is a sanity check that the connection, auth etc. is working  # noqa: E501
-    )
+    await delete_existing_iso(storage_commands, async_proxmox_api, test_iso_name)
 
     try:
         temp_iso = await create_temp_iso("abc")
@@ -97,11 +89,7 @@ async def test_upload_no_size_check(
 ) -> None:
     test_iso_name = "test_upload_no_size_check.iso"
 
-    await async_proxmox_api.request(
-        method="DELETE",
-        path=f"/nodes/{storage_commands.node}/storage/{storage_commands.storage}/content/local:iso/{test_iso_name}",
-        raise_errors=True,  # this does *not* error if the file does not exist; rather this is a sanity check that the connection, auth etc. is working  # noqa: E501
-    )
+    await delete_existing_iso(storage_commands, async_proxmox_api, test_iso_name)
 
     try:
         temp_iso = await create_temp_iso("def")
@@ -127,16 +115,12 @@ async def test_upload_no_size_check(
         temp_iso.unlink()
 
 
-async def find_uploaded_iso(
-    storage_commands: StorageCommands, test_iso_name: str
-) -> dict:
-    content_including_upload = await storage_commands.list_storage()
-
-    return [
-        content
-        for content in content_including_upload
-        if content["volid"] == f"local:iso/{test_iso_name}"
-    ][0]
+async def delete_existing_iso(storage_commands, async_proxmox_api, test_iso_name):
+    await async_proxmox_api.request(
+        method="DELETE",
+        path=f"/nodes/{storage_commands.node}/storage/{storage_commands.storage}/content/local:iso/{test_iso_name}",
+        raise_errors=True,  # this does *not* error if the file does not exist; rather this is a sanity check that the connection, auth etc. is working  # noqa: E501
+    )
 
 
 async def create_temp_iso(content: str) -> Path:
@@ -158,3 +142,15 @@ async def create_temp_iso(content: str) -> Path:
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".iso")
     iso.write_fp(cast(BinaryIO, temp_file))
     return Path(temp_file.name)
+
+
+async def find_uploaded_iso(
+    storage_commands: StorageCommands, test_iso_name: str
+) -> dict:
+    content_including_upload = await storage_commands.list_storage()
+
+    return [
+        content
+        for content in content_including_upload
+        if content["volid"] == f"local:iso/{test_iso_name}"
+    ][0]
