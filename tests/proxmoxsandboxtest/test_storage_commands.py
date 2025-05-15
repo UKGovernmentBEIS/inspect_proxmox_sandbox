@@ -9,10 +9,10 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.storage_commands import StorageCommands
 
 
-async def test_upload_size_check(
+async def test_upload_size_check_different(
     storage_commands: StorageCommands, async_proxmox_api: AsyncProxmoxAPI
 ) -> None:
-    test_iso_name = "test_upload_size_check.iso"
+    test_iso_name = "test_upload_size_check_different.iso"
 
     await async_proxmox_api.request(
         method="DELETE",
@@ -41,6 +41,83 @@ async def test_upload_size_check(
             content_type="iso",
             filename=test_iso_name,
             size_check=test_iso_size - 1,  # lie about the size to induce re-upload
+        )
+
+        test_iso_reuploaded = await find_uploaded_iso(storage_commands, test_iso_name)
+
+        assert test_iso_uploaded["ctime"] != test_iso_reuploaded["ctime"]
+    finally:
+        temp_iso.unlink()
+
+
+async def test_upload_size_check_same(
+    storage_commands: StorageCommands, async_proxmox_api: AsyncProxmoxAPI
+) -> None:
+    test_iso_name = "test_upload_size_check_same.iso"
+
+    await async_proxmox_api.request(
+        method="DELETE",
+        path=f"/nodes/{storage_commands.node}/storage/{storage_commands.storage}/content/local:iso/{test_iso_name}",
+        raise_errors=True,  # this does *not* error if the file does not exist; rather this is a sanity check that the connection, auth etc. is working  # noqa: E501
+    )
+
+    try:
+        temp_iso = await create_temp_iso("abc")
+
+        await storage_commands.upload_file_to_storage(
+            file=temp_iso,
+            content_type="iso",
+            filename=test_iso_name,
+            size_check=temp_iso.stat().st_size,
+        )
+
+        test_iso_uploaded = await find_uploaded_iso(storage_commands, test_iso_name)
+
+        test_iso_size = temp_iso.stat().st_size
+
+        assert test_iso_uploaded["size"] == test_iso_size
+
+        await storage_commands.upload_file_to_storage(
+            file=temp_iso,
+            content_type="iso",
+            filename=test_iso_name,
+            size_check=test_iso_size,
+        )
+
+        test_iso_reuploaded = await find_uploaded_iso(storage_commands, test_iso_name)
+
+        # reupload should have had no effect
+        assert test_iso_uploaded["ctime"] == test_iso_reuploaded["ctime"]
+    finally:
+        temp_iso.unlink()
+
+
+async def test_upload_no_size_check(
+    storage_commands: StorageCommands, async_proxmox_api: AsyncProxmoxAPI
+) -> None:
+    test_iso_name = "test_upload_no_size_check.iso"
+
+    await async_proxmox_api.request(
+        method="DELETE",
+        path=f"/nodes/{storage_commands.node}/storage/{storage_commands.storage}/content/local:iso/{test_iso_name}",
+        raise_errors=True,  # this does *not* error if the file does not exist; rather this is a sanity check that the connection, auth etc. is working  # noqa: E501
+    )
+
+    try:
+        temp_iso = await create_temp_iso("def")
+
+        await storage_commands.upload_file_to_storage(
+            file=temp_iso,
+            content_type="iso",
+            filename=test_iso_name,
+        )
+
+        test_iso_uploaded = await find_uploaded_iso(storage_commands, test_iso_name)
+
+        await storage_commands.upload_file_to_storage(
+            file=temp_iso,
+            content_type="iso",
+            filename=test_iso_name,
         )
 
         test_iso_reuploaded = await find_uploaded_iso(storage_commands, test_iso_name)
