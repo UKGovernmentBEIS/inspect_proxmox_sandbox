@@ -201,6 +201,7 @@ async def test_from_ova_local(qemu_commands: QemuCommands):
                 # but converted to OVA and checked in here
                 ova=CURRENT_DIR / ".." / "oVirtTinyCore64-13.11.ova"
             ),
+            name="test-from-ova-local",
             nics=(),
             uefi_boot=False,
             is_sandbox=True,
@@ -281,6 +282,7 @@ async def test_restore_from_backup(
             vm_source_config=VmSourceConfig(
                 ova=CURRENT_DIR / ".." / "oVirtTinyCore64-13.11.ova"
             ),
+            name="test-restore-from-backup",
             nics=(),
             is_sandbox=True,
         ),

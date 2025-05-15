@@ -233,6 +233,7 @@ class QemuCommands(abc.ABC):
                 ova_size = vm_config.vm_source_config.ova.stat().st_size
                 ova_tag = f"ova-{vm_config.vm_source_config.ova.name}-{ova_size}"
                 ova_tag = re.sub(r"[^a-zA-Z0-9_\-]", "_", ova_tag)
+                ova_tag = ova_tag.to
 
                 existing_vms = await self.list_vms()
 
