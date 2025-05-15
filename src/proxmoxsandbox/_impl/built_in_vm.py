@@ -1,11 +1,13 @@
 import abc
 import os
 import tempfile
+from io import BytesIO
 from ipaddress import ip_address, ip_network
 from logging import getLogger
 from pathlib import Path
 from typing import BinaryIO, Dict, cast, get_args
 
+import pycdlib
 import tenacity
 from inspect_ai.util import trace_action
 
@@ -134,10 +136,6 @@ runcmd:
 
         The ISO is created in a temporary file and then uploaded to Proxmox.
         """
-        from io import BytesIO
-
-        import pycdlib
-
         iso = pycdlib.PyCdlib()
         iso.new(interchange_level=3, joliet=3, rock_ridge="1.12", vol_ident="CIDATA")
 

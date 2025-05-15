@@ -73,3 +73,8 @@ class StorageCommands(abc.ABC):
             )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(do_upload)
+
+    async def list_storage(self) -> list[dict[str, str]]:
+        return await self.async_proxmox.request(
+            "GET", f"/nodes/{self.node}/storage/{self.storage}/content"
+        )
