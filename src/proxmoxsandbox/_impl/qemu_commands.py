@@ -1,4 +1,5 @@
 import abc
+import re
 import tarfile
 from contextvars import ContextVar
 from logging import getLogger
@@ -229,67 +230,109 @@ class QemuCommands(abc.ABC):
                     f"Not supported: {type(vm_config.vm_source_config.ova)}"
                 )
             if isinstance(vm_config.vm_source_config.ova, Path):
-                await self.storage_commands.upload_file_to_storage(
-                    file=vm_config.vm_source_config.ova,
-                    content_type="import",
-                )
+                ova_size = vm_config.vm_source_config.ova.stat().st_size
+                ova_tag = f"ova-{vm_config.vm_source_config.ova.name}-{ova_size}"
+                ova_tag = re.sub(r"[^a-zA-Z0-9_\-]", "_", ova_tag)
+                ova_tag = ova_tag.lower()
 
-                json_for_create: ProxmoxJsonDataType = {
-                    "node": self.node,
-                    "cpu": "host",
-                    "ostype": vm_config.os_type,
-                    "scsihw": "virtio-scsi-single",
-                    "start": False,
-                }
+                existing_vms = await self.list_vms()
 
-                disk_prefix = (
-                    "scsi"
-                    if vm_config.disk_controller is None
-                    else vm_config.disk_controller
-                )
+                found_existing_template = None
+                for existing_vm in existing_vms:
+                    if (
+                        "tags" in existing_vm
+                        and "template" in existing_vm
+                        and existing_vm["template"] == 1
+                        and "inspect" in existing_vm["tags"].split(";")
+                        and ova_tag in existing_vm["tags"].split(";")
+                    ):
+                        found_existing_template = existing_vm["vmid"]
+                        break
 
-                self.other_config_json(vm_config, json_for_create)
-
-                vmdks = []
-                with tarfile.open(vm_config.vm_source_config.ova, "r") as tar:
-                    file_list = tar.getnames()
-
-                    for file_name in file_list:
-                        if file_name.endswith(".vmdk"):
-                            vmdks.append(file_name)
-
-                # this logic is reverse-engineered from the Proxmox GUI
-                # and may be brittle
-                for i, vmdk in enumerate(vmdks):
-                    json_for_create[f"{disk_prefix}{i}"] = (
-                        f"local-lvm:0,import-from={self.storage}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
+                if found_existing_template is None:
+                    await self.storage_commands.upload_file_to_storage(
+                        file=vm_config.vm_source_config.ova,
+                        content_type="import",
+                        size_check=ova_size,
                     )
 
-                new_vm_id = await self.find_next_available_vm_id()
-                json_for_create["vmid"] = new_vm_id
+                    json_for_create: ProxmoxJsonDataType = {
+                        "node": self.node,
+                        "cpu": "host",
+                        "ostype": vm_config.os_type,
+                        "scsihw": "virtio-scsi-single",
+                        "start": False,
+                    }
 
-                with trace_action(
-                    self.logger,
-                    self.TRACE_NAME,
-                    f"create VM from OVA {new_vm_id=}",
-                ):
+                    disk_prefix = (
+                        "scsi"
+                        if vm_config.disk_controller is None
+                        else vm_config.disk_controller
+                    )
 
-                    async def create() -> None:
-                        await self.async_proxmox.request(
-                            "POST", f"/nodes/{self.node}/qemu", json=json_for_create
+                    self.other_config_json(vm_config, json_for_create)
+
+                    vmdks = []
+                    with tarfile.open(vm_config.vm_source_config.ova, "r") as tar:
+                        file_list = tar.getnames()
+
+                        for file_name in file_list:
+                            if file_name.endswith(".vmdk"):
+                                vmdks.append(file_name)
+
+                    # this logic is reverse-engineered from the Proxmox GUI
+                    # and may be brittle
+                    for i, vmdk in enumerate(vmdks):
+                        json_for_create[f"{disk_prefix}{i}"] = (
+                            f"local-lvm:0,import-from={self.storage}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
                         )
-                        await self.register_created_vm(new_vm_id)
 
-                    await self.task_wrapper.do_action_and_wait_for_tasks(create)
+                    new_vm_template_id = await self.find_next_available_vm_id()
+                    json_for_create["vmid"] = new_vm_template_id
 
-                await self.configure_network_and_tags(
-                    vm_config, sdn_vnet_aliases, new_vm_id
+                    with trace_action(
+                        self.logger,
+                        self.TRACE_NAME,
+                        f"create VM from OVA {new_vm_template_id=}",
+                    ):
+
+                        async def create() -> None:
+                            await self.async_proxmox.request(
+                                "POST", f"/nodes/{self.node}/qemu", json=json_for_create
+                            )
+
+                        await self.task_wrapper.do_action_and_wait_for_tasks(create)
+
+                    await self.configure_network_and_tags(
+                        vm_config=vm_config,
+                        sdn_vnet_aliases=sdn_vnet_aliases,
+                        vm_id=new_vm_template_id,
+                        extra_tags=[ova_tag],
+                    )
+
+                    async def convert_to_template() -> None:
+                        await self.async_proxmox.request(
+                            "POST",
+                            f"/nodes/{self.node}/qemu/{new_vm_template_id}/template",
+                        )
+
+                    await self.task_wrapper.do_action_and_wait_for_tasks(
+                        convert_to_template
+                    )
+
+                    await self.remove_existing_nics(new_vm_template_id)
+
+                else:
+                    new_vm_template_id = found_existing_template
+
+                new_vm_id = await self.clone_vm_and_start(
+                    vm_config,
+                    new_vm_template_id,
+                    sdn_vnet_aliases,
+                    vm_config.is_sandbox,
                 )
+                await self.register_created_vm(new_vm_id)
 
-                await self.start_and_await(
-                    vm_id=new_vm_id,
-                    is_sandbox=vm_config.is_sandbox,
-                )
             else:
                 raise NotImplementedError(
                     f"Not supported: {type(vm_config.vm_source_config.ova)}"

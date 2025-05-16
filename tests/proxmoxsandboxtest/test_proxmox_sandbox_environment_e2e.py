@@ -183,7 +183,8 @@ async def test_ova() -> None:
             VmConfig(
                 vm_source_config=VmSourceConfig(
                     ova=CURRENT_DIR / ".." / "oVirtTinyCore64-13.11.ova"
-                )
+                ),
+                name="test-ova"
             ),
         )
     )

@@ -51,8 +51,8 @@ The tests require your Proxmox node to have at least 3 vCPUs available.
 checks manually:
 
 ```bash
-ruff check .
-ruff format .
+uv run ruff check .
+uv run ruff format .
 ```
 
 ## Type Checking

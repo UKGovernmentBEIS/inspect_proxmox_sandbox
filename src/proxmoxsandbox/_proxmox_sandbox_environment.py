@@ -260,19 +260,20 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         environments: Dict[str, SandboxEnvironment],
         interrupted: bool,
     ) -> None:
-        any_vm_sandbox_environment: ProxmoxSandboxEnvironment | None = None
-        for env in environments.values():
-            if isinstance(env, ProxmoxSandboxEnvironment):
-                # we only need a single VM sandbox to have enough information
-                # to tear them all down
-                any_vm_sandbox_environment = env
+        if not interrupted:
+            any_vm_sandbox_environment: ProxmoxSandboxEnvironment | None = None
+            for env in environments.values():
+                if isinstance(env, ProxmoxSandboxEnvironment):
+                    # we only need a single VM sandbox to have enough information
+                    # to tear them all down
+                    any_vm_sandbox_environment = env
 
-        if any_vm_sandbox_environment is not None:
-            async with concurrency("proxmox", 1):
-                await any_vm_sandbox_environment.infra_commands.delete_sdn_and_vms(
-                    sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
-                    vm_ids=any_vm_sandbox_environment.all_vm_ids,
-                )
+            if any_vm_sandbox_environment is not None:
+                async with concurrency("proxmox", 1):
+                    await any_vm_sandbox_environment.infra_commands.delete_sdn_and_vms(
+                        sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
+                        vm_ids=any_vm_sandbox_environment.all_vm_ids,
+                    )
         return None
 
     @classmethod
@@ -289,11 +290,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if not isinstance(config, ProxmoxSandboxEnvironmentConfig):
             raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
 
-        infra_commands = InfraCommands(
-            async_proxmox=cls._create_async_proxmox_api(config), node=config.node
-        )
-
         if cleanup:
+            infra_commands = InfraCommands(
+                async_proxmox=cls._create_async_proxmox_api(config), node=config.node
+            )
             await infra_commands.cleanup()
         else:
             print(

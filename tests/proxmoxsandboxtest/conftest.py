@@ -8,6 +8,7 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, VnetAliases
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
+from proxmoxsandbox._impl.storage_commands import StorageCommands
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
@@ -51,6 +52,13 @@ async def qemu_commands(async_proxmox_api: AsyncProxmoxAPI, node: str) -> QemuCo
 @pytest.fixture
 async def built_in_vm(async_proxmox_api: AsyncProxmoxAPI, node: str) -> BuiltInVM:
     return BuiltInVM(async_proxmox_api, node=node)
+
+
+@pytest.fixture
+async def storage_commands(
+    async_proxmox_api: AsyncProxmoxAPI, node: str
+) -> StorageCommands:
+    return StorageCommands(async_proxmox_api, node=node, storage="local")
 
 
 @pytest.fixture(scope="function")
