@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 - 2025-05-16
+
+- Bugfix: if no timeout is specified by Inspect for long-running exec, RetryError happens after 30s.
+- Docs: correct OVA docs to reflect recent 0.6.0 change
+
 ## 0.6.0 - 2025-05-14
 
 - Performance enhancement: OVAs generate template VMs, per-sample VMs are now linked clones.

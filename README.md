@@ -100,7 +100,6 @@ sandbox=SandboxEnvironmentSpec(
                 # extra_proxmox_native_config = dict() TODO
             ),
             # A virtual machine from a local OVA, which will be uploaded from here to the Proxmox server.
-            # Note, the OVA is not re-uploaded if it is changed locally, so must be manually deleted on the server in this case.
             VmConfig(
                 vm_source_config=VmSourceConfig(
                     ova=Path("./tests/oVirtTinyCore64-13.11.ova")
@@ -188,7 +187,8 @@ to convert it into an OVA.
 This provider creates a template VM for every OVA-type VM specified in an eval.
 Next time you run the eval, a linked clone of the template VM will be created.
 This is for performance. If you change the OVA, as long as the filesize changes, 
-a new template VM will be created.
+a new template VM will be created. If you change the OVA but the filesize remains
+the same, you should manually delete it from the Proxmox server.
 
 These template VMs are *not* cleaned up because that needs to happen outside
 the lifecycle of an Inspect eval. You need to do this manually at the moment.

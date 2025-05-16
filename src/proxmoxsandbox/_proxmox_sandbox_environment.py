@@ -333,7 +333,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(timeout if timeout is not None else 30),
+            stop=tenacity.stop_after_delay(timeout)
+            if timeout is not None
+            else tenacity.stop_never,
             retry=tenacity.retry_if_result(lambda x: x is False),
         )
         async def wait_for_exec(vm_id: int, exec_response_pid: int) -> bool | Dict:

@@ -87,8 +87,6 @@ class VmSourceConfig(BaseModel, frozen=True):
     Attributes:
         existing_vm_template_tag: Clone VM from existing Proxmox template with this tag
         ova: Create VM from this OVA file in the local (not Proxmox) filesystem.
-            Note, the OVA is not re-uploaded if it is changed locally, so must be
-            manually deleted on the server in this case.
         existing_backup_name: Create VM from existing Proxmox backup
         built_in: Use this provider's built-in VM template (currently "ubuntu24.04"
             is supported)
