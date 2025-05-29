@@ -169,7 +169,14 @@ class SdnCommands(abc.ABC):
         self, proxmox_ids_start: str, sdn_config: SdnConfigType
     ) -> Tuple[Optional[str], VnetAliases]:
         if sdn_config is None:
-            return None, []
+            # When sdn_config is None, we should still fetch existing VNETs
+            # so we can use them for VM network interfaces
+            all_vnets = await self.read_all_vnets()
+            vnet_aliases = []
+            for vnet in all_vnets:
+                if "vnet" in vnet and "alias" in vnet:
+                    vnet_aliases.append((vnet["vnet"], vnet["alias"]))
+            return None, vnet_aliases
 
         resolved_sdn_config: SdnConfig = (
             await self.generate_sdn_config() if sdn_config == "auto" else sdn_config
