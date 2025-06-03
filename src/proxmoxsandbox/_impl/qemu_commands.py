@@ -412,8 +412,8 @@ class QemuCommands(abc.ABC):
                 # Fetch all existing VNETs from Proxmox
                 all_vnets = await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
 
-                if all_vnets and "data" in all_vnets:
-                    for vnet in all_vnets["data"]:
+                if all_vnets:
+                    for vnet in all_vnets:
                         if "alias" in vnet and vnet["alias"]:
                             # Map alias to the actual VNET ID
                             existing_vnet_mapping[vnet["alias"]] = vnet["vnet"]
