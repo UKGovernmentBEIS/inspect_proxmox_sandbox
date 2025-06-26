@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0 - 2025-06-26
+
+- Increase timeout for VM CRUD operations
+- Remove "restore from backup" functionality as it was unused
+
 ## 0.6.1 - 2025-05-16
 
 - Bugfix: if no timeout is specified by Inspect for long-running exec, RetryError happens after 30s.

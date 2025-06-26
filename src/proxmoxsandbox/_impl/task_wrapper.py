@@ -30,7 +30,7 @@ class TaskWrapper(abc.ABC):
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(300),
+            stop=tenacity.stop_after_delay(1200),
             retry=tenacity.retry_if_result(lambda x: x is False),
         )
         async def new_tasks_are_complete() -> bool:
