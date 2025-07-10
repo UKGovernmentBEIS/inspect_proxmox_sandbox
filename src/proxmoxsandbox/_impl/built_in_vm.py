@@ -25,6 +25,7 @@ from proxmoxsandbox.schema import (
     VnetConfig,
 )
 
+VM_TIMEOUT = 1200
 
 class BuiltInVM(abc.ABC):
     logger = getLogger(__name__)
@@ -304,7 +305,7 @@ runcmd:
 
                 @tenacity.retry(
                     wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                    stop=tenacity.stop_after_delay(300),
+                    stop=tenacity.stop_after_delay(VM_TIMEOUT),
                 )
                 async def upload_complete() -> None:
                     if not await self.content_exists(storage, ova_name):
@@ -404,7 +405,7 @@ runcmd:
 
             @tenacity.retry(
                 wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                stop=tenacity.stop_after_delay(300),
+                stop=tenacity.stop_after_delay(VM_TIMEOUT),
                 retry=tenacity.retry_if_result(lambda x: x is False),
             )
             async def wait_for_cloud_init() -> bool:
@@ -441,7 +442,7 @@ runcmd:
 
             @tenacity.retry(
                 wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                stop=tenacity.stop_after_delay(300),
+                stop=tenacity.stop_after_delay(VM_TIMEOUT),
                 retry=tenacity.retry_if_result(lambda x: x is False),
             )
             async def is_template() -> bool:
