@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 - 2025-06-26
+## 0.7.0 - 2025-07-14
 
 - Increase timeout for VM CRUD operations
 - Remove "restore from backup" functionality as it was unused
