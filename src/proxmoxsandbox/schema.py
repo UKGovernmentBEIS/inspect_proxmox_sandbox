@@ -87,14 +87,12 @@ class VmSourceConfig(BaseModel, frozen=True):
     Attributes:
         existing_vm_template_tag: Clone VM from existing Proxmox template with this tag
         ova: Create VM from this OVA file in the local (not Proxmox) filesystem.
-        existing_backup_name: Create VM from existing Proxmox backup
         built_in: Use this provider's built-in VM template (currently "ubuntu24.04"
             is supported)
     """
 
     existing_vm_template_tag: str | None = None
     ova: Path | None = None
-    existing_backup_name: str | None = None
     # Ubuntu 24.04 is supported because an OVA is publicly available from a reliable
     # source.
     # Kali does not have such an OVA. There is no other way to upload a VM image to
@@ -109,7 +107,6 @@ class VmSourceConfig(BaseModel, frozen=True):
             for name, value in {
                 "existing_vm_template_tag": self.existing_vm_template_tag,
                 "ova": self.ova,
-                "existing_backup_name": self.existing_backup_name,
                 "built_in": self.built_in,
             }.items()
             if value is not None
@@ -161,8 +158,8 @@ class VmConfig(BaseModel, frozen=True):
     - If set, the VM will be connected to these VNets (one interface per VNet)
     - If set as the empty tuple (), the VM will not have any NICs
     - If left as the default None:
-        If the vm_source_config is existing_backup_name or existing_vm_template_tag,
-            the NICs will be left as configured in the existing VM backup or template.
+        If the vm_source_config is existing_vm_template_tag,
+            the NICs will be left as configured in the template.
         If the vm_source_config is ova or built_in, it will be connected to the first
             VNet.
     """

@@ -115,15 +115,6 @@ sandbox=SandboxEnvironmentSpec(
                     existing_vm_template_tag="java_server"
                 ),
             ),
-            # A virtual machine to restore from backup.
-            # This is *not recommended* since it is dependent on configuring a 
-            # customised Proxmox instance that contains the backup file before
-            # the eval start.
-            VmConfig(
-                vm_source_config=VmSourceConfig(
-                    existing_backup_name="vzdump-qemu-[vm id]-[datestamp of backup].vma.zst"
-                ),
-            ),
             # A virtual machine with no network access.
             VmConfig(
                 # ... snip ...           
@@ -161,20 +152,6 @@ sandbox=SandboxEnvironmentSpec(
     ),
 )
 ```
-
-## Using backup files
-
-Proxmox's HTTP API will not let you upload a `.zst` backup file.
-
-Instead:
-
-1. Upload your zst backups to S3 or a web server.
-2. Connect to the web frontend (see section Observing the VMs).
-3. Open Datacenter -> Proxmox node -> Shell.
-4. (If using S3) Paste in temporary AWS S3 credentials.
-5. Download the zst backups into /var/lib/vz/dump using the AWS S3 CLI or wget.
-
-![Demo of zst upload](docs/proxmox_shell.png "Getting a shell on Proxmox server")
 
 ## Using OVA files
 

@@ -55,7 +55,7 @@ class QemuCommands(abc.ABC):
     ) -> None:
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(300),
+            stop=tenacity.stop_after_delay(1200),
         )
         async def is_in_status() -> None:
             vm_status = await self.async_proxmox.request(
@@ -178,36 +178,7 @@ class QemuCommands(abc.ABC):
         if (vm_config.os_type != "l26") and (vm_config.vm_source_config.ova is None):
             raise NotImplementedError("os_type is only supported for OVA")
 
-        if vm_config.vm_source_config.existing_backup_name:
-            new_vm_id = await self.find_next_available_vm_id()
-            with trace_action(
-                self.logger,
-                self.TRACE_NAME,
-                f"create VM from backup {new_vm_id=}",
-            ):
-
-                async def create_from_backup() -> None:
-                    await self.async_proxmox.request(
-                        "POST",
-                        f"/nodes/{self.node}/qemu",
-                        json={
-                            "vmid": new_vm_id,
-                            "node": self.node,
-                            "archive": f"/var/lib/vz/dump/{vm_config.vm_source_config.existing_backup_name}",  # noqa: E501
-                        },
-                    )
-                    await self.register_created_vm(new_vm_id)
-
-                await self.task_wrapper.do_action_and_wait_for_tasks(create_from_backup)
-                await self.configure_network_and_tags(
-                    vm_config, sdn_vnet_aliases, new_vm_id, extra_tags=[]
-                )
-
-            await self.start_and_await(
-                vm_id=new_vm_id,
-                is_sandbox=vm_config.is_sandbox,
-            )
-        elif vm_config.vm_source_config.built_in:
+        if vm_config.vm_source_config.built_in:
             if vm_config.vm_source_config.built_in in ["ubuntu24.04"]:
                 vm_id_to_clone = built_in_vm_ids[vm_config.vm_source_config.built_in]
 
@@ -536,35 +507,6 @@ class QemuCommands(abc.ABC):
         await self.async_proxmox.request(
             "POST", f"/nodes/{self.node}/qemu/{vm_id}/agent/ping"
         )
-
-    async def create_backup(self, vm_id: int) -> Dict[str, Any]:
-        existing_backups = await self.async_proxmox.request(
-            "GET", f"/nodes/{self.node}/storage/local/content?content=backup"
-        )
-
-        async def do_backup():
-            await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/vzdump",
-                json={"vmid": vm_id, "compress": "zstd"},
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(do_backup)
-
-        all_backups = await self.async_proxmox.request(
-            "GET", f"/nodes/{self.node}/storage/local/content?content=backup"
-        )
-
-        # find the new backup; it will have a "volid" field not matching any volid in a
-        # dict in existing_backups:
-        new_backup = next(
-            backup
-            for backup in all_backups
-            if backup["volid"]
-            not in (existing["volid"] for existing in existing_backups)
-        )
-
-        return new_backup
 
     async def connection_url(self, vm_id: int) -> str:
         return f"{self.async_proxmox.base_url}/?console=kvm&novnc=1&vmid={vm_id}&node={self.node}"  # noqa: E501
