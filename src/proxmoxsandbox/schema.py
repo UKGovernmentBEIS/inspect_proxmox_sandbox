@@ -126,7 +126,9 @@ class VmNicConfig(BaseModel, frozen=True):
     Configuration for a virtual machine network interface.
 
     Attributes:
-        vnet_alias: The alias of the VNet to connect to
+        vnet_alias: The alias of the VNet to connect to. This can be either:
+            - An alias defined in the sdn_config
+            - An existing VNET alias in Proxmox (when sdn_config is None)
         mac: The MAC address for the network interface (optional)
     """
 
@@ -210,8 +212,9 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
         sdn_config: Software-defined networking configuration
             "auto": Create a simple SDN with a single subnet.  The IP addresses will not
                 be predictable as it depends on what subnets already exist.
-            None: no SDN will be created and the VMs will not be able to have any
-                network interfaces.
+            None: No SDN will be created. VMs can reference existing VNETs in Proxmox
+                by their aliases. This is an advanced feature and not recommended for
+                normal use.
             SdnConfig: Custom SDN configuration
         vms_config: Configurations for virtual machines
     """

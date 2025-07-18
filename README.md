@@ -115,6 +115,23 @@ sandbox=SandboxEnvironmentSpec(
                     existing_vm_template_tag="java_server"
                 ),
             ),
+            # A virtual machine that is connected to a predefined VNET.
+            # This is *not recommended* since it is dependent on configuring a
+            # customised Proxmox instance that contains SDN configurations before
+            # the eval start.
+            VmConfig(
+                vm_source_config=VmSourceConfig(
+                    built_in="ubuntu24.04"
+                ),
+                nics=(
+                    VmNicConfig(
+                        # If you reference a pre-existing VNET here, and
+                        # set sdn_config=None in the ProxmoxSandboxEnvironmentConfig,
+                        # it will look for the VNET alias in the existing Proxmox SDN.
+                        vnet_alias="existing vnet alias",
+                    ),
+                )
+            ),
             # A virtual machine with no network access.
             VmConfig(
                 # ... snip ...           
@@ -149,6 +166,31 @@ sandbox=SandboxEnvironmentSpec(
             # Set use_pve_ipam_dnsnmasq to True if you want your instances to be able to access the Internet
             use_pve_ipam_dnsnmasq=True,
         ),
+    ),
+)
+```
+
+### Using Existing Proxmox VNETs (Advanced/Not Recommended)
+
+**⚠️ WARNING**: This feature is intended for advanced users with specific integration requirements. For most use cases, you should let the sandbox manage its own network configuration using the standard `sdn_config` options.
+
+If you have an existing Proxmox environment with pre-configured VNETs that you need to connect to, you can reference them by setting `sdn_config=None` and using the VNET aliases in your VM configurations:
+
+```python
+sandbox = SandboxEnvironmentSpec(
+    type="proxmox",
+    config=ProxmoxSandboxEnvironmentConfig(
+        vms_config=(
+            VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                nics=(
+                    VmNicConfig(
+                        vnet_alias="existing-vnet-alias",  # Must match an existing VNET alias in Proxmox
+                    ),
+                ),
+            ),
+        ),
+        sdn_config=None,  # Disable SDN creation - use existing VNETs only
     ),
 )
 ```
