@@ -27,6 +27,7 @@ from proxmoxsandbox.schema import (
 
 VM_TIMEOUT = 1200
 
+
 class BuiltInVM(abc.ABC):
     logger = getLogger(__name__)
 

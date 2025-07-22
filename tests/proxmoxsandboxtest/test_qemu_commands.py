@@ -124,6 +124,46 @@ async def test_none_nic_from_built_in(
     await qemu_commands.destroy_vm(new_vm_id)
 
 
+async def test_existing_alias_from_built_in(
+    qemu_commands: QemuCommands,
+    built_in_vm: BuiltInVM,
+    sdn_commands: SdnCommands,
+):
+    built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
+
+    await built_in_vm.ensure_exists("ubuntu24.04")
+
+    sdn_zone_id, _ = await sdn_commands.create_sdn(
+        proxmox_ids_start="tea999",
+        sdn_config=SdnConfig(
+            vnet_configs=(VnetConfig(alias="my-alias"),), use_pve_ipam_dnsnmasq=False
+        ),
+    )
+
+    assert sdn_zone_id is not None
+
+    new_vm_id = await qemu_commands.create_and_start_vm(
+        # we didn't create any vnets in the eval, so this would be empty
+        sdn_vnet_aliases=[],
+        vm_config=VmConfig(
+            vm_source_config=built_in_ubuntu,
+            nics=(
+                VmNicConfig(
+                    vnet_alias="my-alias",
+                ),
+            ),
+        ),
+        built_in_vm_ids=await built_in_vm.known_builtins(),
+    )
+
+    new_vm = await qemu_commands.read_vm(new_vm_id)
+    assert "net0" in new_vm
+    assert "tea999" in new_vm["net0"]
+
+    await qemu_commands.destroy_vm(new_vm_id)
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id)
+
+
 async def test_multiple_nic(
     qemu_commands: QemuCommands,
     built_in_vm: BuiltInVM,
@@ -266,6 +306,3 @@ async def test_uefi(
     await qemu_commands.ping_qemu_agent(new_vm_id)
 
     await qemu_commands.destroy_vm(new_vm_id)
-
-
-

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.0 - 2025-07-22
+
+- Allow pre-existing VNet in VM config
+
 ## 0.7.0 - 2025-07-14
 
 - Increase timeout for VM CRUD operations

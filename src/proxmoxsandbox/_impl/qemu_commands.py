@@ -4,7 +4,7 @@ import tarfile
 from contextvars import ContextVar
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Dict, List, Set
 
 import tenacity
 from inspect_ai.util import trace_action
@@ -381,7 +381,9 @@ class QemuCommands(abc.ABC):
             existing_vnet_mapping = {}
             try:
                 # Fetch all existing VNETs from Proxmox
-                all_vnets = await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
+                all_vnets = await self.async_proxmox.request(
+                    "GET", "/cluster/sdn/vnets"
+                )
 
                 if all_vnets:
                     for vnet in all_vnets:
@@ -400,10 +402,13 @@ class QemuCommands(abc.ABC):
                     or vm_config.vm_source_config.ova
                 ):
                     await self.remove_existing_nics(vm_id)
-                    # Only add the first VNET if there are any defined in sdn_vnet_aliases
+                    # Only add the first VNET if
+                    # there are any defined in sdn_vnet_aliases
                     if sdn_vnet_aliases and len(sdn_vnet_aliases) > 0:
                         first_vnet_id = sdn_vnet_aliases[0][0]
-                        network_update_json["net0"] = f"{nic_prefix},bridge={first_vnet_id}"
+                        network_update_json["net0"] = (
+                            f"{nic_prefix},bridge={first_vnet_id}"
+                        )
                     # otherwise do nothing - no networks will be added
                 # for other vm_source_configs, we *do not touch* networking config
             else:
@@ -413,17 +418,25 @@ class QemuCommands(abc.ABC):
 
                 # For each NIC in the config
                 for i, nic in enumerate(vm_config.nics):
-                    # Check if the alias exists in our mapping first (from configured SDN)
+                    # Check if the alias exists in our mapping first
+                    # (from configured SDN)
                     if nic.vnet_alias in alias_mapping:
                         bridge_name = alias_mapping[nic.vnet_alias]
                     # Then check if it exists in existing VNETs
                     elif nic.vnet_alias in existing_vnet_mapping:
                         bridge_name = existing_vnet_mapping[nic.vnet_alias]
                     else:
-                        # If we can't find it anywhere, log what we found and raise an error
-                        self.logger.error(f"VNET alias '{nic.vnet_alias}' not found in Proxmox.")
-                        self.logger.error(f"Available aliases: {list(existing_vnet_mapping.keys())}")
-                        raise ValueError(f"VNET alias '{nic.vnet_alias}' not found in Proxmox")
+                        # If we can't find it anywhere,
+                        # log what we found and raise an error
+                        self.logger.error(
+                            f"VNET alias '{nic.vnet_alias}' not found in Proxmox."
+                        )
+                        self.logger.error(
+                            f"Available aliases: {list(existing_vnet_mapping.keys())}"
+                        )
+                        raise ValueError(
+                            f"VNET alias '{nic.vnet_alias}' not found in Proxmox"
+                        )
 
                     netx = f"{nic_prefix},bridge={bridge_name}"
                     if nic.mac:
