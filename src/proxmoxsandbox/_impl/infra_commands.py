@@ -3,6 +3,7 @@ import os
 import re
 import sys
 from logging import getLogger
+from random import randint
 from typing import Collection, Set, Tuple
 
 from inspect_ai.util import trace_action
@@ -80,6 +81,18 @@ class InfraCommands(abc.ABC):
             await self.qemu_commands.destroy_vm(vm_id=vm_id)
         if sdn_zone_id is not None:
             await self.sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id=sdn_zone_id)
+
+    async def find_proxmox_ids_start(self, task_name_start: str) -> str:
+        existing_zone_ids = set(
+            [zone["zone"] for zone in await self.sdn_commands.list_sdn_zones()]
+        )
+        zone_free = False
+        while not zone_free:
+            # IDs are 8 characters max unfortunately; we save two at the end to
+            # distinguish vnet/SDN objects
+            proxmox_ids_start = f"{task_name_start}{randint(0, 999):03d}"
+            zone_free = f"{proxmox_ids_start}z" not in existing_zone_ids
+        return proxmox_ids_start
 
     async def find_all_zones(self, vnet_ids: Collection[str]) -> Set[str]:
         return set(

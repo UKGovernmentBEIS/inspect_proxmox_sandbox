@@ -5,7 +5,6 @@ import shlex
 import time
 from logging import getLogger
 from pathlib import Path
-from random import randint
 from typing import Any, Dict, Generator, List, Tuple, Union
 
 import tenacity
@@ -136,6 +135,18 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         return "".join(generate())
 
+    @staticmethod
+    async def ensure_vms(
+        async_proxmox_api: AsyncProxmoxAPI, config: ProxmoxSandboxEnvironmentConfig
+    ) -> None:
+        built_in_vm = BuiltInVM(async_proxmox=async_proxmox_api, node=config.node)
+        built_in_names = set()
+        for vm_config in config.vms_config:
+            if vm_config.vm_source_config.built_in is not None:
+                built_in_names.add(vm_config.vm_source_config.built_in)
+        for built_in_name in built_in_names:
+            await built_in_vm.ensure_exists(built_in_name)
+
     @classmethod
     @override
     def config_files(cls) -> List[str]:
@@ -155,13 +166,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             if not isinstance(config, ProxmoxSandboxEnvironmentConfig):
                 raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
             async_proxmox_api = cls._create_async_proxmox_api(config)
-            built_in_vm = BuiltInVM(async_proxmox=async_proxmox_api, node=config.node)
-            built_in_names = set()
-            for vm_config in config.vms_config:
-                if vm_config.vm_source_config.built_in is not None:
-                    built_in_names.add(vm_config.vm_source_config.built_in)
-            for built_in_name in built_in_names:
-                await built_in_vm.ensure_exists(built_in_name)
+            await ProxmoxSandboxEnvironment.ensure_vms(async_proxmox_api, config)
         return None
 
     @classmethod
@@ -183,11 +188,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             async_proxmox=async_proxmox_api, node=config.node
         )
 
-        # 8 characters max unfortunately; we save two at the end to distinguish
-        # vnet/SDN objects
         task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
-        proxmox_ids_start = f"{task_name_start}{randint(0, 999):03d}"
-        # TODO: could check here for collisions
+
+        proxmox_ids_start = await infra_commands.find_proxmox_ids_start(task_name_start)
+
+        await ProxmoxSandboxEnvironment.ensure_vms(
+            async_proxmox_api=async_proxmox_api, config=config
+        )
 
         async with concurrency("proxmox", 1):
             vm_configs_with_ids, sdn_zone_id = await infra_commands.create_sdn_and_vms(

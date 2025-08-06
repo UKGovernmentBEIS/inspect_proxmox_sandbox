@@ -38,22 +38,9 @@ def task_for_test() -> Task:
 def test_inspect_eval() -> None:
     eval_logs = eval(
         tasks=[task_for_test()],
-        model=get_model(
-            "mockllm/model",
-            custom_outputs=[
-                ModelOutput.for_tool_call(
-                    model="mockllm/model",
-                    tool_name="bash",
-                    tool_arguments={"cmd": "uname -a"},
-                ),
-                ModelOutput.for_tool_call(
-                    model="mockllm/model",
-                    tool_name="submit",
-                    tool_arguments={"answer": "42"},
-                ),
-            ],
-        ),
+        model="mockllm/model",
         log_level="trace",
+        epochs=1000,
         # sandbox_cleanup=False
     )
 
