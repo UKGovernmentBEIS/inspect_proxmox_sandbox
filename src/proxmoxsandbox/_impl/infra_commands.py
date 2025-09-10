@@ -16,6 +16,7 @@ from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, SdnCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
+    ExistingVMConfig,
     SdnConfigType,
     VmConfig,
 )
@@ -45,7 +46,7 @@ class InfraCommands(abc.ABC):
         self,
         proxmox_ids_start: str,
         sdn_config: SdnConfigType,
-        vms_config: Tuple[VmConfig, ...],
+        vms_config: Tuple[VmConfig | ExistingVMConfig, ...],
     ):
         vm_configs_with_ids = []
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
@@ -56,11 +57,14 @@ class InfraCommands(abc.ABC):
 
         for vm_config in vms_config:
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
-                vm_id = await self.qemu_commands.create_and_start_vm(
-                    sdn_vnet_aliases=vnet_aliases,
-                    vm_config=vm_config,
-                    built_in_vm_ids=known_builtins,
-                )
+                if isinstance(vm_config, ExistingVMConfig):
+                    vm_id = vm_config.vm_id
+                else:
+                    vm_id = await self.qemu_commands.create_and_start_vm(
+                        sdn_vnet_aliases=vnet_aliases,
+                        vm_config=vm_config,
+                        built_in_vm_ids=known_builtins,
+                    )
                 vm_configs_with_ids.append((vm_id, vm_config))
 
         # TODO check for failed starts in the log somehow

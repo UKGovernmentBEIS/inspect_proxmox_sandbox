@@ -136,6 +136,19 @@ class VmNicConfig(BaseModel, frozen=True):
     mac: Optional[MacAddress] = None
 
 
+class ExistingVMConfig(BaseModel, frozen=True):
+    """
+    Configuration for connecting to an existing VM.
+
+    Attributes:
+        vm_id: The ID of the existing VM in Proxmox
+    """
+
+    vm_id: int
+    is_sandbox: bool = True
+    uefi_boot: bool = False
+
+
 class VmConfig(BaseModel, frozen=True):
     """
     Configuration for a virtual machine.
@@ -232,6 +245,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
     )
 
     sdn_config: SdnConfigType = "auto"
-    vms_config: Tuple[VmConfig, ...] = (
+    vms_config: Tuple[VmConfig | ExistingVMConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )

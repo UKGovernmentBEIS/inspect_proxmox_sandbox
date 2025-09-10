@@ -30,8 +30,10 @@ from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
+    ExistingVMConfig,
     ProxmoxSandboxEnvironmentConfig,
     SdnConfigType,
+    VmConfig,
 )
 
 
@@ -158,6 +160,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             built_in_vm = BuiltInVM(async_proxmox=async_proxmox_api, node=config.node)
             built_in_names = set()
             for vm_config in config.vms_config:
+                if isinstance(vm_config, ExistingVMConfig):
+                    continue
                 if vm_config.vm_source_config.built_in is not None:
                     built_in_names.add(vm_config.vm_source_config.built_in)
             for built_in_name in built_in_names:
