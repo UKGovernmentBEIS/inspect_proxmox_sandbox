@@ -224,7 +224,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 sandboxes["default"] = vm_sandbox_environment
                 found_default = True
             else:
-                sandboxes[f"vm_{vm_config_and_id[0]}"] = vm_sandbox_environment
+                sandbox_name = (
+                    vm_config_and_id[1].name
+                    if vm_config_and_id[1].name is not None
+                    else f"vm_{vm_config_and_id[0]}"
+                )
+                sandboxes[sandbox_name] = vm_sandbox_environment
 
         if not found_default:
             raise ValueError(
