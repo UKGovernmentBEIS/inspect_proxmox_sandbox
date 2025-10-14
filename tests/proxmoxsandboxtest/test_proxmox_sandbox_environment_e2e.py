@@ -241,6 +241,64 @@ async def test_connect(proxmox_sandbox_environment: ProxmoxSandboxEnvironment) -
     assert "open 'http" in connection.command
 
 
+async def test_access_by_name() -> None:
+    envs_dict: Dict[str, SandboxEnvironment] = {}
+    sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
+        vms_config=(
+            VmConfig(
+                vm_source_config=VmSourceConfig(
+                    built_in="ubuntu24.04",
+                ),
+                name="default",
+                is_sandbox=True,
+            ),
+            VmConfig(
+                vm_source_config=VmSourceConfig(
+                    built_in="ubuntu24.04",
+                ),
+                name="other-vm",
+                # We need to set this for the guest agent to be enabled on Proxmox.
+                is_sandbox=True,
+            ),
+        )
+    )
+    try:
+        _, envs_dict = await setup_sandbox("tabn", sandbox_env_config)
+        print(envs_dict)
+        # Sandbox VM stays "default"
+        sandbox = envs_dict["default"]
+        uname_result = await sandbox.exec(
+            [
+                "uname",
+                "-a",
+            ]
+        )
+        assert uname_result.success, f"Failed to run uname: {uname_result=}"
+        assert "Ubuntu" in uname_result.stdout, (
+            f"Unexpected result of uname: {uname_result.stdout=}"
+        )
+        # We can access this one via its name now
+        sandbox = envs_dict["other-vm"]
+        uname_result = await sandbox.exec(
+            [
+                "uname",
+                "-a",
+            ]
+        )
+        assert uname_result.success, f"Failed to run uname: {uname_result=}"
+        assert "Ubuntu" in uname_result.stdout, (
+            f"Unexpected result of uname: {uname_result.stdout=}"
+        )
+
+    finally:
+        await ProxmoxSandboxEnvironment.sample_cleanup(
+            task_name="unused",
+            config=sandbox_env_config,
+            environments=envs_dict,
+            interrupted=False,
+        )
+
+
 async def test_cli_cleanup(
     qemu_commands: QemuCommands, sdn_commands: SdnCommands
 ) -> None:
