@@ -176,7 +176,7 @@ It is recommended that you set the `name=` parameter for your defined VMs. This 
 - It will be displayed in the Proxmox web interface
 - It will be the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
 
-You should avoid setting the same name for multiple VMs as this will cause conflicts; later VMs with the same name will overwrite earlier ones. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`.
+You should avoid setting the same name for multiple VMs as this will cause conflicts in how Inspect references your VMs; later VMs with the same name will overwrite earlier ones in the sandbox name mapping. While both VMs would still be created in Proxmox, only the last one would be accessible through its name in Inspect. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`.
 
 > Note: The (first) sandbox VM is automatically named `default` internally, so you can always access it with `sandbox("default")`, regardless of any custom name you might set for it.
 
