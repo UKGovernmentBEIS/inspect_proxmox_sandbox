@@ -280,6 +280,7 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 
 ## Feature Roadmap
 
+- qcow disk image for Proxmox 9.0+
 - Proxmox server health and config check
 - Normalize having a pfSense VM as the default route for networking
 - Firewall off the SDN from the Proxmox server and from other SDNs
