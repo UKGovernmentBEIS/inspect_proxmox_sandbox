@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2 - 2025-10-15
+
+- Change how VM names are registered as Inspect environments
+
 ## 0.8.1 - 2025-08-06
 
 - Fix initialization of built-in VM in certain cases

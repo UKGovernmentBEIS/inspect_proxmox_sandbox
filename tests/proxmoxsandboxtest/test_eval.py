@@ -66,6 +66,17 @@ def test_inspect_eval() -> None:
     assert "ubuntu" in tool_calls[0].text
 
 
+@pytest.mark.skip("Not implemented yet")
+async def test_named_vms_across_epochs() -> None:
+    # TODO: Implement test for named VMs across multiple epochs
+    # This test should verify that the `name=` parameter works on multiple
+    # epochs (in parallel) of the same eval by:
+    # 1. Creating and running an eval with two epochs
+    # 2. Verifying each task can independently access its VMs by name
+    #    i.e. by specifying a file to be copied into `vm_alpha` at the start
+    pass
+
+
 @pytest.mark.skip(
     "Does not play well as part of a suite - you can run it individually though"
 )  # noqa: E501
