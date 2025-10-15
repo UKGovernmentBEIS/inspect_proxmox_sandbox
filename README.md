@@ -78,7 +78,7 @@ sandbox=SandboxEnvironmentSpec(
                 vm_source_config=VmSourceConfig(
                     built_in="ubuntu24.04" # currently supported: "ubuntu24.04"; see schema.py
                 ),
-                name="romeo", # name is optional, but recommended - it will be shown in the Proxmox GUI. Must be a valid DNS name.
+                name="romeo", # name is optional, but recommended - it will be shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name.
                 ram_mb=512, # optional, default is 2048 MB
                 vcpus=4, # optional, default is 2. No attempt is made to check that this will fit in the Proxmox host.
                 uefi_boot=True, # optional, default is False. Generally only needed for Windows VMs.
@@ -169,6 +169,17 @@ sandbox=SandboxEnvironmentSpec(
     ),
 )
 ```
+
+### VM Names
+
+It is recommended that you set the `name=` parameter for your defined VMs. This name serves two purposes:
+- It will be displayed in the Proxmox web interface
+- It will be the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
+
+You should avoid setting the same name for multiple VMs as this will cause conflicts in how Inspect references your VMs; later VMs with the same name will overwrite earlier ones in the sandbox name mapping. While both VMs would still be created in Proxmox, only the last one would be accessible through its name in Inspect. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`.
+
+> Note: The (first) sandbox VM is automatically named `default` internally, so you can always access it with `sandbox("default")`, regardless of any custom name you might set for it.
+
 
 ### Using Existing Proxmox VNETs (Advanced/Not Recommended)
 
