@@ -147,7 +147,7 @@ async def test_built_in() -> None:
             interrupted=False,
         )
 
-async def check_os(sandbox, expected_in_id: str):
+async def check_os(sandbox: SandboxEnvironment, expected_in_id: str):
     lsb_release_result = await sandbox.exec(
             [
                 "lsb_release",
