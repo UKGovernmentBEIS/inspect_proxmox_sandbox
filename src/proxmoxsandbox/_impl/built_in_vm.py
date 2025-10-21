@@ -436,15 +436,15 @@ runcmd:
                 output_path = Path(os.path.join(self.cache_dir, "disk.raw"))
                 output_path.rename(source_image_name)
 
-                # Delete original
-                # os.remove(download_path)
-
                 await self.storage_commands.upload_file_to_storage(
                     file=Path(source_image_name),
                     content_type="import",
                     filename=disk_renamed,
                     size_check=os.path.getsize(source_image_name),
                 )
+
+                Path(download_path).unlink()
+                Path(source_image_name).unlink()
 
         await self.ensure_static_sdn_exists()
 
