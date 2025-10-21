@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3 - 2025-10-16
+
+- Proxmox 9.0 in build_proxmox_auto.sh; should not affect any functionality
+
 ## 0.8.2 - 2025-10-15
 
 - Change how VM names are registered as Inspect environments

@@ -59,11 +59,16 @@ systemctl start serial-getty@ttyS0
 pvesh set /storage/local -content iso,vztmpl,backup,snippets,images,rootdir,import
 
 # set to no-subscription PVE repo
-echo 'deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription' > /etc/apt/sources.list.d/pve-no-subscription.list
-rm -f /etc/apt/sources.list.d/{pve-enterprise,ceph}.list
+echo 'Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Signed-By: /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
+Components: pve-no-subscription' > /etc/apt/sources.list.d/pve-no-subscription.sources
+rm -f /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 
 # install dnsmasq for SDN, and xterm so we can use the resize command in terminal windows
 apt update
+apt upgrade -y
 apt install -y dnsmasq xterm
 systemctl disable --now dnsmasq
 
@@ -83,8 +88,10 @@ RUN apt-get update && apt-get install -y \
 
 RUN mkdir -p /iso
 
-RUN wget -q -O /iso/proxmox.iso https://enterprise.proxmox.com/iso/proxmox-ve_8.4-1.iso
+RUN wget -q -O /iso/proxmox.iso https://enterprise.proxmox.com/iso/proxmox-ve_9.0-1.iso
 
+# Confusingly, although Proxmox 9 is based on trixie (Debian 13), this Docker build 
+# must continue to use bookworm (Debian 12) because there are not yet any trixie proxmox packages.
 RUN echo "deb http://download.proxmox.com/debian/pve/ bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve.list
 RUN wget -O- http://download.proxmox.com/debian/proxmox-release-bookworm.gpg | apt-key add -
 

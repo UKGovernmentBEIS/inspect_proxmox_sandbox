@@ -2,3 +2,7 @@
 answers.toml
 on-first-boot.sh
 Dockerfile
+virt-inst-proxmox.complete
+virt-inst-proxmox.log
+virt-inst-proxmox.sh
+vend.sh
