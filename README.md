@@ -76,7 +76,7 @@ sandbox=SandboxEnvironmentSpec(
             VmConfig(
                 # A virtual machine that this provider will install and configure automatically.
                 vm_source_config=VmSourceConfig(
-                    built_in="ubuntu24.04" # currently supported: "ubuntu24.04"; see schema.py
+                    built_in="ubuntu24.04" # currently supported: "ubuntu24.04, "debian13", "kali2025.3"; see schema.py
                 ),
                 name="romeo", # name is optional, but recommended - it will be shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name.
                 ram_mb=512, # optional, default is 2048 MB
@@ -284,7 +284,6 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 - Proxmox server health and config check
 - Normalize having a pfSense VM as the default route for networking
 - Firewall off the SDN from the Proxmox server and from other SDNs
-- Add more built-in VMs (Debian, Kali)
 - Support cloud-init for VM definition
 - Escape hatch for Proxmox API so you can specify arbitrary parameters during VM / SDN creation 
 

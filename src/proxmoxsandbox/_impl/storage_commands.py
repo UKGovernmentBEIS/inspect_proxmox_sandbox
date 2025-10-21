@@ -34,7 +34,6 @@ class StorageCommands(abc.ABC):
         Uploads a file to Proxmox storage.
 
         Args:
-            storage: The storage name in Proxmox, e.g. 'local'
             file: local path to the file
             content_type: One of the file types supported by Proxmox
             filename: The filename to use for the remote file in Proxmox storage.

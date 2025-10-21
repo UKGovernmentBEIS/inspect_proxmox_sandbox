@@ -59,6 +59,7 @@ async def test_built_in() -> None:
         ),
         vms_config=(
             VmConfig(
+                name="ubuntu",
                 vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
                 nics=(
                     VmNicConfig(vnet_alias="vnet80"),
@@ -69,22 +70,40 @@ async def test_built_in() -> None:
                 is_sandbox=True,
                 uefi_boot=True,
             ),
+            VmConfig(
+                name="debian",
+                vm_source_config=VmSourceConfig(built_in="debian13"),
+                nics=(
+                    VmNicConfig(vnet_alias="vnet80"),
+                    VmNicConfig(vnet_alias="vnet81"),
+                ),
+                ram_mb=2346,
+                vcpus=1,
+                is_sandbox=True,
+                uefi_boot=True,
+            ),
+            VmConfig(
+                name="kali",
+                vm_source_config=VmSourceConfig(built_in="kali2025.3"),
+                nics=(
+                    VmNicConfig(vnet_alias="vnet80"),
+                    VmNicConfig(vnet_alias="vnet81"),
+                ),
+                ram_mb=2347,
+                vcpus=1,
+                is_sandbox=True,
+                uefi_boot=True,
+            ),
         ),
     )
     try:
         task_name = "sandbox_test_smoketask"
         task_name, envs_dict = await setup_sandbox(task_name, sandbox_env_config)
         sandbox = envs_dict["default"]
-        uname_result = await sandbox.exec(
-            [
-                "uname",
-                "-a",
-            ]
-        )
-        assert uname_result.success, f"Failed to run uname: {uname_result=}"
-        assert "Ubuntu" in uname_result.stdout, (
-            f"Unexpected result of uname: {uname_result.stdout=}"
-        )
+        await check_os(sandbox, "Ubuntu")
+
+        await check_os(envs_dict["debian"], "Debian")
+        await check_os(envs_dict["kali"], "Kali")
 
         ipa_result = await sandbox.exec(
             [
@@ -92,7 +111,7 @@ async def test_built_in() -> None:
                 "addr",
             ]
         )
-        assert uname_result.success, f"Failed to run ip addr: {ipa_result=}"
+        assert ipa_result.success, f"Failed to run ip addr: {ipa_result=}"
         assert "10.80.0" in ipa_result.stdout and "10.81.0" in ipa_result.stdout, (
             f"Unexpected result of ip addr: {ipa_result.stdout=}"
         )
@@ -126,6 +145,18 @@ async def test_built_in() -> None:
             config=sandbox_env_config,
             environments=envs_dict,
             interrupted=False,
+        )
+
+async def check_os(sandbox, expected_in_id: str):
+    lsb_release_result = await sandbox.exec(
+            [
+                "lsb_release",
+                "--id",
+            ]
+        )
+    assert lsb_release_result.success, f"Failed to run lsb_release: {lsb_release_result=}"
+    assert expected_in_id in lsb_release_result.stdout, (
+            f"Unexpected result of lsb_release: {lsb_release_result.stdout=}"
         )
 
 
@@ -241,62 +272,6 @@ async def test_connect(proxmox_sandbox_environment: ProxmoxSandboxEnvironment) -
     assert "open 'http" in connection.command
 
 
-async def test_access_by_name() -> None:
-    envs_dict: Dict[str, SandboxEnvironment] = {}
-    sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
-        vms_config=(
-            VmConfig(
-                vm_source_config=VmSourceConfig(
-                    built_in="ubuntu24.04",
-                ),
-                name="default",
-                is_sandbox=True,
-            ),
-            VmConfig(
-                vm_source_config=VmSourceConfig(
-                    built_in="ubuntu24.04",
-                ),
-                name="other-vm",
-                # We need to set this for the guest agent to be enabled on Proxmox.
-                is_sandbox=True,
-            ),
-        )
-    )
-    try:
-        _, envs_dict = await setup_sandbox("tabn", sandbox_env_config)
-        print(envs_dict)
-        # Sandbox VM stays "default"
-        sandbox = envs_dict["default"]
-        uname_result = await sandbox.exec(
-            [
-                "uname",
-                "-a",
-            ]
-        )
-        assert uname_result.success, f"Failed to run uname: {uname_result=}"
-        assert "Ubuntu" in uname_result.stdout, (
-            f"Unexpected result of uname: {uname_result.stdout=}"
-        )
-        # We can access this one via its name now
-        sandbox = envs_dict["other-vm"]
-        uname_result = await sandbox.exec(
-            [
-                "uname",
-                "-a",
-            ]
-        )
-        assert uname_result.success, f"Failed to run uname: {uname_result=}"
-        assert "Ubuntu" in uname_result.stdout, (
-            f"Unexpected result of uname: {uname_result.stdout=}"
-        )
-
-    finally:
-        await ProxmoxSandboxEnvironment.sample_cleanup(
-            task_name="unused",
-            config=sandbox_env_config,
-            environments=envs_dict,
-            interrupted=False,
-        )
 
 
 async def test_cli_cleanup(

@@ -1,13 +1,18 @@
 import abc
 import os
+import re
+import subprocess
 import tempfile
 from io import BytesIO
 from ipaddress import ip_address, ip_network
 from logging import getLogger
 from pathlib import Path
 from typing import BinaryIO, Dict, cast, get_args
+from urllib.parse import urlparse
 
+import platformdirs
 import pycdlib
+import pycurl
 import tenacity
 from inspect_ai.util import trace_action
 
@@ -27,13 +32,21 @@ from proxmoxsandbox.schema import (
 
 VM_TIMEOUT = 1200
 
+TRACE_NAME = "proxmox_built_in_vm"
+
+UBUNTU_URL = (
+    "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.ova"
+)
+UBUNTU_VMDK_FILENAME = "ubuntu-noble-24.04-cloudimg.vmdk"
+DEBIAN_13_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.3/kali-linux-2025.3-cloud-genericcloud-amd64.tar.xz"
+KALI_DISK_RENAMED = "kali-2025.3-genericcloud-amd64.raw"
+
+STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
+
 
 class BuiltInVM(abc.ABC):
     logger = getLogger(__name__)
-
-    TRACE_NAME = "proxmox_built_in_vm"
-
-    UBUNTU_24_04_OVA_FILENAME = "ubuntu24.04.ova"
 
     async_proxmox: AsyncProxmoxAPI
     qemu_commands: QemuCommands
@@ -51,6 +64,44 @@ class BuiltInVM(abc.ABC):
         self.storage = "local"
         self.storage_commands = StorageCommands(async_proxmox, node, self.storage)
         self.node = node
+        self.cache_dir = platformdirs.user_cache_path(
+            appname="inspect_proxmox_sandbox", ensure_exists=True
+        )
+
+    async def ensure_version(
+        self, required_major: int, required_minor: int = 0
+    ) -> None:
+        """
+        Ensures that the Proxmox version is at least the specified version.
+
+        Args:
+            async_proxmox: The AsyncProxmoxAPI instance
+            required_major: Required major version number
+            required_minor: Required minor version number (default: 0)
+
+        Raises:
+            ValueError: If the Proxmox version is below the required version
+        """
+        version_info = await self.async_proxmox.request(
+            "GET", f"/nodes/{self.node}/version"
+        )
+        version_string = version_info.get("version", "")
+
+        # Parse version string (e.g., "8.2.2" or "9.0")
+        match = re.match(r"(\d+)\.(\d+)", version_string)
+        if not match:
+            raise ValueError(f"Could not parse Proxmox version: {version_string}")
+
+        major = int(match.group(1))
+        minor = int(match.group(2))
+
+        if major < required_major or (
+            major == required_major and minor < required_minor
+        ):
+            raise ValueError(
+                f"Proxmox version {version_string} does not meet minimum requirement "
+                f"{required_major}.{required_minor}"
+            )
 
     async def create_and_upload_cloudinit_iso(
         self,
@@ -59,6 +110,7 @@ class BuiltInVM(abc.ABC):
         user_data: str = """#cloud-config
 package_update: true
 # Installs packages equivalent to Inspect's default Docker image for tool compatibility
+# TODO actually install inspect-tool-support here
 packages:
   - qemu-guest-agent
 # from buildpack-deps Dockerfile
@@ -201,15 +253,22 @@ runcmd:
     # for test code only
     async def clear_builtins(self) -> None:
         async def inner_clear_builtins() -> None:
-            existing_content = await self.read_all_content(self.storage)
+            existing_content = await self.read_all_content()
+
+            storage_names_to_delete = [
+                Path(urlparse(UBUNTU_URL).path).name,
+                Path(urlparse(DEBIAN_13_URL).path).name,
+                KALI_DISK_RENAMED,
+            ]
+
             for content in existing_content:
-                if content["volid"] and content["volid"].endswith(
-                    self.UBUNTU_24_04_OVA_FILENAME
-                ):
-                    await self.async_proxmox.request(
-                        "DELETE",
-                        f"/nodes/{self.node}/storage/{self.storage}/content/{content['volid']}",
-                    )
+                if content["volid"]:
+                    for storage_name in storage_names_to_delete:
+                        if content["volid"].endswith(storage_name):
+                            await self.async_proxmox.request(
+                                "DELETE",
+                                f"/nodes/{self.node}/storage/{self.storage}/content/{content['volid']}",
+                            )
 
             existing_vms = await self.known_builtins()
             for existing_vm in existing_vms:
@@ -237,17 +296,17 @@ runcmd:
                     break
         return found_builtins
 
-    async def content_exists(self, storage: str, content_name_end: str) -> bool:
-        existing_content = await self.read_all_content(storage)
+    async def content_exists(self, content_name_end: str) -> bool:
+        existing_content = await self.read_all_content()
         return any(
             content["volid"] and content["volid"].endswith(content_name_end)
             for content in existing_content
         )
 
-    async def read_all_content(self, storage):
+    async def read_all_content(self):
         existing_content = await self.async_proxmox.request(
             "GET",
-            f"/nodes/{self.node}/storage/{storage}/content",
+            f"/nodes/{self.node}/storage/{self.storage}/content",
         )
 
         return existing_content
@@ -262,45 +321,156 @@ runcmd:
 
         next_available_vm_id = await self.qemu_commands.find_next_available_vm_id()
 
-        # TODO: allow storage to be configurable
-        storage = "local"
-
         if built_in_name == "ubuntu24.04":
             await self.ensure_exists_from_ova(
-                storage=storage,
                 next_available_vm_id=next_available_vm_id,
                 built_in=built_in_name,
-                ova_name=self.UBUNTU_24_04_OVA_FILENAME,
-                ova_source_url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.ova",
-                ova_vmdk_filename="ubuntu-noble-24.04-cloudimg.vmdk",
+                source_image_source_url=UBUNTU_URL,
+                ova_vmdk_filename=UBUNTU_VMDK_FILENAME,
+            )
+        elif built_in_name == "debian13":
+            await self.ensure_version(9)
+            await self.ensure_exists_from_qcow2(
+                next_available_vm_id=next_available_vm_id,
+                built_in=built_in_name,
+                source_image_source_url=DEBIAN_13_URL,
+            )
+        elif built_in_name == "kali2025.3":
+            await self.ensure_version(9)
+            await self.ensure_exists_from_xz(
+                next_available_vm_id=next_available_vm_id,
+                built_in=built_in_name,
+                source_image_source_url=KALI_DOWNLOAD_URL,
+                disk_renamed=KALI_DISK_RENAMED,
             )
         else:
             raise ValueError(f"Unknown built-in {built_in_name}")
 
     async def ensure_exists_from_ova(
         self,
-        storage: str,
         next_available_vm_id: int,
         built_in: str,
-        ova_name: str,
-        ova_source_url: str,
+        source_image_source_url: str,
         ova_vmdk_filename: str,
     ) -> None:
-        if await self.content_exists(storage, ova_name):
-            self.logger.debug(f"OVA {built_in} already uploaded")
+        source_image_name = Path(urlparse(source_image_source_url).path).name
+
+        await self.ensure_source_uploaded(
+            built_in, source_image_name, source_image_source_url
+        )
+
+        await self.ensure_static_sdn_exists()
+
+        await self.startup_vm(
+            next_available_vm_id,
+            built_in,
+            f"import/{source_image_name}/{ova_vmdk_filename}",
+        )
+
+    async def ensure_exists_from_qcow2(
+        self,
+        next_available_vm_id: int,
+        built_in: str,
+        source_image_source_url: str,
+    ) -> None:
+        source_image_name = Path(urlparse(source_image_source_url).path).name
+
+        await self.ensure_source_uploaded(
+            built_in, source_image_name, source_image_source_url
+        )
+
+        await self.ensure_static_sdn_exists()
+
+        await self.startup_vm(
+            next_available_vm_id, built_in, f"import/{source_image_name}"
+        )
+
+    async def ensure_exists_from_xz(
+        self,
+        next_available_vm_id: int,
+        built_in: str,
+        source_image_source_url: str,
+        disk_renamed: str,
+    ) -> None:
+        # Unfortunately Kali only provide VM images in .xz and .7z formats,
+        # neither of which are supported by Proxmox's "download from URL".
+        # They require an intermediate step to decompress them.
+        # So we must download the file locally, extract the disk image, and then
+        # upload.
+
+        download_filename = Path(urlparse(source_image_source_url).path).name
+
+        if await self.content_exists(download_filename):
+            self.logger.debug(f"source image {built_in} already uploaded")
         else:
             with trace_action(
                 self.logger,
-                self.TRACE_NAME,
-                f"upload OVA {built_in=} ",
+                TRACE_NAME,
+                f"upload source image {built_in=} ",
+            ):
+                download_path = os.path.join(self.cache_dir, download_filename)
+                with open(download_path, "wb") as f:
+                    c = pycurl.Curl()
+                    c.setopt(c.URL, source_image_source_url)
+                    c.setopt(c.WRITEDATA, f)
+                    c.setopt(c.FOLLOWLOCATION, True)
+                    c.setopt(c.FAILONERROR, True)
+                    try:
+                        c.perform()
+                        status_code = c.getinfo(c.RESPONSE_CODE)
+                        if status_code >= 400:
+                            raise ValueError(
+                                f"Download failed with status code: {status_code}"
+                            )
+                    finally:
+                        c.close()
+
+                # shell out to tar -xf with subprocess:
+                subprocess.check_call(
+                    ["tar", "-xf", download_path, "-C", self.cache_dir]
+                )
+
+                # rename the output disk.raw to something better:
+
+                source_image_name = os.path.join(self.cache_dir, disk_renamed)
+                output_path = Path(os.path.join(self.cache_dir, "disk.raw"))
+                output_path.rename(source_image_name)
+
+                # Delete original
+                # os.remove(download_path)
+
+                await self.storage_commands.upload_file_to_storage(
+                    file=Path(source_image_name),
+                    content_type="import",
+                    filename=disk_renamed,
+                    size_check=os.path.getsize(source_image_name),
+                )
+
+        await self.ensure_static_sdn_exists()
+
+        await self.startup_vm(next_available_vm_id, built_in, f"import/{disk_renamed}")
+
+    async def ensure_source_uploaded(
+        self,
+        built_in: str,
+        source_image_name: str,
+        source_image_source_url: str,
+    ) -> None:
+        if await self.content_exists(source_image_name):
+            self.logger.debug(f"source image {built_in} already uploaded")
+        else:
+            with trace_action(
+                self.logger,
+                TRACE_NAME,
+                f"upload source image {built_in=} ",
             ):
                 await self.async_proxmox.request(
                     "POST",
-                    f"/nodes/{self.node}/storage/{storage}/download-url",
+                    f"/nodes/{self.node}/storage/{self.storage}/download-url",
                     json={
                         "content": "import",
-                        "filename": ova_name,
-                        "url": ova_source_url,
+                        "filename": source_image_name,
+                        "url": source_image_source_url,
                     },
                 )
 
@@ -309,46 +479,20 @@ runcmd:
                     stop=tenacity.stop_after_delay(VM_TIMEOUT),
                 )
                 async def upload_complete() -> None:
-                    if not await self.content_exists(storage, ova_name):
-                        raise ValueError("OVA upload not yet complete")
+                    if not await self.content_exists(source_image_name):
+                        raise ValueError("image upload not yet complete")
 
                 await upload_complete()
 
-        existing_zones = await self.sdn_commands.list_sdn_zones()
-
-        exists_already = any(
-            zone_info["zone"] and zone_info["zone"] == f"{STATIC_SDN_START}z"
-            for zone_info in existing_zones
-        )
-
-        if not exists_already:
-            await self.sdn_commands.create_sdn(
-                proxmox_ids_start=STATIC_SDN_START,
-                sdn_config=SdnConfig(
-                    vnet_configs=(
-                        VnetConfig(
-                            subnets=(
-                                SubnetConfig(
-                                    cidr=ip_network("192.168.99.0/24"),
-                                    gateway=ip_address("192.168.99.1"),
-                                    snat=True,
-                                    dhcp_ranges=(
-                                        DhcpRange(
-                                            start=ip_address("192.168.99.50"),
-                                            end=ip_address("192.168.99.100"),
-                                        ),
-                                    ),
-                                ),
-                            )
-                        ),
-                    )
-                ),
-            )
-        vnet_id = f"{STATIC_SDN_START}v0"
-
+    async def startup_vm(
+        self,
+        next_available_vm_id: int,
+        built_in: str,
+        import_source: str,
+    ) -> None:
         with trace_action(
             self.logger,
-            self.TRACE_NAME,
+            TRACE_NAME,
             f"create VM from OVA {next_available_vm_id=}",
         ):
 
@@ -365,10 +509,10 @@ runcmd:
                         "cores": 2,
                         "ostype": "l26",
                         "scsi0": "local-lvm:0,"
-                        + f"import-from=local:import/{ova_name}/{ova_vmdk_filename},"
+                        + f"import-from={self.storage}:{import_source},"
                         + "format=qcow2,cache=writeback",
                         "scsihw": "virtio-scsi-single",
-                        "net0": f"virtio,bridge={vnet_id}",
+                        "net0": f"virtio,bridge={STATIC_VNET_ID}",
                         "serial0": "socket",
                         "start": False,
                         "agent": "enabled=1",
@@ -468,5 +612,34 @@ runcmd:
 
             await remove_cdrom()
 
-            # TODO tear down SDN zone and vnet
-            # TODO delete cloudinit ISO
+    async def ensure_static_sdn_exists(self):
+        existing_zones = await self.sdn_commands.list_sdn_zones()
+
+        exists_already = any(
+            zone_info["zone"] and zone_info["zone"] == f"{STATIC_SDN_START}z"
+            for zone_info in existing_zones
+        )
+
+        if not exists_already:
+            await self.sdn_commands.create_sdn(
+                proxmox_ids_start=STATIC_SDN_START,
+                sdn_config=SdnConfig(
+                    vnet_configs=(
+                        VnetConfig(
+                            subnets=(
+                                SubnetConfig(
+                                    cidr=ip_network("192.168.99.0/24"),
+                                    gateway=ip_address("192.168.99.1"),
+                                    snat=True,
+                                    dhcp_ranges=(
+                                        DhcpRange(
+                                            start=ip_address("192.168.99.50"),
+                                            end=ip_address("192.168.99.100"),
+                                        ),
+                                    ),
+                                ),
+                            )
+                        ),
+                    )
+                ),
+            )
