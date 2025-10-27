@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.0 - 2025-10-22
+## 0.9.0 - 2025-10-27
 
 - Kali and Debian 13 built-in VMs
 
