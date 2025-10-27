@@ -3,15 +3,29 @@ from proxmoxsandbox._impl.qemu_commands import QemuCommands
 
 
 async def test_ubuntu(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
+    await _do_test_builtin(qemu_commands, built_in_vm, "ubuntu24.04")
+
+
+async def test_debian(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
+    await _do_test_builtin(qemu_commands, built_in_vm, "debian13")
+
+
+async def test_kali(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
+    await _do_test_builtin(qemu_commands, built_in_vm, "kali2025.3")
+
+
+async def _do_test_builtin(
+    qemu_commands: QemuCommands, built_in_vm: BuiltInVM, builtin_name: str
+):
     await built_in_vm.clear_builtins()
 
     known_builtins = await built_in_vm.known_builtins()
 
-    assert "ubuntu24.04" not in known_builtins
+    assert builtin_name not in known_builtins
 
     existing_vms = await qemu_commands.list_vms()
 
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists(builtin_name)
 
     all_vms = await qemu_commands.list_vms()
 
@@ -25,4 +39,4 @@ async def test_ubuntu(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> No
     assert new_vms[0]["tags"]
     tags = new_vms[0]["tags"].split(";")
     assert "inspect" in tags
-    assert "builtin-ubuntu24.04" in tags
+    assert f"builtin-{builtin_name}" in tags

@@ -95,10 +95,9 @@ class VmSourceConfig(BaseModel, frozen=True):
     ova: Path | None = None
     # Ubuntu 24.04 is supported because an OVA is publicly available from a reliable
     # source.
-    # Kali does not have such an OVA. There is no other way to upload a VM image to
-    # Proxmox 8.3.x. Hence, Kali support here would require Kali to provide an OVA.
-    # The same goes for Debian.
-    built_in: Literal["ubuntu24.04"] | None = None
+    # From Proxmox 9.0 onwards, qcow2 and raw are also supported, allowing Debian 13,
+    # Kali, and others.
+    built_in: Literal["ubuntu24.04", "debian13", "kali2025.3"] | None = None
 
     @model_validator(mode="after")
     def _validate_single_source(self) -> "VmSourceConfig":

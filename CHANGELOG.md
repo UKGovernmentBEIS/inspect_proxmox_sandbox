@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.8.3 - 2025-10-16
+## 0.9.0 - 2025-10-27
+
+- Kali and Debian 13 built-in VMs
+
+## 0.8.3 - 2025-10-21
 
 - Proxmox 9.0 in build_proxmox_auto.sh; should not affect any functionality
 

@@ -179,22 +179,17 @@ class QemuCommands(abc.ABC):
             raise NotImplementedError("os_type is only supported for OVA")
 
         if vm_config.vm_source_config.built_in:
-            if vm_config.vm_source_config.built_in in ["ubuntu24.04"]:
-                vm_id_to_clone = built_in_vm_ids[vm_config.vm_source_config.built_in]
+            vm_id_to_clone = built_in_vm_ids[vm_config.vm_source_config.built_in]
 
-                if vm_id_to_clone is None:
-                    raise ValueError(
-                        "couldn't find template VM for "
-                        + f"{vm_config.vm_source_config.built_in}"
-                    )
+            if vm_id_to_clone is None:
+                raise ValueError(
+                    "couldn't find template VM for "
+                    + f"{vm_config.vm_source_config.built_in}"
+                )
 
-                new_vm_id = await self.clone_vm_and_start(
-                    vm_config, vm_id_to_clone, sdn_vnet_aliases, False
-                )
-            else:
-                raise NotImplementedError(
-                    f"Not supported: {vm_config.vm_source_config.built_in=}"
-                )
+            new_vm_id = await self.clone_vm_and_start(
+                vm_config, vm_id_to_clone, sdn_vnet_aliases, False
+            )
         elif vm_config.vm_source_config.ova is not None:
             if isinstance(vm_config.vm_source_config.ova, HttpUrl):
                 raise NotImplementedError(

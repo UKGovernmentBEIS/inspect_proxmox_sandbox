@@ -217,7 +217,7 @@ class AsyncProxmoxAPI:
     ) -> dict:
         """Upload a file to Proxmox storage using pycurl.
 
-        This is better for large file uploads)
+        This is better for large file uploads than async libraries, in my experience.
 
         Args:
             node: The node name
