@@ -32,6 +32,7 @@ class QemuCommands(abc.ABC):
     storage: str
     storage_commands: StorageCommands
     node: str
+    sdn_commands: "SdnCommands | None"
 
     _running_proxmox_vms: ContextVar[Set[int]] = ContextVar(
         "proxmox_running_vms", default=set()
@@ -46,6 +47,7 @@ class QemuCommands(abc.ABC):
         self.storage = "local"
         self.storage_commands = StorageCommands(async_proxmox, node, self.storage)
         self.node = node
+        self.sdn_commands = None
 
     async def await_vm(
         self,
@@ -363,6 +365,14 @@ class QemuCommands(abc.ABC):
         vm_id: int,
         extra_tags: List[str] = [],
     ) -> None:
+        # Fetch VNets once and build complete mapping with zone info
+        all_vnets_data = await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
+        vnet_details = {
+            vnet["alias"]: {"vnet": vnet["vnet"], "zone": vnet["zone"]}
+            for vnet in all_vnets_data
+            if "alias" in vnet and vnet["alias"]
+        }
+
         async def update_network() -> None:
             network_update_json: ProxmoxJsonDataType = {}
 
@@ -372,23 +382,7 @@ class QemuCommands(abc.ABC):
                 else vm_config.nic_controller
             )
 
-            # If we have nics configured, we need to look up existing VNETs
-            existing_vnet_mapping = {}
-            try:
-                # Fetch all existing VNETs from Proxmox
-                all_vnets = await self.async_proxmox.request(
-                    "GET", "/cluster/sdn/vnets"
-                )
-
-                if all_vnets:
-                    for vnet in all_vnets:
-                        if "alias" in vnet and vnet["alias"]:
-                            # Map alias to the actual VNET ID
-                            existing_vnet_mapping[vnet["alias"]] = vnet["vnet"]
-            except Exception as e:
-                self.logger.error(f"Error fetching existing VNETs: {e}")
-
-            self.logger.debug(f"Existing VNET mapping: {existing_vnet_mapping}")
+            self.logger.debug(f"VNet details: {vnet_details}")
             self.logger.debug(f"SDN VNET aliases: {sdn_vnet_aliases}")
 
             if vm_config.nics is None:
@@ -397,45 +391,29 @@ class QemuCommands(abc.ABC):
                     or vm_config.vm_source_config.ova
                 ):
                     await self.remove_existing_nics(vm_id)
-                    # Only add the first VNET if
-                    # there are any defined in sdn_vnet_aliases
-                    if sdn_vnet_aliases and len(sdn_vnet_aliases) > 0:
+                    if sdn_vnet_aliases:
                         first_vnet_id = sdn_vnet_aliases[0][0]
                         network_update_json["net0"] = (
                             f"{nic_prefix},bridge={first_vnet_id}"
                         )
-                    # otherwise do nothing - no networks will be added
-                # for other vm_source_configs, we *do not touch* networking config
             else:
                 await self.remove_existing_nics(vm_id)
-                # Convert the SDN aliases to a mapping
                 alias_mapping = self._convert_sdn_vnet_aliases(sdn_vnet_aliases)
 
-                # For each NIC in the config
                 for i, nic in enumerate(vm_config.nics):
-                    # Check if the alias exists in our mapping first
-                    # (from configured SDN)
                     if nic.vnet_alias in alias_mapping:
                         bridge_name = alias_mapping[nic.vnet_alias]
-                    # Then check if it exists in existing VNETs
-                    elif nic.vnet_alias in existing_vnet_mapping:
-                        bridge_name = existing_vnet_mapping[nic.vnet_alias]
+                    elif nic.vnet_alias in vnet_details:
+                        bridge_name = vnet_details[nic.vnet_alias]["vnet"]
                     else:
-                        # If we can't find it anywhere,
-                        # log what we found and raise an error
-                        self.logger.error(
-                            f"VNET alias '{nic.vnet_alias}' not found in Proxmox."
-                        )
-                        self.logger.error(
-                            f"Available aliases: {list(existing_vnet_mapping.keys())}"
-                        )
                         raise ValueError(
-                            f"VNET alias '{nic.vnet_alias}' not found in Proxmox"
+                            f"VNET alias '{nic.vnet_alias}' not found. "
+                            f"Available: {list(vnet_details.keys())}"
                         )
 
                     netx = f"{nic_prefix},bridge={bridge_name}"
                     if nic.mac:
-                        netx += f",macaddr={nic.mac}"
+                        netx += f",macaddr={nic.mac.upper()}"
                     network_update_json[f"net{i}"] = netx
 
             if network_update_json:
@@ -452,6 +430,50 @@ class QemuCommands(abc.ABC):
                 json={"tags": ",".join(set(extra_tags + ["inspect"]))},
             )
 
+        async def create_dhcp_mappings() -> None:
+            if not (vm_config.nics and self.sdn_commands):
+                return
+
+            alias_mapping = self._convert_sdn_vnet_aliases(sdn_vnet_aliases)
+            has_mappings = False
+
+            for nic in vm_config.nics:
+                if not (nic.mac and nic.ipv4):
+                    continue
+
+                # Resolve vnet_alias to vnet_id and zone_id
+                if nic.vnet_alias in alias_mapping:
+                    vnet_id = alias_mapping[nic.vnet_alias]
+                    # Find zone from all_vnets_data
+                    zone_id = next(
+                        v["zone"]
+                        for v in all_vnets_data
+                        if v["vnet"] == vnet_id
+                    )
+                elif nic.vnet_alias in vnet_details:
+                    vnet_id = vnet_details[nic.vnet_alias]["vnet"]
+                    zone_id = vnet_details[nic.vnet_alias]["zone"]
+                else:
+                    raise ValueError(
+                        f"VNET alias '{nic.vnet_alias}' not found. "
+                        f"Available: {list(vnet_details.keys())}"
+                    )
+
+                await self.sdn_commands.create_dhcp_mapping(
+                    vnet_id=vnet_id,
+                    zone_id=zone_id,
+                    mac_address=str(nic.mac).upper(),
+                    ip_addr=str(nic.ipv4),
+                )
+                has_mappings = True
+
+            if has_mappings:
+                await self.sdn_commands.do_update_all_sdn()
+
+        # IMPORTANT: Create DHCP mappings FIRST, before configuring the network
+        # This ensures the IP mapping exists before Proxmox IPAM assigns an IP
+        # when the MAC address is added to the VM
+        await create_dhcp_mappings()
         await self.task_wrapper.do_action_and_wait_for_tasks(update_network)
         await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
 

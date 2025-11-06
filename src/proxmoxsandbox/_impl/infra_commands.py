@@ -39,6 +39,7 @@ class InfraCommands(abc.ABC):
         self.task_wrapper = TaskWrapper(async_proxmox)
         self.sdn_commands = SdnCommands(async_proxmox)
         self.qemu_commands = QemuCommands(async_proxmox, node)
+        self.qemu_commands.sdn_commands = self.sdn_commands
         self.built_in_vm = BuiltInVM(async_proxmox, node)
         self.node = node
 

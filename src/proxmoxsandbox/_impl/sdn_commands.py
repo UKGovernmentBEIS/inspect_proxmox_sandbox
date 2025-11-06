@@ -321,6 +321,38 @@ class SdnCommands(abc.ABC):
     async def read_all_vnets(self):
         return await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
 
+    async def create_dhcp_mapping(
+        self,
+        vnet_id: str,
+        zone_id: str,
+        mac_address: str,
+        ip_addr: str,
+    ) -> None:
+        """
+        Create a DHCP static mapping (host reservation) for a VM.
+
+        Args:
+            vnet_id: The VNet ID where the mapping should be created
+            zone_id: The SDN zone ID containing the VNet
+            mac_address: The MAC address for the mapping
+            ip_addr: The static IP address to assign
+        """
+        with trace_action(
+            self.logger,
+            self.TRACE_NAME,
+            f"create DHCP mapping {vnet_id=} {zone_id=} {mac_address=} {ip_addr=}",
+        ):
+            await self.async_proxmox.request(
+                "POST",
+                f"/cluster/sdn/vnets/{vnet_id}/ips",
+                json={
+                    "ip": ip_addr,
+                    "vnet": vnet_id,
+                    "zone": zone_id,
+                    "mac": mac_address,
+                },
+            )
+
     async def cleanup(self) -> None:
         if self._cleanup_completed.get():
             return
