@@ -147,17 +147,20 @@ async def test_built_in() -> None:
             interrupted=False,
         )
 
+
 async def check_os(sandbox: SandboxEnvironment, expected_in_id: str):
     lsb_release_result = await sandbox.exec(
-            [
-                "lsb_release",
-                "--id",
-            ]
-        )
-    assert lsb_release_result.success, f"Failed to run lsb_release: {lsb_release_result=}"
+        [
+            "lsb_release",
+            "--id",
+        ]
+    )
+    assert lsb_release_result.success, (
+        f"Failed to run lsb_release: {lsb_release_result=}"
+    )
     assert expected_in_id in lsb_release_result.stdout, (
-            f"Unexpected result of lsb_release: {lsb_release_result.stdout=}"
-        )
+        f"Unexpected result of lsb_release: {lsb_release_result.stdout=}"
+    )
 
 
 async def test_multiple_sandboxes_isolated(sandbox_env_config) -> None:
@@ -270,8 +273,6 @@ async def test_connect(proxmox_sandbox_environment: ProxmoxSandboxEnvironment) -
     # we can't really do much more than this assertion;
     # sandbox.connection() needs to be tested manually
     assert "open 'http" in connection.command
-
-
 
 
 async def test_cli_cleanup(

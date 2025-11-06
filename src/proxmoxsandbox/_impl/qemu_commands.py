@@ -368,7 +368,9 @@ class QemuCommands(abc.ABC):
         # Fetch VNets once and build complete mapping with zone info
         vnet_details = {}
         try:
-            all_vnets_data = await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
+            all_vnets_data = await self.async_proxmox.request(
+                "GET", "/cluster/sdn/vnets"
+            )
             vnet_details = {
                 vnet["alias"]: {"vnet": vnet["vnet"], "zone": vnet["zone"]}
                 for vnet in all_vnets_data
@@ -421,6 +423,8 @@ class QemuCommands(abc.ABC):
                     else:
                         # If we can't find it anywhere,
                         # log what we found and raise an error
+                        self.logger.error(f"VNET alias '{nic.vnet_alias}' not found in Proxmox")
+                        self.logger.error(f"Available aliases: {list(vnet_details.keys())}")
                         raise ValueError(
                             f"VNET alias '{nic.vnet_alias}' not found. "
                             f"Available: {list(vnet_details.keys())}"
@@ -461,9 +465,7 @@ class QemuCommands(abc.ABC):
                     vnet_id = alias_mapping[nic.vnet_alias]
                     # Find zone from all_vnets_data
                     zone_id = next(
-                        v["zone"]
-                        for v in all_vnets_data
-                        if v["vnet"] == vnet_id
+                        v["zone"] for v in all_vnets_data if v["vnet"] == vnet_id
                     )
                 elif nic.vnet_alias in vnet_details:
                     vnet_id = vnet_details[nic.vnet_alias]["vnet"]
