@@ -1,16 +1,20 @@
 # Changelog
 
-## 0.9.3 - 2025-11-18
+## 0.9.5 - 2025-11-18
 
 - Size clones correctly in build_proxmox_auto
 
-## 0.9.2 - 2025-11-10
+## 0.9.4 - 2025-11-10
 
 - Allow vending of arbitrary qcow images in build_proxmox_auto
 
-## 0.9.1 - 2025-11-06
+## 0.9.3 - 2025-11-06
 
 - Fix occasional failure of vended instance to stay started
+
+## 0.9.2 - 2025-11-06
+
+- Support static IPv4 allocation
 
 ## 0.9.0 - 2025-10-27
 
@@ -50,7 +54,7 @@
 ## 0.5.1 - 2025-05-13
 
 - Fix sandbox_cleanup=False being ignored when sample setup fails
- 
+
 ## 0.5.0 - 2025-04-17
 
 - Add machine type option (Linux, Windows, etc.)
@@ -67,6 +71,6 @@
 - Create 250G root space by default
 - Scripts moved into src/proxmoxsandbox/scripts
 
-## 0.3.0 - 2025-03-31 
+## 0.3.0 - 2025-03-31
 
 Initial release
