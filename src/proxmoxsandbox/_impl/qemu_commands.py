@@ -423,8 +423,12 @@ class QemuCommands(abc.ABC):
                     else:
                         # If we can't find it anywhere,
                         # log what we found and raise an error
-                        self.logger.error(f"VNET alias '{nic.vnet_alias}' not found in Proxmox")
-                        self.logger.error(f"Available aliases: {list(vnet_details.keys())}")
+                        self.logger.error(
+                            f"VNET alias '{nic.vnet_alias}' not found in Proxmox"
+                        )
+                        self.logger.error(
+                            f"Available aliases: {list(vnet_details.keys())}"
+                        )
                         raise ValueError(
                             f"VNET alias '{nic.vnet_alias}' not found. "
                             f"Available: {list(vnet_details.keys())}"
