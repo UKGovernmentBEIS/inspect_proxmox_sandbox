@@ -366,12 +366,16 @@ class QemuCommands(abc.ABC):
         extra_tags: List[str] = [],
     ) -> None:
         # Fetch VNets once and build complete mapping with zone info
-        all_vnets_data = await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
-        vnet_details = {
-            vnet["alias"]: {"vnet": vnet["vnet"], "zone": vnet["zone"]}
-            for vnet in all_vnets_data
-            if "alias" in vnet and vnet["alias"]
-        }
+        vnet_details = {}
+        try:
+            all_vnets_data = await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
+            vnet_details = {
+                vnet["alias"]: {"vnet": vnet["vnet"], "zone": vnet["zone"]}
+                for vnet in all_vnets_data
+                if "alias" in vnet and vnet["alias"]
+            }
+        except Exception as e:
+            self.logger.error(f"Error fetching existing VNETs: {e}")
 
         async def update_network() -> None:
             network_update_json: ProxmoxJsonDataType = {}
@@ -391,21 +395,32 @@ class QemuCommands(abc.ABC):
                     or vm_config.vm_source_config.ova
                 ):
                     await self.remove_existing_nics(vm_id)
+                    # Only add the first VNET if
+                    # there are any defined in sdn_vnet_aliases
                     if sdn_vnet_aliases:
                         first_vnet_id = sdn_vnet_aliases[0][0]
                         network_update_json["net0"] = (
                             f"{nic_prefix},bridge={first_vnet_id}"
                         )
+                    # otherwise do nothing - no networks will be added
+                # for other vm_source_configs, we *do not touch* networking config
             else:
                 await self.remove_existing_nics(vm_id)
+                # Convert the SDN aliases to a mapping
                 alias_mapping = self._convert_sdn_vnet_aliases(sdn_vnet_aliases)
 
+                # For each NIC in the config
                 for i, nic in enumerate(vm_config.nics):
+                    # Check if the alias exists in our mapping first
+                    # (from configured SDN)
                     if nic.vnet_alias in alias_mapping:
                         bridge_name = alias_mapping[nic.vnet_alias]
+                    # Then check if it exists in existing VNETs
                     elif nic.vnet_alias in vnet_details:
                         bridge_name = vnet_details[nic.vnet_alias]["vnet"]
                     else:
+                        # If we can't find it anywhere,
+                        # log what we found and raise an error
                         raise ValueError(
                             f"VNET alias '{nic.vnet_alias}' not found. "
                             f"Available: {list(vnet_details.keys())}"
