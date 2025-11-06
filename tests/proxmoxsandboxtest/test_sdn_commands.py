@@ -162,3 +162,44 @@ async def test_create_sdn_none(ids_start: str, sdn_commands: SdnCommands) -> Non
 
     assert sdn_zone_id is None
     assert vnet_aliases == []
+
+
+async def test_create_dhcp_mapping(ids_start: str, sdn_commands: SdnCommands) -> None:
+    """Test creating a DHCP static mapping."""
+    from ipaddress import ip_address, ip_network
+
+    sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(
+        proxmox_ids_start=ids_start,
+        sdn_config=SdnConfig(
+            vnet_configs=(
+                VnetConfig(
+                    alias="test_dhcp_mapping",
+                    subnets=(
+                        SubnetConfig(
+                            cidr=ip_network("10.33.33.0/24"),
+                            gateway=ip_address("10.33.33.1"),
+                            snat=True,
+                            dhcp_ranges=(
+                                DhcpRange(
+                                    start=ip_address("10.33.33.50"),
+                                    end=ip_address("10.33.33.100"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            use_pve_ipam_dnsnmasq=True,
+        ),
+    )
+
+    vnet_id = vnet_aliases[0][0]
+
+    await sdn_commands.create_dhcp_mapping(
+        vnet_id=vnet_id,
+        zone_id=sdn_zone_id,
+        mac_address="52:54:00:AA:BB:CC",
+        ip_addr="10.33.33.10",
+    )
+
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id)

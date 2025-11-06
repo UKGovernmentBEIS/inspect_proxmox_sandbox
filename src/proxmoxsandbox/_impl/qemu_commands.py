@@ -14,7 +14,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
 )
-from proxmoxsandbox._impl.sdn_commands import VnetAliases
+from proxmoxsandbox._impl.sdn_commands import SdnCommands, VnetAliases
 from proxmoxsandbox._impl.storage_commands import StorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
@@ -32,7 +32,7 @@ class QemuCommands(abc.ABC):
     storage: str
     storage_commands: StorageCommands
     node: str
-    sdn_commands: "SdnCommands | None"
+    sdn_commands: SdnCommands | None
 
     _running_proxmox_vms: ContextVar[Set[int]] = ContextVar(
         "proxmox_running_vms", default=set()
