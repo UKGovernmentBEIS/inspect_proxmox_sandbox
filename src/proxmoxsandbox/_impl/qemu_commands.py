@@ -469,8 +469,14 @@ class QemuCommands(abc.ABC):
                     vnet_id = alias_mapping[nic.vnet_alias]
                     # Find zone from all_vnets_data
                     zone_id = next(
-                        v["zone"] for v in all_vnets_data if v["vnet"] == vnet_id
+                        (v["zone"] for v in all_vnets_data if v["vnet"] == vnet_id),
+                        None,
                     )
+                    if zone_id is None:
+                        raise ValueError(
+                            f"VNET id '{vnet_id}' (from alias '{nic.vnet_alias}') "
+                            f"not found in Proxmox"
+                        )
                 elif nic.vnet_alias in vnet_details:
                     vnet_id = vnet_details[nic.vnet_alias]["vnet"]
                     zone_id = vnet_details[nic.vnet_alias]["zone"]
