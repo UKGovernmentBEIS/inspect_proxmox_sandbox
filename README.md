@@ -93,8 +93,13 @@ sandbox=SandboxEnvironmentSpec(
                         # This alias *must* match the alias in one of the VnetConfigs
                         vnet_alias="my special vnet",
                         # Specifying a MAC address is optional - only needed if you
-                        # are doing fancy things with DHCP in your eval
-                        mac="00:16:3d:1d:eb:a0"
+                        # are doing fancy things with DHCP in your eval, or if you
+                        # want to assign a static IP address
+                        mac="00:16:3d:1d:eb:a0",
+                        # Specifying a static IPv4 address is optional. If provided,
+                        # a DHCP static mapping (host reservation) will be created.
+                        # Note: requires a MAC address to be specified as well.
+                        ipv4=ip_address("192.168.20.10")
                     ),
                 )
                 # extra_proxmox_native_config = dict() TODO
@@ -179,6 +184,31 @@ It is recommended that you set the `name=` parameter for your defined VMs. This 
 You should avoid setting the same name for multiple VMs as this will cause conflicts in how Inspect references your VMs; later VMs with the same name will overwrite earlier ones in the sandbox name mapping. While both VMs would still be created in Proxmox, only the last one would be accessible through its name in Inspect. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`.
 
 > Note: The (first) sandbox VM is automatically named `default` internally, so you can always access it with `sandbox("default")`, regardless of any custom name you might set for it.
+
+
+### Static IP Address Assignment
+
+By default, VMs receive IP addresses from the DHCP range specified in the subnet configuration. However, you can assign static IP addresses to VMs by specifying both a MAC address and an IPv4 address in the `VmNicConfig`:
+
+```python
+nics=(
+    VmNicConfig(
+        vnet_alias="my special vnet",
+        mac="52:54:00:12:34:56",  # Required for static IP
+        ipv4=ip_address("192.168.20.10")  # Static IP assignment
+    ),
+)
+```
+
+**How it works:**
+- When both `mac` and `ipv4` are specified, the system creates a DHCP static mapping (host reservation) in Proxmox
+- The VM will always receive the specified IP address when it boots
+- The IP address must be within the subnet CIDR range but does not need to be within the DHCP range
+
+**Requirements:**
+- The `ipv4` field requires a `mac` address to be specified (validation will fail otherwise)
+- The IP address must fall within one of the configured subnet CIDR ranges
+- `use_pve_ipam_dnsnmasq` must be `True` in the SDN config
 
 
 ### Using Existing Proxmox VNETs (Advanced/Not Recommended)
