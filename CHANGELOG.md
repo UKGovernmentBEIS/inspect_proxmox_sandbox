@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 - 2025-11-06
+
+- Support static IPv4 allocation
+
 ## 0.9.0 - 2025-10-27
 
 - Kali and Debian 13 built-in VMs
