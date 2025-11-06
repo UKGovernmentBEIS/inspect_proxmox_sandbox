@@ -51,6 +51,13 @@ cat << 'EOFONFIRSTBOOT' > on-first-boot.sh
 #!/usr/bin/env bash
 set -eu
 
+# should not be necessary as this should only be run once
+# but for some reason this is not always working
+# possibly related to why reboot-mode = "power-off" also isn't working
+if [ -f /var/local/inspect-proxmox-on-first-boot.done ]; then
+  exit 0
+fi
+
 # enable serial console
 systemctl enable serial-getty@ttyS0
 systemctl start serial-getty@ttyS0
@@ -71,6 +78,8 @@ apt update
 apt upgrade -y
 apt install -y dnsmasq xterm
 systemctl disable --now dnsmasq
+
+touch /var/local/inspect-proxmox-on-first-boot.done
 
 # shut down to signal to virt-install that installation is complete
 # in theory this isn't necessary because of 'reboot-mode = "power-off"' but that doesn't seem to work.
