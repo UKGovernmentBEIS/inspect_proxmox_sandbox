@@ -262,3 +262,120 @@ def test_sandbox_config_explicit_pool_id():
     )
 
     assert config.instance_pool_id == "custom-pool"
+
+
+def test_default_concurrency_with_config_file():
+    """Test default_concurrency returns total instance count from config file."""
+    from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+
+    config_data = {
+        "instances": [
+            {
+                "instance_id": "test-1",
+                "pool_id": "pool-a",
+                "host": "10.0.1.10",
+                "port": 8006,
+                "user": "root",
+                "user_realm": "pam",
+                "password": "secret",
+                "node": "pve1",
+                "verify_tls": False,
+            },
+            {
+                "instance_id": "test-2",
+                "pool_id": "pool-a",
+                "host": "10.0.1.20",
+                "port": 8006,
+                "user": "root",
+                "user_realm": "pam",
+                "password": "secret",
+                "node": "pve2",
+                "verify_tls": False,
+            },
+            {
+                "instance_id": "test-3",
+                "pool_id": "pool-b",
+                "host": "10.0.1.30",
+                "port": 8006,
+                "user": "root",
+                "user_realm": "pam",
+                "password": "secret",
+                "node": "pve3",
+                "verify_tls": False,
+            },
+        ]
+    }
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False
+    ) as f:
+        json.dump(config_data, f)
+        temp_path = f.name
+
+    old_env = os.environ.copy()
+
+    try:
+        # Clear any existing env vars
+        for key in list(os.environ.keys()):
+            if key.startswith("PROXMOX_"):
+                del os.environ[key]
+
+        os.environ["PROXMOX_CONFIG_FILE"] = temp_path
+
+        concurrency = ProxmoxSandboxEnvironment.default_concurrency()
+
+        # Should return total of 3 instances across 2 pools
+        assert concurrency == 3
+
+    finally:
+        os.unlink(temp_path)
+        os.environ.clear()
+        os.environ.update(old_env)
+
+
+def test_default_concurrency_with_legacy_env_vars():
+    """Test default_concurrency returns 1 for legacy single-instance mode."""
+    from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+
+    old_env = os.environ.copy()
+
+    try:
+        # Clear any existing env vars
+        for key in list(os.environ.keys()):
+            if key.startswith("PROXMOX_"):
+                del os.environ[key]
+
+        # Set legacy env vars
+        os.environ["PROXMOX_HOST"] = "10.0.1.10"
+        os.environ["PROXMOX_NODE"] = "pve1"
+
+        concurrency = ProxmoxSandboxEnvironment.default_concurrency()
+
+        # Should return 1 for single legacy instance
+        assert concurrency == 1
+
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+
+
+def test_default_concurrency_with_no_config():
+    """Test default_concurrency returns 1 when no config is available."""
+    from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+
+    old_env = os.environ.copy()
+
+    try:
+        # Clear all Proxmox env vars
+        for key in list(os.environ.keys()):
+            if key.startswith("PROXMOX_"):
+                del os.environ[key]
+
+        concurrency = ProxmoxSandboxEnvironment.default_concurrency()
+
+        # Should return 1 as fallback
+        assert concurrency == 1
+
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
