@@ -173,7 +173,23 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @classmethod
     @override
     def default_concurrency(cls) -> int | None:
-        return None
+        """Return the total number of Proxmox instances across all pools.
+
+        NOTE: This is optimal when all samples use the same pool (common case).
+        With mixed-pool workloads, some instances may be temporarily idle.
+
+        Proper per-pool concurrency control would require changes to Inspect's
+        core architecture, which is not designed to handle heterogeneous
+        limited sandbox environments within a single task.
+
+        Returns:
+            Total number of Proxmox instances, or 1 for legacy single-instance mode.
+        """
+        try:
+            instances = _load_instances_from_env_or_file()
+            return len(instances) if instances else 1
+        except Exception:
+            return 1
 
     @classmethod
     @override
