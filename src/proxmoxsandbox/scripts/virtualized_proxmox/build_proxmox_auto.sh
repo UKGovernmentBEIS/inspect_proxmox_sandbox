@@ -195,7 +195,7 @@ if [ -n "$SOURCE_QCOW_DISK" ]; then
     SOURCE_BASENAME=$(basename "$SOURCE_QCOW_DISK" .qcow2)
     LINKED_CLONE="$SOURCE_DIR/${SOURCE_BASENAME}-linked-$VM_ID.qcow2"
     # Get the actual disk path that virt-clone created
-    CLONED_DISK=$(virsh domblklist "$VM_NEW" | grep vda | awk '{print $2}')
+    CLONED_DISK=$(virsh domblklist "$VM_NEW" | grep vda | awk '{print $}')
     
     echo "Creating linked clone: $LINKED_CLONE"
     qemu-img create -f qcow2 -b "$SOURCE_QCOW_DISK" -F qcow2 "$LINKED_CLONE"
