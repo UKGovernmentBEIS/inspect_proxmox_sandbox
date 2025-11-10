@@ -164,16 +164,45 @@ cat << 'EOFVEND' > vend.sh
 #!/usr/bin/env bash
 set -eu
 
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <VM_ID> [SOURCE_QCOW_DISK]"
+    echo "  VM_ID: Numeric ID for the new VM (e.g., 1, 2, 3)"
+    echo "  SOURCE_QCOW_DISK: Optional path to source qcow2 disk to use as backing file"
+    exit 1
+fi
+
 VM_ID=$1
+SOURCE_QCOW_DISK=${2:-}
 VM_ORIG=proxmox-auto
 VM_NEW="proxmox-clone-$VM_ID"
 VM_NEW_DISK="/var/lib/libvirt/images/$VM_NEW.qcow2"
 PROXMOX_EXPOSED_PORT=$(( 11000 + $VM_ID ))
 
+SKIP=""
+
+if [ -n "$SOURCE_QCOW_DISK" ]; then
+    SKIP="--skip-copy vda"
+fi
+
 virt-clone --original "$VM_ORIG" \
                --name "$VM_NEW" \
-               --file "$VM_NEW_DISK" \
-              --check disk_size=off
+               --file "$VM_NEW_DISK" $SKIP \
+              --check disk_size=off 
+
+if [ -n "$SOURCE_QCOW_DISK" ]; then
+
+    SOURCE_DIR=$(dirname "$SOURCE_QCOW_DISK")
+    SOURCE_BASENAME=$(basename "$SOURCE_QCOW_DISK" .qcow2)
+    LINKED_CLONE="$SOURCE_DIR/${SOURCE_BASENAME}-linked-$VM_ID.qcow2"
+    # Get the actual disk path that virt-clone created
+    CLONED_DISK=$(virsh domblklist "$VM_NEW" | grep vda | awk '{print $2}')
+    
+    echo "Creating linked clone: $LINKED_CLONE"
+    qemu-img create -f qcow2 -b "$SOURCE_QCOW_DISK" -F qcow2 "$LINKED_CLONE"
+    
+    # Update the VM definition to use the linked clone
+    EDITOR="sed -i \"s|$CLONED_DISK|$LINKED_CLONE|g\"" virsh edit "$VM_NEW"
+fi
 
 root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
 
@@ -206,7 +235,6 @@ echo "PROXMOX_NODE=proxmox"
 echo "PROXMOX_VERIFY_TLS=0"
 EOFVEND
 chmod +x ./vend.sh
-
 
 yes | watch --errexit --exec sudo tmux capture-pane -pt virt-inst-proxmox:0.0 || true
 
