@@ -141,18 +141,18 @@ VM_MEM_MB=$((TOTAL_MEM_KB * 75 / 100 / 1024))
 
 VM_CPUS=$((VM_CPUS < 2 ? 2 : VM_CPUS))
 VM_MEM_MB=$((VM_MEM_MB < 4096 ? 4096 : VM_MEM_MB))
-virt-install --name proxmox-auto \\
-    --memory $VM_MEM_MB \\
-    --vcpus $VM_CPUS \\
-    --disk size=2000 \\
-    --cdrom '/var/lib/libvirt/images/proxmox-auto-from-iso.iso' \\
-    --os-variant debian12 \\
-    --network none \\
-    --graphics none \\
-    --console pty,target_type=serial \\
-    --boot uefi \\
-    --cpu host \\
-    --qemu-commandline='-device virtio-net,netdev=user.0,addr=8 -netdev user,id=user.0,hostfwd=tcp::10000-:8006' \\
+virt-install --name proxmox-auto \
+    --memory $VM_MEM_MB \
+    --vcpus $VM_CPUS \
+    --disk size=2000 \
+    --cdrom '/var/lib/libvirt/images/proxmox-auto-from-iso.iso' \
+    --os-variant debian12 \
+    --network none \
+    --graphics none \
+    --console pty,target_type=serial \
+    --boot uefi \
+    --cpu host \
+    --qemu-commandline='-device virtio-net,netdev=user.0,addr=8 -netdev user,id=user.0,hostfwd=tcp::10000-:8006' \
     --check disk_size=off
 EDITOR="sed -i '/<disk type=.*device=.cdrom/,/<\/disk>/d'" virsh edit proxmox-auto
 touch virt-inst-proxmox.complete
