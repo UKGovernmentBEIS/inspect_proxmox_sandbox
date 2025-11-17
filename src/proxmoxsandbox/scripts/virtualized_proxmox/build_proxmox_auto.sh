@@ -13,6 +13,8 @@
 # The clones will be accessible on the host at ports 11001, 11002, etc.
 # Each clone will have a different root password, which is printed out by vend.sh.
 
+# TODO: rewrite this in Python so the individual functions can be reused elsewhere
+
 virsh destroy proxmox-auto || echo "not removing proxmox-auto; not found"
 virsh undefine --nvram --remove-all-storage proxmox-auto || true
 
