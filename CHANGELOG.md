@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.3 - 2025-11-18
+
+- Size clones correctly in build_proxmox_auto
+
 ## 0.9.2 - 2025-11-10
 
 - Allow vending of arbitrary qcow images in build_proxmox_auto
