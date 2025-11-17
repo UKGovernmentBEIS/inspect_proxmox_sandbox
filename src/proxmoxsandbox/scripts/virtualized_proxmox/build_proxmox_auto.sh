@@ -124,6 +124,12 @@ docker build -t proxmox-auto-install .
 docker run --rm -v $(pwd):/output proxmox-auto-install
 sudo cp -v proxmox-auto-from-iso.iso /var/lib/libvirt/images
 
+
+# Previously there were loads of problems with permissions here when attempting to use the ubuntu user.
+# Something to do with running in cloud-init; it worked fine when logged in with ubuntu in a normal termainl.
+# I gave up and just used sudo.
+# Disk size is hard-coded, but because check disk_size=off is used, it will not take up the full amount at the start.
+cat << 'EOFVIRTINST' > virt-inst-proxmox.sh
 TOTAL_CPUS=$(nproc)
 TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 
@@ -133,15 +139,9 @@ VM_MEM_MB=$((TOTAL_MEM_KB * 75 / 100 / 1024))
 
 VM_CPUS=$((VM_CPUS < 2 ? 2 : VM_CPUS))
 VM_MEM_MB=$((VM_MEM_MB < 4096 ? 4096 : VM_MEM_MB))
-
-# Previously there were loads of problems with permissions here when attempting to use the ubuntu user.
-# Something to do with running in cloud-init; it worked fine when logged in with ubuntu in a normal termainl.
-# I gave up and just used sudo.
-# Disk size is hard-coded, but because check disk_size=off is used, it will not take up the full amount at the start.
-cat << EOFVIRTINST > virt-inst-proxmox.sh
 virt-install --name proxmox-auto \\
-    --memory ${VM_MEM_MB} \\
-    --vcpus ${VM_CPUS} \\
+    --memory $VM_MEM_MB \\
+    --vcpus $VM_CPUS \\
     --disk size=2000 \\
     --cdrom '/var/lib/libvirt/images/proxmox-auto-from-iso.iso' \\
     --os-variant debian12 \\
