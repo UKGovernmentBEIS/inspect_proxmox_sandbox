@@ -34,6 +34,8 @@ TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 VM_CPUS=$((TOTAL_CPUS * 75 / 100))
 VM_MEM_MB=$((TOTAL_MEM_KB * 75 / 100 / 1024))
 
+VM_CPUS=$((VM_CPUS < 2 ? 2 : VM_CPUS))
+VM_MEM_MB=$((VM_MEM_MB < 4096 ? 4096 : VM_MEM_MB))
 EOFCAPACITY
 
 cat << 'EOFANSWERS' > answers.toml
