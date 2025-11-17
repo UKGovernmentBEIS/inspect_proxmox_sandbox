@@ -26,6 +26,16 @@ sudo apt update
 sudo apt install -y virt-manager libvirt-clients libvirt-daemon-system qemu-system-x86 virtinst guestfs-tools
 sudo usermod --append --groups libvirt $(whoami)
 
+cat << 'EOFCAPACITY' > capacity.sh
+TOTAL_CPUS=$(nproc)
+TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+
+# Use 75% of available resources for the VM
+VM_CPUS=$((TOTAL_CPUS * 75 / 100))
+VM_MEM_MB=$((TOTAL_MEM_KB * 75 / 100 / 1024))
+
+EOFCAPACITY
+
 cat << 'EOFANSWERS' > answers.toml
 [global]
 keyboard = "en-gb"
@@ -132,15 +142,8 @@ sudo cp -v proxmox-auto-from-iso.iso /var/lib/libvirt/images
 # I gave up and just used sudo.
 # Disk size is hard-coded, but because check disk_size=off is used, it will not take up the full amount at the start.
 cat << 'EOFVIRTINST' > virt-inst-proxmox.sh
-TOTAL_CPUS=$(nproc)
-TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+source ./capacity.sh
 
-# Use 75% of available resources for the VM
-VM_CPUS=$((TOTAL_CPUS * 75 / 100))
-VM_MEM_MB=$((TOTAL_MEM_KB * 75 / 100 / 1024))
-
-VM_CPUS=$((VM_CPUS < 2 ? 2 : VM_CPUS))
-VM_MEM_MB=$((VM_MEM_MB < 4096 ? 4096 : VM_MEM_MB))
 virt-install --name proxmox-auto \
     --memory $VM_MEM_MB \
     --vcpus $VM_CPUS \
@@ -172,6 +175,8 @@ if [ $# -lt 1 ]; then
     echo "  SOURCE_QCOW_DISK: Optional path to source qcow2 disk to use as backing file"
     exit 1
 fi
+
+source ./capacity.sh
 
 VM_ID=$1
 SOURCE_QCOW_DISK=${2:-}
@@ -215,6 +220,10 @@ sudo virt-sysprep -d "$VM_NEW" \
     --operations "defaults,-ssh-hostkeys" \
 
 EDITOR="sed -i 's/hostfwd=tcp::[0-9]\+-:8006/hostfwd=tcp::$PROXMOX_EXPOSED_PORT-:8006/'" virsh edit "$VM_NEW"
+
+virsh setmaxmem "$VM_NEW" ${VM_MEM_MB}M --config
+virsh setmem "$VM_NEW" ${VM_MEM_MB}M --config
+virsh setvcpus "$VM_NEW" $VM_CPUS  --maximum  --config
 
 virsh autostart "$VM_NEW"
 virsh start "$VM_NEW"
