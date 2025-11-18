@@ -13,6 +13,8 @@
 # The clones will be accessible on the host at ports 11001, 11002, etc.
 # Each clone will have a different root password, which is printed out by vend.sh.
 
+# TODO: rewrite this in Python so the individual functions can be reused elsewhere
+
 virsh destroy proxmox-auto || echo "not removing proxmox-auto; not found"
 virsh undefine --nvram --remove-all-storage proxmox-auto || true
 
@@ -23,6 +25,18 @@ docker ps || echo 'You must have Docker installed and be in the correct docker g
 sudo apt update
 sudo apt install -y virt-manager libvirt-clients libvirt-daemon-system qemu-system-x86 virtinst guestfs-tools
 sudo usermod --append --groups libvirt $(whoami)
+
+cat << 'EOFCAPACITY' > capacity.sh
+TOTAL_CPUS=$(nproc)
+TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+
+# Use 75% of available resources for the VM
+VM_CPUS=$((TOTAL_CPUS * 75 / 100))
+VM_MEM_MB=$((TOTAL_MEM_KB * 75 / 100 / 1024))
+
+VM_CPUS=$((VM_CPUS < 2 ? 2 : VM_CPUS))
+VM_MEM_MB=$((VM_MEM_MB < 4096 ? 4096 : VM_MEM_MB))
+EOFCAPACITY
 
 cat << 'EOFANSWERS' > answers.toml
 [global]
@@ -124,33 +138,26 @@ docker build -t proxmox-auto-install .
 docker run --rm -v $(pwd):/output proxmox-auto-install
 sudo cp -v proxmox-auto-from-iso.iso /var/lib/libvirt/images
 
-TOTAL_CPUS=$(nproc)
-TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-
-# Use 75% of available resources for the VM
-VM_CPUS=$((TOTAL_CPUS * 75 / 100))
-VM_MEM_MB=$((TOTAL_MEM_KB * 75 / 100 / 1024))
-
-VM_CPUS=$((VM_CPUS < 2 ? 2 : VM_CPUS))
-VM_MEM_MB=$((VM_MEM_MB < 4096 ? 4096 : VM_MEM_MB))
 
 # Previously there were loads of problems with permissions here when attempting to use the ubuntu user.
 # Something to do with running in cloud-init; it worked fine when logged in with ubuntu in a normal termainl.
 # I gave up and just used sudo.
 # Disk size is hard-coded, but because check disk_size=off is used, it will not take up the full amount at the start.
-cat << EOFVIRTINST > virt-inst-proxmox.sh
-virt-install --name proxmox-auto \\
-    --memory ${VM_MEM_MB} \\
-    --vcpus ${VM_CPUS} \\
-    --disk size=2000 \\
-    --cdrom '/var/lib/libvirt/images/proxmox-auto-from-iso.iso' \\
-    --os-variant debian12 \\
-    --network none \\
-    --graphics none \\
-    --console pty,target_type=serial \\
-    --boot uefi \\
-    --cpu host \\
-    --qemu-commandline='-device virtio-net,netdev=user.0,addr=8 -netdev user,id=user.0,hostfwd=tcp::10000-:8006' \\
+cat << 'EOFVIRTINST' > virt-inst-proxmox.sh
+source ./capacity.sh
+
+virt-install --name proxmox-auto \
+    --memory $VM_MEM_MB \
+    --vcpus $VM_CPUS \
+    --disk size=2000 \
+    --cdrom '/var/lib/libvirt/images/proxmox-auto-from-iso.iso' \
+    --os-variant debian12 \
+    --network none \
+    --graphics none \
+    --console pty,target_type=serial \
+    --boot uefi \
+    --cpu host \
+    --qemu-commandline='-device virtio-net,netdev=user.0,addr=8 -netdev user,id=user.0,hostfwd=tcp::10000-:8006' \
     --check disk_size=off
 EDITOR="sed -i '/<disk type=.*device=.cdrom/,/<\/disk>/d'" virsh edit proxmox-auto
 touch virt-inst-proxmox.complete
@@ -170,6 +177,8 @@ if [ $# -lt 1 ]; then
     echo "  SOURCE_QCOW_DISK: Optional path to source qcow2 disk to use as backing file"
     exit 1
 fi
+
+source ./capacity.sh
 
 VM_ID=$1
 SOURCE_QCOW_DISK=${2:-}
@@ -213,6 +222,10 @@ sudo virt-sysprep -d "$VM_NEW" \
     --operations "defaults,-ssh-hostkeys" \
 
 EDITOR="sed -i 's/hostfwd=tcp::[0-9]\+-:8006/hostfwd=tcp::$PROXMOX_EXPOSED_PORT-:8006/'" virsh edit "$VM_NEW"
+
+virsh setmaxmem "$VM_NEW" ${VM_MEM_MB}M --config
+virsh setmem "$VM_NEW" ${VM_MEM_MB}M --config
+virsh setvcpus "$VM_NEW" $VM_CPUS  --maximum  --config
 
 virsh autostart "$VM_NEW"
 virsh start "$VM_NEW"
