@@ -236,7 +236,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 async_proxmox_api=async_proxmox_api, config=config
             )
 
-            async with concurrency("proxmox", 2):
+            async with concurrency(f"proxmox-{instance.instance_id}", 1):
                 vm_configs_with_ids, sdn_zone_id = await infra_commands.create_sdn_and_vms(
                     proxmox_ids_start,
                     sdn_config=config.sdn_config,
