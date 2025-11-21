@@ -14,7 +14,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
 )
-from proxmoxsandbox._impl.sdn_commands import SdnCommands, VnetAliases
+from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import StorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
@@ -46,7 +46,6 @@ class QemuCommands(abc.ABC):
         self.storage = "local"
         self.storage_commands = StorageCommands(async_proxmox, node, self.storage)
         self.node = node
-        self.sdn_commands = None
 
     async def await_vm(
         self,
