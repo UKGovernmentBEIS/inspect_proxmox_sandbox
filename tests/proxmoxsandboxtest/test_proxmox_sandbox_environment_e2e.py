@@ -23,6 +23,72 @@ from .proxmox_sandbox_utils import setup_sandbox
 CURRENT_DIR = Path(__file__).parent
 
 
+async def test_static_ip() -> None:
+    """Test that VMs get their configured static IPs."""
+    from ipaddress import ip_address, ip_network
+
+    from pydantic_extra_types.mac_address import MacAddress
+
+    task_name = "test_static_ip"
+    envs_dict: Dict[str, SandboxEnvironment] = {}
+    sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
+        sdn_config=SdnConfig(
+            vnet_configs=(
+                VnetConfig(
+                    alias="static-test",
+                    subnets=(
+                        SubnetConfig(
+                            cidr=ip_network("10.99.0.0/24"),
+                            gateway=ip_address("10.99.0.1"),
+                            snat=True,
+                            dhcp_ranges=(
+                                DhcpRange(
+                                    start=ip_address("10.99.0.50"),
+                                    end=ip_address("10.99.0.100"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            use_pve_ipam_dnsnmasq=True,
+        ),
+        vms_config=(
+            VmConfig(
+                name="static-vm",
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                nics=(
+                    VmNicConfig(
+                        vnet_alias="static-test",
+                        mac=MacAddress("52:54:00:99:99:01"),
+                        ipv4=ip_address("10.99.0.10"),
+                    ),
+                ),
+                ram_mb=512,
+                vcpus=1,
+            ),
+        ),
+    )
+
+    try:
+        _, envs_dict = await setup_sandbox(task_name, sandbox_env_config)
+        sandbox = envs_dict["default"]
+
+        ip_result = await sandbox.exec(["ip", "-4", "addr", "show", "dev", "ens18"])
+        assert ip_result.success, f"Failed to get IP: {ip_result=}"
+        assert "10.99.0.10" in ip_result.stdout, (
+            f"VM did not get static IP 10.99.0.10: {ip_result.stdout=}"
+        )
+    finally:
+        if envs_dict:
+            await ProxmoxSandboxEnvironment.sample_cleanup(
+                task_name=task_name,
+                config=sandbox_env_config,
+                environments=envs_dict,
+                interrupted=False,
+            )
+
+
 async def test_built_in() -> None:
     envs_dict: Dict[str, SandboxEnvironment] = {}
     sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
@@ -147,17 +213,20 @@ async def test_built_in() -> None:
             interrupted=False,
         )
 
+
 async def check_os(sandbox: SandboxEnvironment, expected_in_id: str):
     lsb_release_result = await sandbox.exec(
-            [
-                "lsb_release",
-                "--id",
-            ]
-        )
-    assert lsb_release_result.success, f"Failed to run lsb_release: {lsb_release_result=}"
+        [
+            "lsb_release",
+            "--id",
+        ]
+    )
+    assert lsb_release_result.success, (
+        f"Failed to run lsb_release: {lsb_release_result=}"
+    )
     assert expected_in_id in lsb_release_result.stdout, (
-            f"Unexpected result of lsb_release: {lsb_release_result.stdout=}"
-        )
+        f"Unexpected result of lsb_release: {lsb_release_result.stdout=}"
+    )
 
 
 async def test_multiple_sandboxes_isolated(sandbox_env_config) -> None:
@@ -270,8 +339,6 @@ async def test_connect(proxmox_sandbox_environment: ProxmoxSandboxEnvironment) -
     # we can't really do much more than this assertion;
     # sandbox.connection() needs to be tested manually
     assert "open 'http" in connection.command
-
-
 
 
 async def test_cli_cleanup(

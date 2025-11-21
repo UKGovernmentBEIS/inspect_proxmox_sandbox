@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.4 - 2025-11-21
+
+- Support static IPv4 allocation
+
 ## 0.9.3 - 2025-11-18
 
 - Size clones correctly in build_proxmox_auto

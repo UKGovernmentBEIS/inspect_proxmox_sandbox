@@ -14,7 +14,7 @@ from rich.table import Table
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
-from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, SdnCommands
+from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, SdnCommands, VnetAliases
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     SdnConfigType,
@@ -56,6 +56,10 @@ class InfraCommands(abc.ABC):
         known_builtins = await self.built_in_vm.known_builtins()
 
         for vm_config in vms_config:
+            # We have to create the IPAM entries before booting the VMs
+            # otherwise they will not get the defined static IPs.
+            await self.create_dhcp_mappings(vnet_aliases, vm_config, sdn_zone_id)
+
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
                 vm_id = await self.qemu_commands.create_and_start_vm(
                     sdn_vnet_aliases=vnet_aliases,
@@ -81,6 +85,41 @@ class InfraCommands(abc.ABC):
             await self.qemu_commands.destroy_vm(vm_id=vm_id)
         if sdn_zone_id is not None:
             await self.sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id=sdn_zone_id)
+
+    async def create_dhcp_mappings(
+        self,
+        sdn_vnet_aliases: VnetAliases,
+        vm_config: VmConfig,
+        sdn_zone_id: str | None,
+    ) -> None:
+        # `sdn_zone_id` _might_ be None, see my comment in `sdn_commands` about this.
+        # As such, the static-ip IPAM allocation is incompatible with the predefined
+        # VNET functionality, unless we add logic to grab the zone id the alias belongs
+        # to here.
+        if not (vm_config.nics and sdn_zone_id):
+            return
+
+        alias_mapping = self.qemu_commands._convert_sdn_vnet_aliases(sdn_vnet_aliases)
+
+        for nic in vm_config.nics:
+            if not (nic.mac and nic.ipv4):
+                continue
+
+            if nic.vnet_alias in alias_mapping:
+                vnet_id = alias_mapping[nic.vnet_alias]
+            else:
+                raise ValueError(
+                    f"VNET alias '{nic.vnet_alias}' not found. "
+                    f"Available: {list(alias_mapping.keys())}"
+                )
+
+            # Note we don't need a `do_update_all_sdn` call after these.
+            await self.sdn_commands.create_dhcp_mapping(
+                vnet_id=vnet_id,
+                zone_id=sdn_zone_id,
+                mac_address=str(nic.mac).upper(),
+                ip_addr=str(nic.ipv4),
+            )
 
     async def find_proxmox_ids_start(self, task_name_start: str) -> str:
         existing_zone_ids = set(
