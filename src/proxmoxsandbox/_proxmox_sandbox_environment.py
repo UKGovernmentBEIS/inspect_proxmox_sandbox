@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import errno
 import re
@@ -5,7 +6,7 @@ import shlex
 import time
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Tuple, Union
+from typing import Any, Dict, Generator, List, Tuple, Type, Union
 
 import tenacity
 from inspect_ai.util import (
@@ -28,7 +29,9 @@ from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
+from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
 from proxmoxsandbox.schema import (
+    ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
     SdnConfigType,
 )
@@ -42,6 +45,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
     TRACE_NAME = "proxmox_sandbox_environment"
 
+    proxmox_pool: Type[ProxmoxPoolABC] = QueueBasedProxmoxPool
+
+    # Instance variables
     infra_commands: InfraCommands
     agent_commands: AgentCommands
     qemu_commands: QemuCommands
@@ -51,6 +57,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     vm_id: int
     all_vm_ids: Tuple[int, ...]
     sdn_zone_id: str | None
+    # Multi-instance pool fields
+    instance: ProxmoxInstanceConfig | None
+    pool_id: str | None
 
     def __init__(
         self,
@@ -60,6 +69,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         vm_id: int,
         all_vm_ids: Tuple[int, ...],
         sdn_zone_id: str | None,
+        instance: ProxmoxInstanceConfig | None = None,
+        pool_id: str | None = None,
     ):
         self.infra_commands = InfraCommands(async_proxmox=proxmox, node=node)
         self.agent_commands = AgentCommands(async_proxmox=proxmox, node=node)
@@ -70,6 +81,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.vm_id = vm_id
         self.all_vm_ids = all_vm_ids
         self.sdn_zone_id = sdn_zone_id
+        self.instance = instance
+        self.pool_id = pool_id
 
     # originally from k8s sandbox
     def _pipe_user_input(self, stdin: str | bytes) -> str:
@@ -155,19 +168,32 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @classmethod
     @override
     def default_concurrency(cls) -> int | None:
-        return None
+        """Return the default concurrency limit from the pool implementation.
+
+        Returns:
+            Maximum number of concurrent samples, or None for unlimited.
+        """
+        return cls.proxmox_pool.default_concurrency()
 
     @classmethod
     @override
     async def task_init(
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
-        if config is not None:
-            if not isinstance(config, ProxmoxSandboxEnvironmentConfig):
-                raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
-            async_proxmox_api = cls._create_async_proxmox_api(config)
-            await ProxmoxSandboxEnvironment.ensure_vms(async_proxmox_api, config)
+        # Note: config may be None or a task-level config.
+        # In practice (e.g., inspect_cyber), there's ONE task with many samples,
+        # each sample having its own config passed to sample_init.
+        # We always create pools here regardless of config, since pool creation
+        # only depends on the underlying infrastructure (defined in
+        # PROXMOX_CONFIG_FILE), not on eval-specific config.
+        await cls.create_proxmox_instance_pools()
         return None
+
+    @classmethod
+    async def create_proxmox_instance_pools(cls) -> None:
+        """Initialize the Proxmox instance pools using the configured pool class."""
+        await cls.proxmox_pool.initialize()
+
 
     @classmethod
     @override
@@ -182,71 +208,92 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if not isinstance(config, ProxmoxSandboxEnvironmentConfig):
             raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
 
-        async_proxmox_api = cls._create_async_proxmox_api(config)
+        # Get the pool_id for this specific sample
+        pool_id = config.instance_pool_id
 
-        infra_commands = InfraCommands(
-            async_proxmox=async_proxmox_api, node=config.node
-        )
+        # ACQUIRE instance from pool (blocks if all in use)
+        instance = await cls.proxmox_pool.acquire_instance(pool_id)
 
-        task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
-
-        proxmox_ids_start = await infra_commands.find_proxmox_ids_start(task_name_start)
-
-        await ProxmoxSandboxEnvironment.ensure_vms(
-            async_proxmox_api=async_proxmox_api, config=config
-        )
-
-        async with concurrency("proxmox", 1):
-            vm_configs_with_ids, sdn_zone_id = await infra_commands.create_sdn_and_vms(
-                proxmox_ids_start,
-                sdn_config=config.sdn_config,
-                vms_config=config.vms_config,
+        try:
+            # Create API using acquired instance's credentials
+            async_proxmox_api = AsyncProxmoxAPI(
+                host=f"{instance.host}:{instance.port}",
+                user=f"{instance.user}@{instance.user_realm}",
+                password=instance.password,
+                verify_tls=instance.verify_tls,
             )
 
-        sandboxes: Dict[str, SandboxEnvironment] = {}
-
-        vm_ids = tuple(
-            vm_configs_with_id[0] for vm_configs_with_id in vm_configs_with_ids
-        )
-
-        found_default = False
-
-        for idx, vm_config_and_id in enumerate(vm_configs_with_ids):
-            vm_sandbox_environment = ProxmoxSandboxEnvironment(
-                proxmox=async_proxmox_api,
-                node=config.node,
-                sdn_config=config.sdn_config,
-                vm_id=vm_config_and_id[0],
-                all_vm_ids=vm_ids,
-                sdn_zone_id=sdn_zone_id,
+            infra_commands = InfraCommands(
+                async_proxmox=async_proxmox_api, node=instance.node
             )
-            if not found_default and vm_config_and_id[1].is_sandbox:
-                sandboxes["default"] = vm_sandbox_environment
-                found_default = True
-            else:
-                sandbox_name = (
-                    vm_config_and_id[1].name
-                    if vm_config_and_id[1].name is not None
-                    else f"vm_{vm_config_and_id[0]}"
+
+            task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
+
+            proxmox_ids_start = await infra_commands.find_proxmox_ids_start(task_name_start)
+
+            # Ensure built-in VM templates exist on this instance
+            await ProxmoxSandboxEnvironment.ensure_vms(
+                async_proxmox_api=async_proxmox_api, config=config
+            )
+
+            async with concurrency(f"proxmox-{instance.instance_id}", 1):
+                vm_configs_with_ids, sdn_zone_id = await infra_commands.create_sdn_and_vms(
+                    proxmox_ids_start,
+                    sdn_config=config.sdn_config,
+                    vms_config=config.vms_config,
                 )
-                sandboxes[sandbox_name] = vm_sandbox_environment
 
-        if not found_default:
-            raise ValueError(
-                "No default sandbox found: at least one VM must have is_sandbox = True"
+            sandboxes: Dict[str, SandboxEnvironment] = {}
+
+            vm_ids = tuple(
+                vm_configs_with_id[0] for vm_configs_with_id in vm_configs_with_ids
             )
 
-        # borrowed from k8s provider
-        def reorder_default_first(
-            sandboxes: dict[str, SandboxEnvironment],
-        ) -> dict[str, SandboxEnvironment]:
-            # Inspect expects the default sandbox to be the first sandbox in the dict.
-            if "default" in sandboxes:
-                default = sandboxes.pop("default")
-                return {"default": default, **sandboxes}
-            return sandboxes
+            found_default = False
 
-        return reorder_default_first(sandboxes)
+            for idx, vm_config_and_id in enumerate(vm_configs_with_ids):
+                vm_sandbox_environment = ProxmoxSandboxEnvironment(
+                    proxmox=async_proxmox_api,
+                    node=instance.node,
+                    sdn_config=config.sdn_config,
+                    vm_id=vm_config_and_id[0],
+                    all_vm_ids=vm_ids,
+                    sdn_zone_id=sdn_zone_id,
+                    instance=instance,
+                    pool_id=pool_id,
+                )
+                if not found_default and vm_config_and_id[1].is_sandbox:
+                    sandboxes["default"] = vm_sandbox_environment
+                    found_default = True
+                else:
+                    sandbox_name = (
+                        vm_config_and_id[1].name
+                        if vm_config_and_id[1].name is not None
+                        else f"vm_{vm_config_and_id[0]}"
+                    )
+                    sandboxes[sandbox_name] = vm_sandbox_environment
+
+            if not found_default:
+                raise ValueError(
+                    "No default sandbox found: at least one VM must have is_sandbox = True"
+                )
+
+            # borrowed from k8s provider
+            def reorder_default_first(
+                sandboxes: dict[str, SandboxEnvironment],
+            ) -> dict[str, SandboxEnvironment]:
+                # Inspect expects the default sandbox to be the first sandbox in the dict.
+                if "default" in sandboxes:
+                    default = sandboxes.pop("default")
+                    return {"default": default, **sandboxes}
+                return sandboxes
+
+            return reorder_default_first(sandboxes)
+
+        except Exception:
+            # On error, release instance back to pool immediately
+            await cls.proxmox_pool.release_instance(pool_id, instance)
+            raise
 
     @classmethod
     def _create_async_proxmox_api(
@@ -268,20 +315,55 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         environments: Dict[str, SandboxEnvironment],
         interrupted: bool,
     ) -> None:
-        if not interrupted:
-            any_vm_sandbox_environment: ProxmoxSandboxEnvironment | None = None
-            for env in environments.values():
-                if isinstance(env, ProxmoxSandboxEnvironment):
-                    # we only need a single VM sandbox to have enough information
-                    # to tear them all down
-                    any_vm_sandbox_environment = env
+        # Get instance and pool_id from first environment (for returning to pool)
+        any_vm_sandbox_environment: ProxmoxSandboxEnvironment | None = None
+        instance: ProxmoxInstanceConfig | None = None
+        pool_id: str | None = None
 
+        for env in environments.values():
+            if isinstance(env, ProxmoxSandboxEnvironment):
+                # we only need a single VM sandbox to have enough information
+                # to tear them all down
+                any_vm_sandbox_environment = env
+                instance = env.instance
+                pool_id = env.pool_id
+                break
+
+        cleanup_succeeded = False
+        try:
             if any_vm_sandbox_environment is not None:
                 async with concurrency("proxmox", 1):
                     await any_vm_sandbox_environment.infra_commands.delete_sdn_and_vms(
                         sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
                         vm_ids=any_vm_sandbox_environment.all_vm_ids,
                     )
+                cleanup_succeeded = True
+                cls.logger.info(
+                    f"Successfully cleaned up VMs for instance {instance.instance_id if instance else 'unknown'}"
+                )
+        except Exception as ex:
+            cls.logger.error(
+                f"Cleanup failed for instance {instance.instance_id if instance else 'unknown'}: {ex}"
+            )
+            raise
+        finally:
+            # Only return instances to the pool after successful cleanup.
+            # Dirty instances would cause the next sample to fail when it
+            # finds leftover VMs. This may exhaust the pool but prevents
+            # cascading failures across samples.
+            if instance is not None and pool_id is not None:
+                if cleanup_succeeded:
+                    cls.logger.info(
+                        f"Releasing instance {instance.instance_id} "
+                        f"from pool '{pool_id}' back to queue"
+                    )
+                    await cls.proxmox_pool.release_instance(pool_id, instance)
+                else:
+                    cls.logger.warning(
+                        f"NOT releasing instance {instance.instance_id} "
+                        f"from pool '{pool_id}' - cleanup failed, instance may be dirty"
+                    )
+
         return None
 
     @classmethod
