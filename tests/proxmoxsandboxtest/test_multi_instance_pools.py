@@ -95,7 +95,6 @@ async def test_single_instance_single_sample(
     5. sample_cleanup releases instance back to pool
     6. task_cleanup called at end
     """
-
     # Setup: Set env var (what user does)
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
 
@@ -218,7 +217,6 @@ async def test_two_pools_two_configs(
     6. Instances are returned to correct pools on cleanup
     7. task_cleanup called once at end
     """
-
     # Setup: Set env var
     os.environ["PROXMOX_CONFIG_FILE"] = multi_pool_config_file
 
@@ -500,7 +498,11 @@ async def test_cleanup_with_interrupted_flag(
     mock_built_in_vm,
     mock_infra_commands
 ):
-    """Test that instance is returned even when interrupted=True."""
+    """Test that cleanup runs and instance is returned when interrupted=True.
+
+    The interrupted flag indicates user cancellation (Ctrl-C) or timeout,
+    but cleanup must still run to avoid leaving VMs running on the instance.
+    """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
 
     try:
@@ -520,7 +522,7 @@ async def test_cleanup_with_interrupted_flag(
             "test_task", config, envs, interrupted=True
         )
 
-        # Instance should still be returned to pool
+        # Cleanup should run successfully and instance returned to pool
         assert pool.qsize() == 1
 
     finally:

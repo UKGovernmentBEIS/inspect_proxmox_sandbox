@@ -217,16 +217,72 @@ poetry install
 - Docstrings for public APIs
 
 ### Comment Policy
-**DO NOT add comments that describe changes you just made.**
-- ❌ Bad: `# First instance - verify all fields` (after adding assertions)
-- ❌ Bad: `# TODO: Refactor this later` or `# Leave this for now`
-- ✅ Good: Only add comments that explain **why** code exists, not **what** it does
-- ✅ Good: `# TODO: Extract this to a separate module for better testability` (specific actionable TODO)
 
-**Comments should be permanent documentation, not change artifacts:**
-- If a comment only makes sense "right now" during a refactoring, don't add it
-- Readers expect code to be complete; don't document what's "already there"
-- Future TODOs must be specific and actionable, not vague placeholders
+**Write comments that explain the current state of the code, not the conversation that led to it.**
+
+#### What NOT to Comment
+
+❌ **Don't reference implementation conversations:**
+```python
+# Unlike Docker which defers cleanup, we clean up immediately
+# Changed this after discussing with the team
+```
+
+❌ **Don't describe changes you just made:**
+```python
+# First instance - verify all fields (after adding assertions)
+# Added logging here
+```
+
+❌ **Don't add vague TODOs:**
+```python
+# TODO: Refactor this later
+# TODO: Fix this
+# Leave this for now
+```
+
+❌ **Don't explain what the code does (if it's obvious):**
+```python
+# Loop through all instances
+for instance in instances:
+    # Call the cleanup method
+    await cleanup(instance)
+```
+
+#### What TO Comment
+
+✅ **Explain WHY, not WHAT:**
+```python
+# Only return instances to the pool after successful cleanup.
+# Dirty instances would cause the next sample to fail when it
+# finds leftover VMs.
+```
+
+✅ **Document non-obvious design decisions:**
+```python
+# QEMU guest agent can only be called once per PID after
+# process completion. Do not add debug calls here.
+```
+
+✅ **Warn about footguns:**
+```python
+# NEVER skip hooks (--no-verify, --no-gpg-sign) unless
+# user explicitly requests it
+```
+
+✅ **Specific, actionable TODOs with context:**
+```python
+# TODO: Extract exec_command logic to separate module for unit testing.
+# Currently tightly coupled with async_proxmox which requires real server.
+```
+
+#### General Guidelines
+
+- **Comments should make sense to someone reading the code for the first time**
+- **Assume readers don't have context from PRs, conversations, or git history**
+- **If code is self-explanatory, don't comment it**
+- **Focus on the "why" and the consequences, not the "how"**
+- **Think: "Will this comment still make sense in 6 months?"**
 
 ## Important Gotchas
 

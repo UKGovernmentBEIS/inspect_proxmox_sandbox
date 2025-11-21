@@ -6,7 +6,10 @@ from collections import defaultdict
 from logging import getLogger
 from typing import Dict, List, Tuple
 
-from proxmoxsandbox.schema import ProxmoxInstanceConfig, _load_instances_from_env_or_file
+from proxmoxsandbox.schema import (
+    ProxmoxInstanceConfig,
+    _load_instances_from_env_or_file,
+)
 
 
 class ProxmoxPoolABC(ABC):
@@ -54,6 +57,20 @@ class ProxmoxPoolABC(ABC):
         Args:
             pool_id: The pool identifier
             instance: The instance to release back to the pool
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
+    def default_concurrency(cls) -> int | None:
+        """Return the default concurrency limit for this pool implementation.
+
+        This determines how many samples can run concurrently based on the
+        pool's capacity. For queue-based pools, this is typically the total
+        number of instances across all pools.
+
+        Returns:
+            Maximum number of concurrent samples, or None for unlimited.
         """
         pass
 
@@ -153,6 +170,26 @@ class QueueBasedProxmoxPool(ProxmoxPoolABC):
         """
         if pool_id in cls._instance_pools:
             cls._instance_pools[pool_id].put_nowait(instance)
+
+    @classmethod
+    def default_concurrency(cls) -> int | None:
+        """Return the total number of Proxmox instances across all pools.
+
+        NOTE: This is optimal when all samples use the same pool (common case).
+        With mixed-pool workloads, some instances may be temporarily idle.
+
+        Proper per-pool concurrency control would require changes to Inspect's
+        core architecture, which is not designed to handle heterogeneous
+        limited sandbox environments within a single task.
+
+        Returns:
+            Total number of Proxmox instances, or 1 for legacy single-instance mode.
+        """
+        try:
+            instances = _load_instances_from_env_or_file()
+            return len(instances) if instances else 1
+        except Exception:
+            return 1
 
     @classmethod
     def clear_pools(cls) -> None:

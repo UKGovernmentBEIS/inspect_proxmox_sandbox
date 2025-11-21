@@ -34,7 +34,6 @@ from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
     SdnConfigType,
-    _load_instances_from_env_or_file,
 )
 
 
@@ -169,23 +168,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @classmethod
     @override
     def default_concurrency(cls) -> int | None:
-        """Return the total number of Proxmox instances across all pools.
-
-        NOTE: This is optimal when all samples use the same pool (common case).
-        With mixed-pool workloads, some instances may be temporarily idle.
-
-        Proper per-pool concurrency control would require changes to Inspect's
-        core architecture, which is not designed to handle heterogeneous
-        limited sandbox environments within a single task.
+        """Return the default concurrency limit from the pool implementation.
 
         Returns:
-            Total number of Proxmox instances, or 1 for legacy single-instance mode.
+            Maximum number of concurrent samples, or None for unlimited.
         """
-        try:
-            instances = _load_instances_from_env_or_file()
-            return len(instances) if instances else 1
-        except Exception:
-            return 1
+        return cls.proxmox_pool.default_concurrency()
 
     @classmethod
     @override
@@ -341,17 +329,40 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 pool_id = env.pool_id
                 break
 
+        cleanup_succeeded = False
         try:
-            if not interrupted and any_vm_sandbox_environment is not None:
+            if any_vm_sandbox_environment is not None:
                 async with concurrency("proxmox", 1):
                     await any_vm_sandbox_environment.infra_commands.delete_sdn_and_vms(
                         sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
                         vm_ids=any_vm_sandbox_environment.all_vm_ids,
                     )
+                cleanup_succeeded = True
+                cls.logger.info(
+                    f"Successfully cleaned up VMs for instance {instance.instance_id if instance else 'unknown'}"
+                )
+        except Exception as ex:
+            cls.logger.error(
+                f"Cleanup failed for instance {instance.instance_id if instance else 'unknown'}: {ex}"
+            )
+            raise
         finally:
-            # RELEASE instance back to pool (even if cleanup failed)
+            # Only return instances to the pool after successful cleanup.
+            # Dirty instances would cause the next sample to fail when it
+            # finds leftover VMs. This may exhaust the pool but prevents
+            # cascading failures across samples.
             if instance is not None and pool_id is not None:
-                await cls.proxmox_pool.release_instance(pool_id, instance)
+                if cleanup_succeeded:
+                    cls.logger.info(
+                        f"Releasing instance {instance.instance_id} "
+                        f"from pool '{pool_id}' back to queue"
+                    )
+                    await cls.proxmox_pool.release_instance(pool_id, instance)
+                else:
+                    cls.logger.warning(
+                        f"NOT releasing instance {instance.instance_id} "
+                        f"from pool '{pool_id}' - cleanup failed, instance may be dirty"
+                    )
 
         return None
 
