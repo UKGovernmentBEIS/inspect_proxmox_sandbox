@@ -114,8 +114,8 @@ async def test_single_instance_single_sample(
         assert config.instance_pool_id == "default"
 
         # Verify: Pool created with 1 instance
-        assert "default" in ProxmoxSandboxEnvironment._instance_pools
-        pool = ProxmoxSandboxEnvironment._instance_pools["default"]
+        assert "default" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
+        pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["default"]
         assert pool.qsize() == 1
 
         # Step 3: sample_init (Inspect calls for each sample with sample's config)
@@ -147,8 +147,7 @@ async def test_single_instance_single_sample(
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
         # Clear pools for next test
-        ProxmoxSandboxEnvironment._instance_pools.clear()
-        ProxmoxSandboxEnvironment._pool_locks.clear()
+        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.fixture
@@ -244,11 +243,11 @@ async def test_two_pools_two_configs(
         assert config_kali.instance_pool_id == "kali-pool"
 
         # Verify: BOTH pools created from single task_init call
-        assert "ubuntu-pool" in ProxmoxSandboxEnvironment._instance_pools
-        assert "kali-pool" in ProxmoxSandboxEnvironment._instance_pools
+        assert "ubuntu-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
+        assert "kali-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
 
-        ubuntu_pool = ProxmoxSandboxEnvironment._instance_pools["ubuntu-pool"]
-        kali_pool = ProxmoxSandboxEnvironment._instance_pools["kali-pool"]
+        ubuntu_pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["ubuntu-pool"]
+        kali_pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["kali-pool"]
 
         assert ubuntu_pool.qsize() == 2  # 2 ubuntu instances
         assert kali_pool.qsize() == 1    # 1 kali instance
@@ -312,8 +311,7 @@ async def test_two_pools_two_configs(
         # Cleanup
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment._instance_pools.clear()
-        ProxmoxSandboxEnvironment._pool_locks.clear()
+        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -346,8 +344,7 @@ async def test_wrong_pool_id_raises_error(
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment._instance_pools.clear()
-        ProxmoxSandboxEnvironment._pool_locks.clear()
+        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -370,7 +367,7 @@ async def test_pool_exhaustion_blocks(
             "test_task", config, {}
         )
 
-        pool = ProxmoxSandboxEnvironment._instance_pools["default"]
+        pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["default"]
         assert pool.qsize() == 0  # Pool exhausted
 
         # Try to acquire second instance - should timeout
@@ -397,8 +394,7 @@ async def test_pool_exhaustion_blocks(
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment._instance_pools.clear()
-        ProxmoxSandboxEnvironment._pool_locks.clear()
+        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -419,7 +415,7 @@ async def test_sample_error_releases_instance(
             await ProxmoxSandboxEnvironment.task_init("test_task", None)
 
             config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="default")
-            pool = ProxmoxSandboxEnvironment._instance_pools["default"]
+            pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["default"]
 
             assert pool.qsize() == 1  # One instance available
 
@@ -435,8 +431,7 @@ async def test_sample_error_releases_instance(
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
                 del os.environ["PROXMOX_CONFIG_FILE"]
-            ProxmoxSandboxEnvironment._instance_pools.clear()
-            ProxmoxSandboxEnvironment._pool_locks.clear()
+            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -454,7 +449,7 @@ async def test_empty_instances_list():
         await ProxmoxSandboxEnvironment.task_init("test_task", None)
 
         # No pools should be created
-        assert len(ProxmoxSandboxEnvironment._instance_pools) == 0
+        assert len(ProxmoxSandboxEnvironment.proxmox_pool._instance_pools) == 0
 
         # Trying to use any pool should fail
         config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="default")
@@ -468,8 +463,7 @@ async def test_empty_instances_list():
         os.unlink(temp_path)
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment._instance_pools.clear()
-        ProxmoxSandboxEnvironment._pool_locks.clear()
+        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -486,18 +480,17 @@ async def test_concurrent_task_init_calls(multi_pool_config_file):
         )
 
         # Both pools should exist exactly once
-        assert "ubuntu-pool" in ProxmoxSandboxEnvironment._instance_pools
-        assert "kali-pool" in ProxmoxSandboxEnvironment._instance_pools
+        assert "ubuntu-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
+        assert "kali-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
 
         # Correct number of instances in each pool
-        assert ProxmoxSandboxEnvironment._instance_pools["ubuntu-pool"].qsize() == 2
-        assert ProxmoxSandboxEnvironment._instance_pools["kali-pool"].qsize() == 1
+        assert ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["ubuntu-pool"].qsize() == 2
+        assert ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["kali-pool"].qsize() == 1
 
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment._instance_pools.clear()
-        ProxmoxSandboxEnvironment._pool_locks.clear()
+        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -514,7 +507,7 @@ async def test_cleanup_with_interrupted_flag(
         await ProxmoxSandboxEnvironment.task_init("test_task", None)
 
         config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="default")
-        pool = ProxmoxSandboxEnvironment._instance_pools["default"]
+        pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["default"]
 
         # Acquire instance
         envs = await ProxmoxSandboxEnvironment.sample_init(
@@ -533,5 +526,4 @@ async def test_cleanup_with_interrupted_flag(
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment._instance_pools.clear()
-        ProxmoxSandboxEnvironment._pool_locks.clear()
+        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()

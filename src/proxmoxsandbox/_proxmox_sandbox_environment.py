@@ -4,10 +4,9 @@ import errno
 import re
 import shlex
 import time
-from collections import defaultdict
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Tuple, Union
+from typing import Any, Dict, Generator, List, Tuple, Type, Union
 
 import tenacity
 from inspect_ai.util import (
@@ -30,6 +29,7 @@ from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
+from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
 from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
@@ -46,11 +46,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
     TRACE_NAME = "proxmox_sandbox_environment"
 
-    # Class variables for multi-instance pool management
-    # Shared queues for instance allocation, keyed by pool_id
-    _instance_pools: Dict[str, asyncio.Queue[ProxmoxInstanceConfig]] = {}
-    # Locks to prevent race conditions during pool creation
-    _pool_locks: Dict[str, asyncio.Lock] = {}
+    proxmox_pool: Type[ProxmoxPoolABC] = QueueBasedProxmoxPool
 
     # Instance variables
     infra_commands: InfraCommands
@@ -200,41 +196,15 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # In practice (e.g., inspect_cyber), there's ONE task with many samples,
         # each sample having its own config passed to sample_init.
         # We always create pools here regardless of config, since pool creation
-        # only depends on PROXMOX_CONFIG_FILE (infrastructure), not eval config.
+        # only depends on the underlying infrastructure (defined in
+        # PROXMOX_CONFIG_FILE), not on eval-specific config.
         await cls.create_proxmox_instance_pools()
         return None
 
     @classmethod
     async def create_proxmox_instance_pools(cls) -> None:
-        # Load instances from infrastructure config (PROXMOX_CONFIG_FILE or env vars)
-        all_instances = _load_instances_from_env_or_file()
-
-        # Group instances by pool_id
-        pools: Dict[str, List[ProxmoxInstanceConfig]] = defaultdict(list)
-        for instance in all_instances:
-            pools[instance.pool_id].append(instance)
-
-        # Create a queue of proxmox instances keyed on the ID of the pool.
-        # This ID identifies which evals can run on which Proxmox servers.
-        # Examples might be the name of a QCOW image that was used to boot
-        # the proxmox server with the needed VMs already inside.
-        for pool_id, instances in pools.items():
-            # Only create pool once (thread-safe with lock)
-            if pool_id not in cls._pool_locks:
-                cls._pool_locks[pool_id] = asyncio.Lock()
-
-            async with cls._pool_locks[pool_id]:
-                if pool_id not in cls._instance_pools:
-                    cls.logger.info(
-                        f"Initializing pool '{pool_id}' with {len(instances)} instances"
-                    )
-
-                    # Create queue for this pool
-                    queue: asyncio.Queue[ProxmoxInstanceConfig] = asyncio.Queue()
-                    for instance in instances:
-                        queue.put_nowait(instance)
-
-                    cls._instance_pools[pool_id] = queue
+        """Initialize the Proxmox instance pools using the configured pool class."""
+        await cls.proxmox_pool.initialize()
 
 
     @classmethod
@@ -253,14 +223,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # Get the pool_id for this specific sample
         pool_id = config.instance_pool_id
 
-        if pool_id not in cls._instance_pools:
-            raise RuntimeError(
-                f"Pool '{pool_id}' not found. Available pools: {list(cls._instance_pools.keys())}"
-            )
-
         # ACQUIRE instance from pool (blocks if all in use)
-        instance_pool_queue = cls._instance_pools[pool_id]
-        instance = await instance_pool_queue.get() 
+        instance = await cls.proxmox_pool.acquire_instance(pool_id)
 
         try:
             # Create API using acquired instance's credentials
@@ -340,7 +304,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         except Exception:
             # On error, release instance back to pool immediately
-            instance_pool_queue.put_nowait(instance)
+            await cls.proxmox_pool.release_instance(pool_id, instance)
             raise
 
     @classmethod
@@ -387,9 +351,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         finally:
             # RELEASE instance back to pool (even if cleanup failed)
             if instance is not None and pool_id is not None:
-                if pool_id in cls._instance_pools:
-                    queue = cls._instance_pools[pool_id]
-                    queue.put_nowait(instance)
+                await cls.proxmox_pool.release_instance(pool_id, instance)
 
         return None
 
