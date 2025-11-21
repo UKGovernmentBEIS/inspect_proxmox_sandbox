@@ -176,6 +176,11 @@ class SdnCommands(abc.ABC):
             for vnet in all_vnets:
                 if "vnet" in vnet and "alias" in vnet:
                     vnet_aliases.append((vnet["vnet"], vnet["alias"]))
+            # Unsure why we return None here.
+            # Even if we didn't create it, the VNET belongs to some Zone
+            # so we should fetch and return it.
+            # /cluster/sdn/vnets optionally returns the zone the vnet
+            # belongs to.
             return None, vnet_aliases
 
         resolved_sdn_config: SdnConfig = (
