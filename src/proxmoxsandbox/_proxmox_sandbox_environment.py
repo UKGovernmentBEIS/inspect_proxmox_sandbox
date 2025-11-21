@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import errno
 import re
@@ -194,7 +193,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         """Initialize the Proxmox instance pools using the configured pool class."""
         await cls.proxmox_pool.initialize()
 
-
     @classmethod
     @override
     async def sample_init(
@@ -229,7 +227,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
             task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
 
-            proxmox_ids_start = await infra_commands.find_proxmox_ids_start(task_name_start)
+            proxmox_ids_start = await infra_commands.find_proxmox_ids_start(
+                task_name_start
+            )
 
             # Ensure built-in VM templates exist on this instance
             await ProxmoxSandboxEnvironment.ensure_vms(
@@ -361,7 +361,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 else:
                     cls.logger.warning(
                         f"NOT releasing instance {instance.instance_id} "
-                        f"from pool '{pool_id}' - cleanup failed, instance may be dirty"
+                        f"from pool '{pool_id}' - cleanup failed, instance may be dirty\n"
+                        f"instance={instance}\n"
+                        f"pool_id={pool_id}"
+                        f"cleanup_succeeded={cleanup_succeeded}"
                     )
 
         return None
@@ -374,17 +377,21 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
-        if config is None:
-            config = ProxmoxSandboxEnvironmentConfig()
-
-        if not isinstance(config, ProxmoxSandboxEnvironmentConfig):
-            raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
-
+        # We do all our cleanup in sample cleanup so this will mostly do nothing
+        # This will cleanup leftover VMs from failed per sample cleanups
         if cleanup:
-            infra_commands = InfraCommands(
-                async_proxmox=cls._create_async_proxmox_api(config), node=config.node
-            )
-            await infra_commands.cleanup()
+            for instance in cls.proxmox_pool.all_instances():
+                async_proxmox_api = AsyncProxmoxAPI(
+                    host=f"{instance.host}:{instance.port}",
+                    user=f"{instance.user}@{instance.user_realm}",
+                    password=instance.password,
+                    verify_tls=instance.verify_tls,
+                )
+                infra_commands = InfraCommands(
+                    async_proxmox=async_proxmox_api, node=instance.node
+                )
+
+                await infra_commands.cleanup()
         else:
             print(
                 "\nCleanup all sandbox releases with: "
@@ -395,12 +402,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
         if id is None:
-            config = ProxmoxSandboxEnvironmentConfig()
-            async_proxmox_api = cls._create_async_proxmox_api(config)
-            infra_commands = InfraCommands(
-                async_proxmox=async_proxmox_api, node=config.node
-            )
-            await infra_commands.cleanup_no_id()
+            await cls.create_proxmox_instance_pools()
+            for instance in cls.proxmox_pool.all_instances():
+                async_proxmox_api = AsyncProxmoxAPI(
+                    host=f"{instance.host}:{instance.port}",
+                    user=f"{instance.user}@{instance.user_realm}",
+                    password=instance.password,
+                    verify_tls=instance.verify_tls,
+                )
+                infra_commands = InfraCommands(
+                    async_proxmox=async_proxmox_api, node=instance.node
+                )
+
+                await infra_commands.cleanup_no_id()
         else:
             print("\n[red]Cleanup by ID not implemented[/red]\n")
 

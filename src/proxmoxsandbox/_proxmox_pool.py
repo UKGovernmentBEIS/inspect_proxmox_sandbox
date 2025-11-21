@@ -3,6 +3,7 @@
 import asyncio
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Iterable
 from logging import getLogger
 from typing import Dict, List, Tuple
 
@@ -71,6 +72,16 @@ class ProxmoxPoolABC(ABC):
 
         Returns:
             Maximum number of concurrent samples, or None for unlimited.
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
+    def all_instances(cls) -> Iterable[ProxmoxInstanceConfig]:
+        """Get all Proxmox instances across all pools.
+
+        Returns:
+            Iterable of all ProxmoxInstanceConfig instances managed by this pool.
         """
         pass
 
@@ -190,6 +201,18 @@ class QueueBasedProxmoxPool(ProxmoxPoolABC):
             return len(instances) if instances else 1
         except Exception:
             return 1
+
+    @classmethod
+    def all_instances(cls) -> Iterable[ProxmoxInstanceConfig]:
+        """Get all Proxmox instances across all pools.
+
+        Returns:
+            Generator yielding all ProxmoxInstanceConfig instances from the config file.
+        """
+        # Load and yield instances directly from config file/env
+        # This ensures we get all configured instances, not just those in queues
+        for instance in _load_instances_from_env_or_file():
+            yield instance
 
     @classmethod
     def clear_pools(cls) -> None:
