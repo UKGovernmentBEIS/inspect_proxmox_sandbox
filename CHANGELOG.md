@@ -1,8 +1,20 @@
 # Changelog
 
-## 0.9.1 - 2025-11-06
+## 0.9.4 - 2025-11-21
 
 - Support static IPv4 allocation
+
+## 0.9.3 - 2025-11-18
+
+- Size clones correctly in build_proxmox_auto
+
+## 0.9.2 - 2025-11-10
+
+- Allow vending of arbitrary qcow images in build_proxmox_auto
+
+## 0.9.1 - 2025-11-06
+
+- Fix occasional failure of vended instance to stay started
 
 ## 0.9.0 - 2025-10-27
 
