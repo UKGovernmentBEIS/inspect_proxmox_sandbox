@@ -86,7 +86,12 @@ class InfraCommands(abc.ABC):
         if sdn_zone_id is not None:
             await self.sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id=sdn_zone_id)
 
-    async def create_dhcp_mappings(self, sdn_vnet_aliases: VnetAliases, vm_config: VmConfig, sdn_zone_id: str | None) -> None:
+    async def create_dhcp_mappings(
+        self,
+        sdn_vnet_aliases: VnetAliases,
+        vm_config: VmConfig,
+        sdn_zone_id: str | None,
+    ) -> None:
         # `sdn_zone_id` _might_ be None, see my comment in `sdn_commands` about this.
         # As such, the static-ip IPAM allocation is incompatible with the predefined
         # VNET functionality, unless we add logic to grab the zone id the alias belongs

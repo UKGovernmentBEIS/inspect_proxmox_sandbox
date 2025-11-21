@@ -180,10 +180,10 @@ class SdnCommands(abc.ABC):
             for vnet in all_vnets:
                 if "vnet" in vnet and "alias" in vnet:
                     vnet_aliases.append((vnet["vnet"], vnet["alias"]))
-            # This returns None because we cannot make any guarantees about 
+            # This returns None because we cannot make any guarantees about
             # existing VNETs and what zones they belong to. We _could_ read
             # the zone attribute returned by `read_all_vnets`, but different
-            # VNETs could belong to different zones. 
+            # VNETs could belong to different zones.
             return None, vnet_aliases
 
         resolved_sdn_config: SdnConfig = (
@@ -315,10 +315,13 @@ class SdnCommands(abc.ABC):
                 query_params = f"?ip={ip}&vnet={vnet}&zone={zone}&mac={mac}"
                 try:
                     await self.async_proxmox.request(
-                        "DELETE", f"/cluster/sdn/vnets/{vnet}/ips{query_params}",
+                        "DELETE",
+                        f"/cluster/sdn/vnets/{vnet}/ips{query_params}",
                     )
                 except Exception as _:
-                    self.logger.debug(f"IP lease {ip} for {mac} in {vnet} inside {zone} already deleted, moving on.")
+                    self.logger.debug(
+                        f"Lease {ip} for {mac} in {vnet} inside {zone} already deleted."
+                    )
 
     async def tear_down_sdn_zone_and_vnet(self, sdn_zone_id: str) -> None:
         await self.tear_down_sdn_zones_and_vnets([sdn_zone_id])
@@ -383,12 +386,12 @@ class SdnCommands(abc.ABC):
             # This is probably not how you're supposed to do this stuff.
             # please correct me, I'm not a dev.
 
-            # We tack the ip allocations so that we can delete them later 
+            # We tack the ip allocations so that we can delete them later
             reservation: ProxmoxJsonDataType = {
-                    "ip": ip_addr,
-                    "vnet": vnet_id,
-                    "zone": zone_id,
-                    "mac": mac_address,
+                "ip": ip_addr,
+                "vnet": vnet_id,
+                "zone": zone_id,
+                "mac": mac_address,
             }
             dhcp_maps = self._created_ips.get()
             dhcp_maps.append(reservation)
