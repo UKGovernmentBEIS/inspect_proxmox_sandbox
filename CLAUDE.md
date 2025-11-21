@@ -216,6 +216,18 @@ poetry install
 - Type hints are encouraged (mypy compatible)
 - Docstrings for public APIs
 
+### Comment Policy
+**DO NOT add comments that describe changes you just made.**
+- ❌ Bad: `# First instance - verify all fields` (after adding assertions)
+- ❌ Bad: `# TODO: Refactor this later` or `# Leave this for now`
+- ✅ Good: Only add comments that explain **why** code exists, not **what** it does
+- ✅ Good: `# TODO: Extract this to a separate module for better testability` (specific actionable TODO)
+
+**Comments should be permanent documentation, not change artifacts:**
+- If a comment only makes sense "right now" during a refactoring, don't add it
+- Readers expect code to be complete; don't document what's "already there"
+- Future TODOs must be specific and actionable, not vague placeholders
+
 ## Important Gotchas
 
 ### 1. QEMU Guest Agent Required

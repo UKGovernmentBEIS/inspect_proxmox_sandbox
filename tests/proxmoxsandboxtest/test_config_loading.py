@@ -61,14 +61,26 @@ def test_load_instances_from_file():
         instances = _load_instances_from_env_or_file()
 
         assert len(instances) == 2
+
         assert isinstance(instances[0], ProxmoxInstanceConfig)
         assert instances[0].instance_id == "test-1"
         assert instances[0].pool_id == "ubuntu-pool"
         assert instances[0].host == "10.0.1.10"
+        assert instances[0].port == 8006
+        assert instances[0].user == "root"
+        assert instances[0].user_realm == "pam"
+        assert instances[0].password == "secret"
+        assert instances[0].node == "pve1"
         assert instances[0].verify_tls is False
 
         assert instances[1].instance_id == "test-2"
         assert instances[1].pool_id == "kali-pool"
+        assert instances[1].host == "10.0.1.20"
+        assert instances[1].port == 8006
+        assert instances[1].user == "root"
+        assert instances[1].user_realm == "pam"
+        assert instances[1].password == "secret"
+        assert instances[1].node == "pve2"
         assert instances[1].verify_tls is True
 
     finally:
