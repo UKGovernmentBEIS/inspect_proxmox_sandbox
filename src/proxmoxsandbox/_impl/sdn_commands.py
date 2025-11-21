@@ -226,7 +226,7 @@ class SdnCommands(abc.ABC):
                 json=zone_create_json,
             )
 
-            vnet_aliases: VnetAliases = []
+            existing_vnet_aliases: VnetAliases = []
 
             for idx, vnet_config in enumerate(resolved_sdn_config.vnet_configs):
                 vnet_id = f"{proxmox_ids_start}v{idx}"
@@ -234,7 +234,7 @@ class SdnCommands(abc.ABC):
                 vnet_json: ProxmoxJsonDataType = {"vnet": vnet_id, "zone": sdn_zone_id}
                 if vnet_config.alias is not None:
                     vnet_json["alias"] = vnet_config.alias
-                vnet_aliases.append((vnet_id, vnet_config.alias))
+                existing_vnet_aliases.append((vnet_id, vnet_config.alias))
                 await self.async_proxmox.request(
                     "POST",
                     "/cluster/sdn/vnets",
@@ -262,7 +262,7 @@ class SdnCommands(abc.ABC):
 
         await self.do_update_all_sdn()
 
-        return sdn_zone_id, vnet_aliases
+        return sdn_zone_id, existing_vnet_aliases
 
     async def do_update_all_sdn(self) -> None:
         async def update_all_sdn() -> None:
