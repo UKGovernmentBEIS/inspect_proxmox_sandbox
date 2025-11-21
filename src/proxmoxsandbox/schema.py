@@ -144,7 +144,8 @@ class VmNicConfig(BaseModel, frozen=True):
     def _validate_ipv4_requires_mac(self) -> "VmNicConfig":
         if self.ipv4 is not None and self.mac is None:
             raise ValueError(
-                "ipv4 address requires a mac address to be specified for DHCP static mapping"
+                "ipv4 address requires a mac address to be specified for "
+                + "DHCP static mapping"
             )
         return self
 
