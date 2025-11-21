@@ -43,6 +43,10 @@ class SdnCommands(abc.ABC):
     _created_sdns: ContextVar[Set[str]] = ContextVar(
         "proxmox_created_sdns", default=set()
     )
+    # (vnet_id, zone_id, mac_address, ip_addr)
+    _created_ips: ContextVar[List[ProxmoxJsonDataType]] = ContextVar(
+        "proxmox_created_ips", default=list()
+    )
     _cleanup_completed: ContextVar[bool] = ContextVar(
         "proxmox_sdns_cleanup_executed", default=False
     )
@@ -176,11 +180,10 @@ class SdnCommands(abc.ABC):
             for vnet in all_vnets:
                 if "vnet" in vnet and "alias" in vnet:
                     vnet_aliases.append((vnet["vnet"], vnet["alias"]))
-            # Unsure why we return None here.
-            # Even if we didn't create it, the VNET belongs to some Zone
-            # so we should fetch and return it.
-            # /cluster/sdn/vnets optionally returns the zone the vnet
-            # belongs to.
+            # This returns None because we cannot make any guarantees about 
+            # existing VNETs and what zones they belong to. We _could_ read
+            # the zone attribute returned by `read_all_vnets`, but different
+            # VNETs could belong to different zones. 
             return None, vnet_aliases
 
         resolved_sdn_config: SdnConfig = (
@@ -291,6 +294,32 @@ class SdnCommands(abc.ABC):
             relevant_subnet_cidrs += cidrs
         return relevant_subnet_cidrs
 
+    async def tear_down_sdn_ip_allocations(self) -> None:
+        # Normally, if you have created an IPAM entry for a VM and you delete
+        # that VM, the IPAM entry is automatically deleted. The infra_commands
+        # function `delete_sdn_and_vms` calls VM deletions before SDN deletions,
+        # so if all goes well you don't actually have any IPs to clear out of IPAM.
+        # If something does not go well, though, and an entry persists, it will block
+        # the deletion of the subnet, and therefore the VNET, and therefore the zone.
+        # So I think this function and its additional logic is warranted to make sure
+        # the SDN is cleared _no matter what_.
+        dhcp_allocations = self._created_ips.get()
+        with trace_action(self.logger, self.TRACE_NAME, "delete IPAM IP allocations"):
+            for allocation in dhcp_allocations:
+                vnet = allocation["vnet"]
+                ip = allocation["ip"]
+                zone = allocation["zone"]
+                mac = allocation["mac"]
+
+                # DELETE requests require query parameters not JSON
+                query_params = f"?ip={ip}&vnet={vnet}&zone={zone}&mac={mac}"
+                try:
+                    await self.async_proxmox.request(
+                        "DELETE", f"/cluster/sdn/vnets/{vnet}/ips{query_params}",
+                    )
+                except Exception as _:
+                    self.logger.debug(f"IP lease {ip} for {mac} in {vnet} inside {zone} already deleted, moving on.")
+
     async def tear_down_sdn_zone_and_vnet(self, sdn_zone_id: str) -> None:
         await self.tear_down_sdn_zones_and_vnets([sdn_zone_id])
 
@@ -298,6 +327,10 @@ class SdnCommands(abc.ABC):
         self, sdn_zone_ids: Collection[str]
     ) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"delete SDNs {sdn_zone_ids}"):
+            # We need to delete allocated ips first before we can remove
+            # subnets or vnets or zones.
+            await self.tear_down_sdn_ip_allocations()
+
             for sdn_zone_id in sdn_zone_ids:
                 all_vnets = await self.read_all_vnets()
                 relevant_vnets = list(
@@ -347,15 +380,24 @@ class SdnCommands(abc.ABC):
             self.TRACE_NAME,
             f"create DHCP mapping {vnet_id=} {zone_id=} {mac_address=} {ip_addr=}",
         ):
-            await self.async_proxmox.request(
-                "POST",
-                f"/cluster/sdn/vnets/{vnet_id}/ips",
-                json={
+            # This is probably not how you're supposed to do this stuff.
+            # please correct me, I'm not a dev.
+
+            # We tack the ip allocations so that we can delete them later 
+            reservation: ProxmoxJsonDataType = {
                     "ip": ip_addr,
                     "vnet": vnet_id,
                     "zone": zone_id,
                     "mac": mac_address,
-                },
+            }
+            dhcp_maps = self._created_ips.get()
+            dhcp_maps.append(reservation)
+            self._created_ips.set(dhcp_maps)
+
+            await self.async_proxmox.request(
+                "POST",
+                f"/cluster/sdn/vnets/{vnet_id}/ips",
+                json=reservation,
             )
 
     async def cleanup(self) -> None:

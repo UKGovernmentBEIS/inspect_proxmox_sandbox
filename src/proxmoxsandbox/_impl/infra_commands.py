@@ -57,7 +57,7 @@ class InfraCommands(abc.ABC):
 
         for vm_config in vms_config:
             # We have to create the IPAM entries before booting the VMs
-            # otherwise they will not get defined static IPs.
+            # otherwise they will not get the defined static IPs.
             await self.create_dhcp_mappings(vnet_aliases, vm_config, sdn_zone_id)
 
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
@@ -86,9 +86,11 @@ class InfraCommands(abc.ABC):
         if sdn_zone_id is not None:
             await self.sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id=sdn_zone_id)
 
-    async def create_dhcp_mappings(self, sdn_vnet_aliases: VnetAliases, vm_config: VmConfig, sdn_zone_id) -> None:
-        # TODO sdn_zone_id _might_ be None, see my comment in sdn_commands about this
-        # I think we can and should remove that edge case. 
+    async def create_dhcp_mappings(self, sdn_vnet_aliases: VnetAliases, vm_config: VmConfig, sdn_zone_id: str | None) -> None:
+        # `sdn_zone_id` _might_ be None, see my comment in `sdn_commands` about this.
+        # As such, the static-ip IPAM allocation is incompatible with the predefined
+        # VNET functionality, unless we add logic to grab the zone id the alias belongs
+        # to here.
         if not (vm_config.nics and sdn_zone_id):
             return
 
