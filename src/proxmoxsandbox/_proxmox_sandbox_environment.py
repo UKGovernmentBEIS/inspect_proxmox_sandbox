@@ -212,6 +212,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # ACQUIRE instance from pool (blocks if all in use)
         instance = await cls.proxmox_pool.acquire_instance(pool_id)
 
+        # Track variables for cleanup on failure
+        infra_commands = None
+        proxmox_ids_start = None
+
         try:
             # Create API using acquired instance's credentials
             async_proxmox_api = AsyncProxmoxAPI(
@@ -237,7 +241,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
 
             async with concurrency(f"proxmox-{instance.instance_id}", 1):
-                vm_configs_with_ids, sdn_zone_id = await infra_commands.create_sdn_and_vms(
+                (
+                    vm_configs_with_ids,
+                    sdn_zone_id,
+                ) = await infra_commands.create_sdn_and_vms(
                     proxmox_ids_start,
                     sdn_config=config.sdn_config,
                     vms_config=config.vms_config,
@@ -275,14 +282,16 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
             if not found_default:
                 raise ValueError(
-                    "No default sandbox found: at least one VM must have is_sandbox = True"
+                    "No default sandbox found: at least one VM must have "
+                    "is_sandbox = True"
                 )
 
             # borrowed from k8s provider
             def reorder_default_first(
                 sandboxes: dict[str, SandboxEnvironment],
             ) -> dict[str, SandboxEnvironment]:
-                # Inspect expects the default sandbox to be the first sandbox in the dict.
+                # Inspect expects the default sandbox to be the first
+                # sandbox in the dict.
                 if "default" in sandboxes:
                     default = sandboxes.pop("default")
                     return {"default": default, **sandboxes}
@@ -290,9 +299,62 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
             return reorder_default_first(sandboxes)
 
-        except Exception:
-            # On error, release instance back to pool immediately
-            await cls.proxmox_pool.release_instance(pool_id, instance)
+        except Exception as e:
+            # Attempt to clean up any partial infrastructure before
+            # releasing instance. This prevents leftover VMs/SDN from
+            # causing conflicts when the instance is reused.
+            cleanup_succeeded = False
+
+            # Only attempt cleanup if we got far enough to allocate IDs.
+            # If we have proxmox_ids_start, infrastructure creation was attempted.
+            should_attempt_cleanup = (
+                infra_commands is not None and proxmox_ids_start is not None
+            )
+
+            if should_attempt_cleanup:
+                try:
+                    cls.logger.info(
+                        f"Attempting cleanup of partial infrastructure "
+                        f"for instance {instance.instance_id} "
+                        f"after sample_init failure: {e}"
+                    )
+
+                    # Use cleanup_no_id to discover and clean up all VMs/zones.
+                    # This is safe because only one sample runs per instance at a time,
+                    # so all inspect-tagged VMs belong to this failed sample.
+                    await infra_commands.cleanup_no_id()
+
+                    cleanup_succeeded = True
+                    cls.logger.info(
+                        f"Successfully cleaned up partial infrastructure "
+                        f"for instance {instance.instance_id}"
+                    )
+                except Exception as cleanup_ex:
+                    # Log cleanup failure but don't mask the original error
+                    cls.logger.warning(
+                        f"Failed to clean up partial infrastructure "
+                        f"for instance {instance.instance_id}: {cleanup_ex}. "
+                        f"This may leave resources on the server."
+                    )
+            else:
+                # Early failure or no SDN requested - instance is clean
+                cleanup_succeeded = True
+
+            # Only return instance to pool after successful cleanup.
+            # Dirty instances would cause cascading failures across samples.
+            if cleanup_succeeded:
+                cls.logger.info(
+                    f"Releasing instance {instance.instance_id} "
+                    f"from pool '{pool_id}' back to queue"
+                )
+                await cls.proxmox_pool.release_instance(pool_id, instance)
+            else:
+                cls.logger.warning(
+                    f"NOT releasing instance {instance.instance_id} "
+                    f"from pool '{pool_id}' - "
+                    f"cleanup failed, instance may be dirty"
+                )
+
             raise
 
     @classmethod
@@ -338,13 +400,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                         vm_ids=any_vm_sandbox_environment.all_vm_ids,
                     )
                 cleanup_succeeded = True
+                instance_id = instance.instance_id if instance else "unknown"
                 cls.logger.info(
-                    f"Successfully cleaned up VMs for instance {instance.instance_id if instance else 'unknown'}"
+                    f"Successfully cleaned up VMs for instance {instance_id}"
                 )
         except Exception as ex:
-            cls.logger.error(
-                f"Cleanup failed for instance {instance.instance_id if instance else 'unknown'}: {ex}"
-            )
+            instance_id = instance.instance_id if instance else "unknown"
+            cls.logger.error(f"Cleanup failed for instance {instance_id}: {ex}")
             raise
         finally:
             # Only return instances to the pool after successful cleanup.
@@ -361,7 +423,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 else:
                     cls.logger.warning(
                         f"NOT releasing instance {instance.instance_id} "
-                        f"from pool '{pool_id}' - cleanup failed, instance may be dirty\n"
+                        f"from pool '{pool_id}' - "
+                        f"cleanup failed, instance may be dirty\n"
                         f"instance={instance}\n"
                         f"pool_id={pool_id}"
                         f"cleanup_succeeded={cleanup_succeeded}"
