@@ -211,6 +211,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         # ACQUIRE instance from pool (blocks if all in use)
         instance = await cls.proxmox_pool.acquire_instance(pool_id)
+        cls.logger.info(
+            f"Acquired instance {instance.instance_id} "
+            f"from pool '{pool_id}'"
+        )
 
         # Track variables for cleanup on failure
         infra_commands = None
@@ -394,7 +398,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 cls.logger.info(f"Pre-cleaned instance {instance_id}")
         except Exception as e:
             cls.logger.error(
-                f"Failed to check/clean instance {instance_id}: {e}. "
+                f"Failed to check/clean instance {instance_id}: {type(e).__name__}: {e}. "
                 f"Proceeding anyway - setup will fail if instance is dirty."
             )
 
