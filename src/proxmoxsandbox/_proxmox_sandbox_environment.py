@@ -377,26 +377,27 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
+        return
         # We do all our cleanup in sample cleanup so this will mostly do nothing
         # This will cleanup leftover VMs from failed per sample cleanups
-        if cleanup:
-            for instance in cls.proxmox_pool.all_instances():
-                async_proxmox_api = AsyncProxmoxAPI(
-                    host=f"{instance.host}:{instance.port}",
-                    user=f"{instance.user}@{instance.user_realm}",
-                    password=instance.password,
-                    verify_tls=instance.verify_tls,
-                )
-                infra_commands = InfraCommands(
-                    async_proxmox=async_proxmox_api, node=instance.node
-                )
-
-                await infra_commands.cleanup()
-        else:
-            print(
-                "\nCleanup all sandbox releases with: "
-                "[blue]inspect sandbox cleanup proxmox[/blue]\n"
-            )
+        # if cleanup:
+        #     for instance in cls.proxmox_pool.all_instances():
+        #         async_proxmox_api = AsyncProxmoxAPI(
+        #             host=f"{instance.host}:{instance.port}",
+        #             user=f"{instance.user}@{instance.user_realm}",
+        #             password=instance.password,
+        #             verify_tls=instance.verify_tls,
+        #         )
+        #         infra_commands = InfraCommands(
+        #             async_proxmox=async_proxmox_api, node=instance.node
+        #         )
+        #
+        #         await infra_commands.cleanup()
+        # else:
+        #     print(
+        #         "\nCleanup all sandbox releases with: "
+        #         "[blue]inspect sandbox cleanup proxmox[/blue]\n"
+        #     )
 
     @classmethod
     @override
