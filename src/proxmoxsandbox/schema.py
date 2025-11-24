@@ -131,10 +131,23 @@ class VmNicConfig(BaseModel, frozen=True):
             - An alias defined in the sdn_config
             - An existing VNET alias in Proxmox (when sdn_config is None)
         mac: The MAC address for the network interface (optional)
+        ipv4: The static IPv4 address for the network interface (optional).
+            If specified, a DHCP static mapping (host reservation) will be created.
+            Requires a MAC address to be specified as well.
     """
 
     vnet_alias: str
     mac: Optional[MacAddress] = None
+    ipv4: Optional[IPvAnyAddress] = None
+
+    @model_validator(mode="after")
+    def _validate_ipv4_requires_mac(self) -> "VmNicConfig":
+        if self.ipv4 is not None and self.mac is None:
+            raise ValueError(
+                "ipv4 address requires a mac address to be specified for "
+                + "DHCP static mapping"
+            )
+        return self
 
 
 class VmConfig(BaseModel, frozen=True):

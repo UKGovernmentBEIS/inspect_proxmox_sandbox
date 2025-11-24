@@ -371,7 +371,6 @@ class QemuCommands(abc.ABC):
                 if vm_config.nic_controller is None
                 else vm_config.nic_controller
             )
-
             # If we have nics configured, we need to look up existing VNETs
             existing_vnet_mapping = {}
             try:
@@ -435,7 +434,7 @@ class QemuCommands(abc.ABC):
 
                     netx = f"{nic_prefix},bridge={bridge_name}"
                     if nic.mac:
-                        netx += f",macaddr={nic.mac}"
+                        netx += f",macaddr={nic.mac.upper()}"
                     network_update_json[f"net{i}"] = netx
 
             if network_update_json:
