@@ -229,6 +229,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 async_proxmox=async_proxmox_api, node=instance.node
             )
 
+            # Sanity check previous cleanups worked
+            # N.B. this code only makes sense in the "single eval per proxmox"
+            # model and should not be merged to main!
+            await cls._ensure_instance_clean(infra_commands, instance.instance_id)
+
             task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
 
             proxmox_ids_start = await infra_commands.find_proxmox_ids_start(
@@ -367,6 +372,31 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             password=config.password,
             verify_tls=config.verify_tls,
         )
+
+    @classmethod
+    async def _ensure_instance_clean(
+        cls, infra_commands: InfraCommands, instance_id: str
+    ) -> None:
+        """Ensure instance has no leftover VNETs. Clean up if needed.
+
+        Logs errors but does not raise - if the instance is dirty,
+        the subsequent setup will fail and the error handler will deal with it.
+        """
+        try:
+            vnets = await infra_commands.sdn_commands.read_all_vnets()
+
+            if vnets:
+                cls.logger.warning(
+                    f"Instance {instance_id} has {len(vnets)} leftover VNETs! "
+                    f"Cleaning up before proceeding..."
+                )
+                await infra_commands.cleanup_no_id()
+                cls.logger.info(f"Pre-cleaned instance {instance_id}")
+        except Exception as e:
+            cls.logger.error(
+                f"Failed to check/clean instance {instance_id}: {e}. "
+                f"Proceeding anyway - setup will fail if instance is dirty."
+            )
 
     @classmethod
     @override
