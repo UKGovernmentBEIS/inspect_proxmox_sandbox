@@ -1,11 +1,9 @@
 # Changelog
 
-## 0.9.5 - 2025-11-18
+## 0.9.4 - 2025-11-25
 
+- OOM and AMD CPU fixes in build_proxmox_auto
 - Size clones correctly in build_proxmox_auto
-
-## 0.9.4 - 2025-11-10
-
 - Allow vending of arbitrary qcow images in build_proxmox_auto
 
 ## 0.9.3 - 2025-11-06

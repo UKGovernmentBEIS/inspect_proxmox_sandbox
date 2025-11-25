@@ -1,6 +1,6 @@
 [project]
 name = "inspect-proxmox-sandbox"
-version = "0.9.3"
+version = "0.9.4"
 description = "A Proxmox Sandbox Environment for Inspect"
 readme = "README.md"
 authors = [
