@@ -394,7 +394,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     f"Instance {instance_id} has {len(vnets)} leftover VNETs! "
                     f"Cleaning up before proceeding..."
                 )
-                await infra_commands.cleanup_no_id()
+                await infra_commands.cleanup_no_id(skip_confirmation=True)
                 cls.logger.info(f"Pre-cleaned instance {instance_id}")
         except Exception as e:
             cls.logger.error(

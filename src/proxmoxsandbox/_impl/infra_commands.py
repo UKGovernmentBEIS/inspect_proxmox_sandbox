@@ -146,7 +146,7 @@ class InfraCommands(abc.ABC):
         await self.qemu_commands.cleanup()
         await self.sdn_commands.cleanup()
 
-    async def cleanup_no_id(self) -> None:
+    async def cleanup_no_id(self, skip_confirmation=False) -> None:
         noticed_vnets = set()
         noticed_vms = list()
 
@@ -215,10 +215,13 @@ class InfraCommands(abc.ABC):
         is_interactive_shell = sys.stdin.isatty()
         is_ci = "CI" in os.environ
         is_pytest = "PYTEST_CURRENT_TEST" in os.environ
+        any_user = is_interactive_shell and not is_ci and not is_pytest
 
         self.logger.debug(f"{is_interactive_shell=}, {is_ci=}, {is_pytest=}")
 
-        if is_interactive_shell and not is_ci and not is_pytest:
+        should_ask_for_confirmation = any_user and not skip_confirmation
+
+        if should_ask_for_confirmation:
             if not Confirm.ask(
                 "Are you sure you want to delete ALL the above resources?",
             ):
