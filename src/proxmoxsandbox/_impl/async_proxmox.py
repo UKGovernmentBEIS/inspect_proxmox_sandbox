@@ -67,7 +67,7 @@ class AsyncProxmoxAPI:
             content_type = "application/json"
         async with httpx.AsyncClient(
             verify=self.verify_tls,
-            timeout=httpx.Timeout(connect=5, read=60, write=60, pool=60),
+            timeout=httpx.Timeout(connect=30, read=120, write=60, pool=60),
         ) as client:
             # Always get a fresh ticket if we don't have one
             if not self.ticket:
