@@ -213,13 +213,14 @@ if [ -n "$SOURCE_QCOW_DISK" ]; then
     EDITOR="sed -i \"s|$CLONED_DISK|$LINKED_CLONE|g\"" virsh edit "$VM_NEW"
 fi
 
-root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
+# root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
+root_password=Whatever123
 
 # for some reason the hostkeys are not regenerated and proxmox complains about missing /etc/ssh/ssh_host_rsa_key.pub
 # virt-sysprep needs root to be able to access the kernel so we need sudo; see https://bugs.launchpad.net/ubuntu/+source/linux/+bug/759725
-sudo virt-sysprep -d "$VM_NEW" \
-    --root-password "password:$root_password" \
-    --operations "defaults,-ssh-hostkeys" \
+#sudo virt-sysprep -d "$VM_NEW" \
+#    --root-password "password:$root_password" \
+#    --operations "defaults,-ssh-hostkeys" \
 
 EDITOR="sed -i 's/hostfwd=tcp::[0-9]\+-:8006/hostfwd=tcp::$PROXMOX_EXPOSED_PORT-:8006/'" virsh edit "$VM_NEW"
 
