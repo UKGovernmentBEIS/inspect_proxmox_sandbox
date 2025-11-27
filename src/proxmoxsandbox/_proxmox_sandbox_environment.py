@@ -248,7 +248,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 async_proxmox_api=async_proxmox_api, config=config
             )
 
-            async with concurrency(f"proxmox-{instance.host}", 1):
+            async with concurrency(f"proxmox-{instance.host}", 2):
                 (
                     vm_configs_with_ids,
                     sdn_zone_id,
@@ -427,11 +427,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         cleanup_succeeded = False
         try:
             if any_vm_sandbox_environment is not None:
-                async with concurrency(f"proxmox-{instance.host}", 1):
-                    await any_vm_sandbox_environment.infra_commands.delete_sdn_and_vms(
-                        sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
-                        vm_ids=any_vm_sandbox_environment.all_vm_ids,
-                    )
+                await any_vm_sandbox_environment.infra_commands.delete_sdn_and_vms(
+                    sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
+                    vm_ids=any_vm_sandbox_environment.all_vm_ids,
+                )
                 cleanup_succeeded = True
                 instance_id = instance.instance_id if instance else "unknown"
                 cls.logger.info(
