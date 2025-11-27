@@ -212,8 +212,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # ACQUIRE instance from pool (blocks if all in use)
         instance = await cls.proxmox_pool.acquire_instance(pool_id)
         cls.logger.info(
-            f"Acquired instance {instance.instance_id} "
-            f"from pool '{pool_id}'"
+            f"Acquired instance {instance.instance_id} from pool '{pool_id}'"
         )
 
         # Track variables for cleanup on failure
@@ -331,7 +330,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     # Use cleanup_no_id to discover and clean up all VMs/zones.
                     # This is safe because only one sample runs per instance at a time,
                     # so all inspect-tagged VMs belong to this failed sample.
-                    await infra_commands.cleanup_no_id()
+                    await infra_commands.cleanup_no_id(skip_confirmation=True)  # type: ignore mypy hasn't clocked that infra_commands is not None here
 
                     cleanup_succeeded = True
                     cls.logger.info(
