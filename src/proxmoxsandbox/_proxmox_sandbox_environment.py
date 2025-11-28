@@ -312,13 +312,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @classmethod
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
-        if id is None:
+        if id is None or id == "--delete-non-inspect" or id == "delete-non-inspect":
             config = ProxmoxSandboxEnvironmentConfig()
             async_proxmox_api = cls._create_async_proxmox_api(config)
             infra_commands = InfraCommands(
                 async_proxmox=async_proxmox_api, node=config.node
             )
-            await infra_commands.cleanup_no_id()
+            delete_all = (id == "--delete-non-inspect" or id == "delete-non-inspect")
+            await infra_commands.cleanup_no_id(delete_all=delete_all)
         else:
             print("\n[red]Cleanup by ID not implemented[/red]\n")
 

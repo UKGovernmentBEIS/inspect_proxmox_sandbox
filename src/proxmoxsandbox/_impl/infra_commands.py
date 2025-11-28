@@ -107,35 +107,71 @@ class InfraCommands(abc.ABC):
         await self.qemu_commands.cleanup()
         await self.sdn_commands.cleanup()
 
-    async def cleanup_no_id(self) -> None:
+    async def cleanup_no_id(self, delete_all: bool = False) -> None:
         noticed_vnets = set()
         noticed_vms = list()
 
-        for vm in await self.qemu_commands.list_vms():
-            if (
-                "tags" in vm
-                and "inspect" in vm["tags"].split(";")
-                and (
-                    ("template" in vm and vm["template"] == 0) or ("template" not in vm)
+        # First pass: determine which zones to delete
+        if delete_all:
+            # When deleting all, get all zones first
+            zones_to_delete = set()
+            for zone in await self.sdn_commands.list_sdn_zones():
+                zones_to_delete.add(zone["zone"])
+
+            # Get all vnets in those zones
+            all_vnets = await self.sdn_commands.read_all_vnets()
+            for vnet in all_vnets:
+                if vnet["zone"] in zones_to_delete:
+                    noticed_vnets.add(vnet["vnet"])
+        else:
+            # Normal mode: only look at inspect-tagged VMs
+            for vm in await self.qemu_commands.list_vms():
+                should_delete = (
+                    "tags" in vm
+                    and "inspect" in vm["tags"].split(";")
+                    and (
+                        ("template" in vm and vm["template"] == 0) or ("template" not in vm)
+                    )
                 )
-            ):
+
+                if should_delete:
+                    existing_vm = await self.qemu_commands.read_vm(vm["vmid"])
+                    for key in existing_vm.keys():
+                        if key.startswith("net"):
+                            # 'virtio=BC:24:11:3E:C3:BA,bridge=tcc919v0'
+                            bridge = existing_vm[key].split(",")[1].split("=")[1]
+                            noticed_vnets.add(bridge)
+                    noticed_vms.append(vm)
+
+            zones_to_delete = await self.find_all_zones(noticed_vnets)
+
+            # Check for orphaned zones matching the pattern
+            for zone in await self.sdn_commands.list_sdn_zones():
+                if re.match(ZONE_REGEX, zone["zone"]):
+                    zones_to_delete.add(zone["zone"])
+
+        # Second pass: find all VMs using the networks we're about to delete
+        for vm in await self.qemu_commands.list_vms():
+            # Skip if already marked for deletion
+            if any(existing_vm["vmid"] == vm["vmid"] for existing_vm in noticed_vms):
+                continue
+
+            if delete_all:
+                # Delete all VMs (including templates)
                 existing_vm = await self.qemu_commands.read_vm(vm["vmid"])
+                vm_uses_target_vnet = False
                 for key in existing_vm.keys():
                     if key.startswith("net"):
-                        # 'virtio=BC:24:11:3E:C3:BA,bridge=tcc919v0'
                         bridge = existing_vm[key].split(",")[1].split("=")[1]
-                        noticed_vnets.add(bridge)
-                noticed_vms.append(vm)
+                        if bridge in noticed_vnets:
+                            vm_uses_target_vnet = True
+                            break
 
-        zones_to_delete = await self.find_all_zones(noticed_vnets)
-
-        # We probably already have all the SDN zones already.
-        # But in case there were no VMs in a particular SDN zone
-        # (which can happen if the task setup failed)
-        # we need to check for orphans.
-        for zone in await self.sdn_commands.list_sdn_zones():
-            if re.match(ZONE_REGEX, zone["zone"]):
-                zones_to_delete.add(zone["zone"])
+                # Delete VM if it uses a network we're deleting OR if it has inspect tag
+                # (This ensures we clean up everything)
+                if vm_uses_target_vnet or ("tags" in vm and "inspect" in vm["tags"].split(";")):
+                    noticed_vms.append(vm)
+            # Normal mode VMs already collected above
 
         if not noticed_vms and not zones_to_delete:
             print(f"No resources to delete on {self.async_proxmox.base_url}.")
