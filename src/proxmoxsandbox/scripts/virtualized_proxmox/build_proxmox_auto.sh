@@ -156,7 +156,7 @@ virt-install --name proxmox-auto \
     --graphics none \
     --console pty,target_type=serial \
     --boot uefi \
-    --cpu host \
+    --cpu host-passthrough \
     --qemu-commandline='-device virtio-net,netdev=user.0,addr=8 -netdev user,id=user.0,hostfwd=tcp::10000-:8006' \
     --check disk_size=off
 EDITOR="sed -i '/<disk type=.*device=.cdrom/,/<\/disk>/d'" virsh edit proxmox-auto
@@ -165,7 +165,7 @@ chmod go+r virt-inst-proxmox.complete
 EOFVIRTINST
 
 chmod +x virt-inst-proxmox.sh
-sudo tmux new-session -d -s virt-inst-proxmox -x 80 -y 10 "./virt-inst-proxmox.sh | tee virt-inst-proxmox.log"
+sudo tmux new-session -d -s virt-inst-proxmox -x 80 -y 10 "./virt-inst-proxmox.sh 2>&1 | tee virt-inst-proxmox.log"
 
 cat << 'EOFVEND' > vend.sh
 #!/usr/bin/env bash
@@ -216,8 +216,8 @@ fi
 root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
 
 # for some reason the hostkeys are not regenerated and proxmox complains about missing /etc/ssh/ssh_host_rsa_key.pub
-# virt-sysprep needs root to be able to access the kernel so we need sudo; see https://bugs.launchpad.net/ubuntu/+source/linux/+bug/759725
-sudo virt-sysprep -d "$VM_NEW" \
+# virt-sysprep needs root to be able to access the kernel on Ubuntu so we need sudo; see https://bugs.launchpad.net/ubuntu/+source/linux/+bug/759725
+sudo LIBGUESTFS_MEMSIZE=8192 virt-sysprep -d "$VM_NEW" \
     --root-password "password:$root_password" \
     --operations "defaults,-ssh-hostkeys" \
 
