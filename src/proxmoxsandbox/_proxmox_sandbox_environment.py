@@ -248,7 +248,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 async_proxmox_api=async_proxmox_api, config=config
             )
 
-            async with concurrency(f"proxmox-{instance.host}", 2):
+            async with concurrency(f"proxmox-{instance.host}", 1):
                 (
                     vm_configs_with_ids,
                     sdn_zone_id,
