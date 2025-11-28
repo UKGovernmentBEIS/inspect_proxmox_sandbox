@@ -167,6 +167,8 @@ class VmConfig(BaseModel, frozen=True):
         disk_controller: The disk controller type. If unset, defaults to "scsi"
         nic_controller: The NIC controller type. If unset, defaults to "virtio".
             This is applied to all virtual network interfaces.
+        firewall: if True, enables the Proxmox firewall on all network interfaces.
+            This is required for proper VM isolation. Defaults to False.
         os_type: The OS type. If unset, defaults to "l26". Only for OVA. See
             https://pve.proxmox.com/wiki/Manual:_qm.conf for more details
 
@@ -189,6 +191,7 @@ class VmConfig(BaseModel, frozen=True):
     uefi_boot: bool = False
     disk_controller: Optional[Literal["scsi", "ide"]] = None
     nic_controller: Optional[Literal["virtio", "e1000"]] = None
+    firewall: bool = False
     os_type: Optional[
         Literal[
             "l24",
