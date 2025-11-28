@@ -400,8 +400,9 @@ class QemuCommands(abc.ABC):
                     # there are any defined in sdn_vnet_aliases
                     if sdn_vnet_aliases and len(sdn_vnet_aliases) > 0:
                         first_vnet_id = sdn_vnet_aliases[0][0]
+                        firewall_flag = ",firewall=1" if vm_config.firewall else ""
                         network_update_json["net0"] = (
-                            f"{nic_prefix},bridge={first_vnet_id}"
+                            f"{nic_prefix},bridge={first_vnet_id}{firewall_flag}"
                         )
                     # otherwise do nothing - no networks will be added
                 # for other vm_source_configs, we *do not touch* networking config
@@ -435,6 +436,8 @@ class QemuCommands(abc.ABC):
                     netx = f"{nic_prefix},bridge={bridge_name}"
                     if nic.mac:
                         netx += f",macaddr={nic.mac.upper()}"
+                    if vm_config.firewall:
+                        netx += ",firewall=1"
                     network_update_json[f"net{i}"] = netx
 
             if network_update_json:
