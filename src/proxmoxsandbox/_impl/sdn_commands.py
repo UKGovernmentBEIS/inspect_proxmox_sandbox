@@ -43,6 +43,10 @@ class SdnCommands(abc.ABC):
     _created_sdns: ContextVar[Set[str]] = ContextVar(
         "proxmox_created_sdns", default=set()
     )
+    # (vnet_id, zone_id, mac_address, ip_addr)
+    _created_ips: ContextVar[List[ProxmoxJsonDataType]] = ContextVar(
+        "proxmox_created_ips", default=list()
+    )
     _cleanup_completed: ContextVar[bool] = ContextVar(
         "proxmox_sdns_cleanup_executed", default=False
     )
@@ -176,6 +180,10 @@ class SdnCommands(abc.ABC):
             for vnet in all_vnets:
                 if "vnet" in vnet and "alias" in vnet:
                     vnet_aliases.append((vnet["vnet"], vnet["alias"]))
+            # This returns None because we cannot make any guarantees about
+            # existing VNETs and what zones they belong to. We _could_ read
+            # the zone attribute returned by `read_all_vnets`, but different
+            # VNETs could belong to different zones.
             return None, vnet_aliases
 
         resolved_sdn_config: SdnConfig = (
@@ -218,7 +226,7 @@ class SdnCommands(abc.ABC):
                 json=zone_create_json,
             )
 
-            vnet_aliases: VnetAliases = []
+            existing_vnet_aliases: VnetAliases = []
 
             for idx, vnet_config in enumerate(resolved_sdn_config.vnet_configs):
                 vnet_id = f"{proxmox_ids_start}v{idx}"
@@ -226,7 +234,7 @@ class SdnCommands(abc.ABC):
                 vnet_json: ProxmoxJsonDataType = {"vnet": vnet_id, "zone": sdn_zone_id}
                 if vnet_config.alias is not None:
                     vnet_json["alias"] = vnet_config.alias
-                vnet_aliases.append((vnet_id, vnet_config.alias))
+                existing_vnet_aliases.append((vnet_id, vnet_config.alias))
                 await self.async_proxmox.request(
                     "POST",
                     "/cluster/sdn/vnets",
@@ -254,7 +262,7 @@ class SdnCommands(abc.ABC):
 
         await self.do_update_all_sdn()
 
-        return sdn_zone_id, vnet_aliases
+        return sdn_zone_id, existing_vnet_aliases
 
     async def do_update_all_sdn(self) -> None:
         async def update_all_sdn() -> None:
@@ -286,6 +294,35 @@ class SdnCommands(abc.ABC):
             relevant_subnet_cidrs += cidrs
         return relevant_subnet_cidrs
 
+    async def tear_down_sdn_ip_allocations(self) -> None:
+        # Normally, if you have created an IPAM entry for a VM and you delete
+        # that VM, the IPAM entry is automatically deleted. The infra_commands
+        # function `delete_sdn_and_vms` calls VM deletions before SDN deletions,
+        # so if all goes well you don't actually have any IPs to clear out of IPAM.
+        # If something does not go well, though, and an entry persists, it will block
+        # the deletion of the subnet, and therefore the VNET, and therefore the zone.
+        # So I think this function and its additional logic is warranted to make sure
+        # the SDN is cleared _no matter what_.
+        dhcp_allocations = self._created_ips.get()
+        with trace_action(self.logger, self.TRACE_NAME, "delete IPAM IP allocations"):
+            for allocation in dhcp_allocations:
+                vnet = allocation["vnet"]
+                ip = allocation["ip"]
+                zone = allocation["zone"]
+                mac = allocation["mac"]
+
+                # DELETE requests require query parameters not JSON
+                query_params = f"?ip={ip}&vnet={vnet}&zone={zone}&mac={mac}"
+                try:
+                    await self.async_proxmox.request(
+                        "DELETE",
+                        f"/cluster/sdn/vnets/{vnet}/ips{query_params}",
+                    )
+                except Exception as _:
+                    self.logger.debug(
+                        f"Lease {ip} for {mac} in {vnet} inside {zone} already deleted."
+                    )
+
     async def tear_down_sdn_zone_and_vnet(self, sdn_zone_id: str) -> None:
         await self.tear_down_sdn_zones_and_vnets([sdn_zone_id])
 
@@ -293,6 +330,10 @@ class SdnCommands(abc.ABC):
         self, sdn_zone_ids: Collection[str]
     ) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"delete SDNs {sdn_zone_ids}"):
+            # We need to delete allocated ips first before we can remove
+            # subnets or vnets or zones.
+            await self.tear_down_sdn_ip_allocations()
+
             for sdn_zone_id in sdn_zone_ids:
                 all_vnets = await self.read_all_vnets()
                 relevant_vnets = list(
@@ -320,6 +361,47 @@ class SdnCommands(abc.ABC):
 
     async def read_all_vnets(self):
         return await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
+
+    async def create_dhcp_mapping(
+        self,
+        vnet_id: str,
+        zone_id: str,
+        mac_address: str,
+        ip_addr: str,
+    ) -> None:
+        """
+        Create a DHCP static mapping (host reservation) for a VM.
+
+        Args:
+            vnet_id: The VNet ID where the mapping should be created
+            zone_id: The SDN zone ID containing the VNet
+            mac_address: The MAC address for the mapping
+            ip_addr: The static IP address to assign
+        """
+        with trace_action(
+            self.logger,
+            self.TRACE_NAME,
+            f"create DHCP mapping {vnet_id=} {zone_id=} {mac_address=} {ip_addr=}",
+        ):
+            # This is probably not how you're supposed to do this stuff.
+            # please correct me, I'm not a dev.
+
+            # We tack the ip allocations so that we can delete them later
+            reservation: ProxmoxJsonDataType = {
+                "ip": ip_addr,
+                "vnet": vnet_id,
+                "zone": zone_id,
+                "mac": mac_address,
+            }
+            dhcp_maps = self._created_ips.get()
+            dhcp_maps.append(reservation)
+            self._created_ips.set(dhcp_maps)
+
+            await self.async_proxmox.request(
+                "POST",
+                f"/cluster/sdn/vnets/{vnet_id}/ips",
+                json=reservation,
+            )
 
     async def cleanup(self) -> None:
         if self._cleanup_completed.get():
