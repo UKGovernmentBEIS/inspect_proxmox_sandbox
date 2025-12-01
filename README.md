@@ -99,6 +99,7 @@ sandbox=SandboxEnvironmentSpec(
                         # Specifying a static IPv4 address is optional. If provided,
                         # a DHCP static mapping (host reservation) will be created.
                         # Note: requires a MAC address to be specified as well.
+                        # Please read the notes in README.md for Proxmox server patching requirements
                         ipv4=ip_address("192.168.20.10")
                     ),
                 )
@@ -209,7 +210,7 @@ nics=(
 - The `ipv4` field requires a `mac` address to be specified (validation will fail otherwise)
 - The IP address must fall within one of the configured subnet CIDR ranges
 - `use_pve_ipam_dnsnmasq` must be `True` in the SDN config
-
+- The Proxmox server *must* be patched using the patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html 
 
 ### Using Existing Proxmox VNETs (Advanced/Not Recommended)
 

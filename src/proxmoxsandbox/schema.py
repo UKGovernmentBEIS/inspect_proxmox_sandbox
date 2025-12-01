@@ -132,6 +132,7 @@ class VmNicConfig(BaseModel, frozen=True):
         ipv4: The static IPv4 address for the network interface (optional).
             If specified, a DHCP static mapping (host reservation) will be created.
             Requires a MAC address to be specified as well.
+            Please read the notes in README.md for Proxmox server patching requirements
     """
 
     vnet_alias: str
