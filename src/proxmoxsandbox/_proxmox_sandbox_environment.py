@@ -69,7 +69,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.qemu_commands = QemuCommands(async_proxmox=proxmox, node=node)
         self.built_in_vm = BuiltInVM(async_proxmox=proxmox, node=node)
         self.task_wrapper = TaskWrapper(async_proxmox=proxmox)
-        self.ipam_mappings = ipam_mappings
+        self.all_ipam_mappings = ipam_mappings
         self.sdn_config = sdn_config
         self.vm_id = vm_id
         self.all_vm_ids = all_vm_ids
@@ -289,7 +289,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 async with concurrency("proxmox", 1):
                     await any_vm_sandbox_environment.infra_commands.delete_sdn_and_vms(
                         sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
-                        ipam_mappings=any_vm_sandbox_environment.ipam_mappings,
+                        ipam_mappings=any_vm_sandbox_environment.all_ipam_mappings,
                         vm_ids=any_vm_sandbox_environment.all_vm_ids,
                     )
         return None
