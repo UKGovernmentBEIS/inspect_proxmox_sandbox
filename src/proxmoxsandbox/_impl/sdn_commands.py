@@ -312,7 +312,7 @@ class SdnCommands(abc.ABC):
         return relevant_subnet_cidrs
 
     async def tear_down_sdn_ip_allocations(
-        self, ipam_mappings: List[IpamMapping]
+        self, ipam_mappings: Tuple[IpamMapping, ...]
     ) -> None:
         # Normally, if you have created an IPAM entry for a VM and you delete
         # that VM, the IPAM entry is automatically deleted. The infra_commands
@@ -341,12 +341,12 @@ class SdnCommands(abc.ABC):
                     )
 
     async def tear_down_sdn_zone_and_vnet(
-        self, sdn_zone_id: str, ipam_mappings: List[IpamMapping]
+        self, sdn_zone_id: str, ipam_mappings: Tuple[IpamMapping, ...]
     ) -> None:
         await self.tear_down_sdn_zones_and_vnets([sdn_zone_id], ipam_mappings)
 
     async def tear_down_sdn_zones_and_vnets(
-        self, sdn_zone_ids: Collection[str], ipam_mappings: List[IpamMapping]
+        self, sdn_zone_ids: Collection[str], ipam_mappings: Tuple[IpamMapping, ...]
     ) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"delete SDNs {sdn_zone_ids}"):
             # We need to delete allocated ips first before we can remove
