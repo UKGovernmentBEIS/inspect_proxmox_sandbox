@@ -4,7 +4,7 @@ import re
 import sys
 from logging import getLogger
 from random import randint
-from typing import Collection, Set, Tuple
+from typing import Collection, List, Set, Tuple
 
 from inspect_ai.util import trace_action
 from rich import box, print
@@ -52,7 +52,7 @@ class InfraCommands(abc.ABC):
         proxmox_ids_start: str,
         sdn_config: SdnConfigType,
         vms_config: Tuple[VmConfig, ...],
-    ):
+    ) -> Tuple[Tuple[Tuple[str, VmConfig], ...], str, Tuple[IpamMapping, ...]]:
         vm_configs_with_ids = []
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config
@@ -60,10 +60,15 @@ class InfraCommands(abc.ABC):
 
         known_builtins = await self.built_in_vm.known_builtins()
 
+        ipam_mappings = []
+
         for vm_config in vms_config:
             # We have to create the IPAM entries before booting the VMs
             # otherwise they will not get the defined static IPs.
-            await self.create_dhcp_mappings(vnet_aliases, vm_config, sdn_zone_id)
+            per_vm_ipam_mappings = await self.create_ipam_mappings(
+                vnet_aliases, vm_config, sdn_zone_id
+            )
+            ipam_mappings.extend(per_vm_ipam_mappings)
 
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
                 vm_id = await self.qemu_commands.create_and_start_vm(
@@ -80,23 +85,27 @@ class InfraCommands(abc.ABC):
                 vm_configs_with_id[0], vm_configs_with_id[1].is_sandbox
             )
 
-        # TODO types here
-        return vm_configs_with_ids, sdn_zone_id
+        return tuple(vm_configs_with_ids), sdn_zone_id, tuple(ipam_mappings)
 
     async def delete_sdn_and_vms(
-        self, sdn_zone_id: str | None, vm_ids: Tuple[int, ...]
+        self,
+        sdn_zone_id: str | None,
+        ipam_mappings: List[IpamMapping],
+        vm_ids: Tuple[int, ...],
     ):
         for vm_id in vm_ids:
             await self.qemu_commands.destroy_vm(vm_id=vm_id)
         if sdn_zone_id is not None:
-            await self.sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id=sdn_zone_id)
+            await self.sdn_commands.tear_down_sdn_zone_and_vnet(
+                sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings
+            )
 
-    async def create_dhcp_mappings(
+    async def create_ipam_mappings(
         self,
         sdn_vnet_aliases: VnetAliases,
         vm_config: VmConfig,
         sdn_zone_id: str | None,
-    ) -> None:
+    ) -> List[IpamMapping]:
         # `sdn_zone_id` _might_ be None, see my comment in `sdn_commands` about this.
         # As such, the static-ip IPAM allocation is incompatible with the predefined
         # VNET functionality, unless we add logic to grab the zone id the alias belongs
@@ -105,6 +114,8 @@ class InfraCommands(abc.ABC):
             return
 
         alias_mapping = self.qemu_commands._convert_sdn_vnet_aliases(sdn_vnet_aliases)
+
+        ipam_mappings: List[IpamMapping] = []
 
         for nic in vm_config.nics:
             if not (nic.mac and nic.ipv4):
@@ -119,11 +130,12 @@ class InfraCommands(abc.ABC):
                 )
 
             # Note we don't need a `do_update_all_sdn` call after these.
-            await self.sdn_commands.create_dhcp_mapping(
-                ipam_mapping=IpamMapping(
-                    vnet_id=vnet_id, zone_id=sdn_zone_id, mac=nic.mac, ipv4=nic.ipv4
-                )
+            ipam_mapping = IpamMapping(
+                vnet_id=vnet_id, zone_id=sdn_zone_id, mac=nic.mac, ipv4=nic.ipv4
             )
+            await self.sdn_commands.create_ipam_mapping(ipam_mapping)
+            ipam_mappings.append(ipam_mapping)
+        return ipam_mappings
 
     async def find_proxmox_ids_start(self, task_name_start: str) -> str:
         existing_zone_ids = set(
@@ -231,4 +243,7 @@ class InfraCommands(abc.ABC):
 
         for vm in noticed_vms:
             await self.qemu_commands.destroy_vm(vm["vmid"])
-        await self.sdn_commands.tear_down_sdn_zones_and_vnets(zones_to_delete)
+        ipam_mappings = []  # TODO - read all IP allocations from proxmox itself
+        await self.sdn_commands.tear_down_sdn_zones_and_vnets(
+            zones_to_delete, ipam_mappings
+        )

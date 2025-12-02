@@ -311,7 +311,9 @@ class SdnCommands(abc.ABC):
             relevant_subnet_cidrs += cidrs
         return relevant_subnet_cidrs
 
-    async def tear_down_sdn_ip_allocations(self) -> None:
+    async def tear_down_sdn_ip_allocations(
+        self, ipam_mappings: List[IpamMapping]
+    ) -> None:
         # Normally, if you have created an IPAM entry for a VM and you delete
         # that VM, the IPAM entry is automatically deleted. The infra_commands
         # function `delete_sdn_and_vms` calls VM deletions before SDN deletions,
@@ -320,9 +322,8 @@ class SdnCommands(abc.ABC):
         # the deletion of the subnet, and therefore the VNET, and therefore the zone.
         # So I think this function and its additional logic is warranted to make sure
         # the SDN is cleared _no matter what_.
-        dhcp_allocations: List[IpamMapping] = self._created_ips.get()
         with trace_action(self.logger, self.TRACE_NAME, "delete IPAM IP allocations"):
-            for ipam_mapping in dhcp_allocations:
+            for ipam_mapping in ipam_mappings:
                 p = ipam_mapping.to_proxmox_format()
 
                 # DELETE requests require query parameters not JSON
@@ -339,16 +340,18 @@ class SdnCommands(abc.ABC):
                         f"Lease {p['ip']} for {p['mac']} in {p['vnet']} inside {p['zone']} already deleted."
                     )
 
-    async def tear_down_sdn_zone_and_vnet(self, sdn_zone_id: str) -> None:
-        await self.tear_down_sdn_zones_and_vnets([sdn_zone_id])
+    async def tear_down_sdn_zone_and_vnet(
+        self, sdn_zone_id: str, ipam_mappings: List[IpamMapping]
+    ) -> None:
+        await self.tear_down_sdn_zones_and_vnets([sdn_zone_id], ipam_mappings)
 
     async def tear_down_sdn_zones_and_vnets(
-        self, sdn_zone_ids: Collection[str]
+        self, sdn_zone_ids: Collection[str], ipam_mappings: List[IpamMapping]
     ) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"delete SDNs {sdn_zone_ids}"):
             # We need to delete allocated ips first before we can remove
             # subnets or vnets or zones.
-            await self.tear_down_sdn_ip_allocations()
+            await self.tear_down_sdn_ip_allocations(ipam_mappings)
 
             for sdn_zone_id in sdn_zone_ids:
                 all_vnets = await self.read_all_vnets()
@@ -378,7 +381,7 @@ class SdnCommands(abc.ABC):
     async def read_all_vnets(self):
         return await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
 
-    async def create_dhcp_mapping(self, ipam_mapping: IpamMapping) -> None:
+    async def create_ipam_mapping(self, ipam_mapping: IpamMapping) -> None:
         """
         Create a DHCP static mapping (host reservation) for a VM.
 
@@ -409,5 +412,6 @@ class SdnCommands(abc.ABC):
             return
 
         with trace_action(self.logger, self.TRACE_NAME, "cleanup all SDNs"):
+            await self.tear_down_sdn_ip_allocations(self._created_ips.get())
             await self.tear_down_sdn_zones_and_vnets(self._created_sdns.get())
             self._cleanup_completed.set(True)
