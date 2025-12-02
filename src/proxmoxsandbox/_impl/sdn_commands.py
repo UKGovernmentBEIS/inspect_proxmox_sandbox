@@ -383,6 +383,11 @@ class SdnCommands(abc.ABC):
             self.TRACE_NAME,
             f"create DHCP mapping {vnet_id=} {zone_id=} {mac_address=} {ip_addr=}",
         ):
+            if "aisi" not in self.async_proxmox.discovered_proxmox_version.version:
+                raise NotImplementedError(
+                    "IPAM DHCP mappings are only supported on Proxmox "
+                    "versions with the aisi patch."
+                )
             # This is probably not how you're supposed to do this stuff.
             # please correct me, I'm not a dev.
 
