@@ -62,7 +62,7 @@ uv run ruff format .
 manually:
 
 ```bash
-mypy
+uv run mypy
 ```
 
 ## Design Notes

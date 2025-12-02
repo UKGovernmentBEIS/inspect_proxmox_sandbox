@@ -111,7 +111,7 @@ class InfraCommands(abc.ABC):
         # VNET functionality, unless we add logic to grab the zone id the alias belongs
         # to here.
         if not (vm_config.nics and sdn_zone_id):
-            return
+            return []
 
         alias_mapping = self.qemu_commands._convert_sdn_vnet_aliases(sdn_vnet_aliases)
 
