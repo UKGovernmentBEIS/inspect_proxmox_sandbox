@@ -7,6 +7,9 @@ from random import shuffle
 from typing import Collection, List, Optional, Set, Tuple, TypeAlias
 
 from inspect_ai.util import trace_action
+from pydantic import BaseModel
+from pydantic.networks import IPvAnyAddress
+from pydantic_extra_types.mac_address import MacAddress
 
 from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
@@ -32,6 +35,21 @@ ZONE_REGEX = "...[0-9]{3}z"
 STATIC_SDN_START = "inspvm"
 
 
+class IpamMapping(BaseModel):
+    vnet_id: str
+    zone_id: str
+    mac: MacAddress
+    ipv4: IPvAnyAddress
+
+    def to_proxmox_format(self) -> ProxmoxJsonDataType:
+        return {
+            "ip": str(self.ipv4),
+            "vnet": self.vnet_id,
+            "zone": self.zone_id,
+            "mac": str(self.mac).upper(),
+        }
+
+
 class SdnCommands(abc.ABC):
     logger = getLogger(__name__)
 
@@ -43,8 +61,7 @@ class SdnCommands(abc.ABC):
     _created_sdns: ContextVar[Set[str]] = ContextVar(
         "proxmox_created_sdns", default=set()
     )
-    # (vnet_id, zone_id, mac_address, ip_addr)
-    _created_ips: ContextVar[List[ProxmoxJsonDataType]] = ContextVar(
+    _created_ips: ContextVar[List[IpamMapping]] = ContextVar(
         "proxmox_created_ips", default=list()
     )
     _cleanup_completed: ContextVar[bool] = ContextVar(
@@ -303,24 +320,23 @@ class SdnCommands(abc.ABC):
         # the deletion of the subnet, and therefore the VNET, and therefore the zone.
         # So I think this function and its additional logic is warranted to make sure
         # the SDN is cleared _no matter what_.
-        dhcp_allocations = self._created_ips.get()
+        dhcp_allocations: List[IpamMapping] = self._created_ips.get()
         with trace_action(self.logger, self.TRACE_NAME, "delete IPAM IP allocations"):
-            for allocation in dhcp_allocations:
-                vnet = allocation["vnet"]
-                ip = allocation["ip"]
-                zone = allocation["zone"]
-                mac = allocation["mac"]
+            for ipam_mapping in dhcp_allocations:
+                p = ipam_mapping.to_proxmox_format()
 
                 # DELETE requests require query parameters not JSON
-                query_params = f"?ip={ip}&vnet={vnet}&zone={zone}&mac={mac}"
+                query_params = (
+                    f"?ip={p['ip']}&vnet={p['vnet']}&zone={p['zone']}&mac={p['mac']}"
+                )
                 try:
                     await self.async_proxmox.request(
                         "DELETE",
-                        f"/cluster/sdn/vnets/{vnet}/ips{query_params}",
+                        f"/cluster/sdn/vnets/{p['vnet']}/ips{query_params}",
                     )
                 except Exception as _:
                     self.logger.debug(
-                        f"Lease {ip} for {mac} in {vnet} inside {zone} already deleted."
+                        f"Lease {p['ip']} for {p['mac']} in {p['vnet']} inside {p['zone']} already deleted."
                     )
 
     async def tear_down_sdn_zone_and_vnet(self, sdn_zone_id: str) -> None:
@@ -362,51 +378,31 @@ class SdnCommands(abc.ABC):
     async def read_all_vnets(self):
         return await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
 
-    async def create_dhcp_mapping(
-        self,
-        vnet_id: str,
-        zone_id: str,
-        mac_address: str,
-        ip_addr: str,
-    ) -> None:
+    async def create_dhcp_mapping(self, ipam_mapping: IpamMapping) -> None:
         """
         Create a DHCP static mapping (host reservation) for a VM.
 
         Args:
-            vnet_id: The VNet ID where the mapping should be created
-            zone_id: The SDN zone ID containing the VNet
-            mac_address: The MAC address for the mapping
-            ip_addr: The static IP address to assign
+            ipam_mapping: details of MAC->IP mapping to create
         """
         with trace_action(
             self.logger,
             self.TRACE_NAME,
-            f"create DHCP mapping {vnet_id=} {zone_id=} {mac_address=} {ip_addr=}",
+            f"create IPAM mapping {ipam_mapping=}",
         ):
             if "aisi" not in self.async_proxmox.discovered_proxmox_version.version:
                 raise NotImplementedError(
                     "IPAM DHCP mappings are only supported on Proxmox "
                     "versions with the aisi patch."
                 )
-            # This is probably not how you're supposed to do this stuff.
-            # please correct me, I'm not a dev.
-
-            # We tack the ip allocations so that we can delete them later
-            reservation: ProxmoxJsonDataType = {
-                "ip": ip_addr,
-                "vnet": vnet_id,
-                "zone": zone_id,
-                "mac": mac_address,
-            }
-            dhcp_maps = self._created_ips.get()
-            dhcp_maps.append(reservation)
-            self._created_ips.set(dhcp_maps)
 
             await self.async_proxmox.request(
                 "POST",
-                f"/cluster/sdn/vnets/{vnet_id}/ips",
-                json=reservation,
+                f"/cluster/sdn/vnets/{ipam_mapping.vnet_id}/ips",
+                json=ipam_mapping.to_proxmox_format(),
             )
+            # We save the ip allocations so that we can delete them later
+            self._created_ips.get().append(ipam_mapping)
 
     async def cleanup(self) -> None:
         if self._cleanup_completed.get():

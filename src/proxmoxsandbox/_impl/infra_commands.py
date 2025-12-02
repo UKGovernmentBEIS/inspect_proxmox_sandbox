@@ -14,7 +14,12 @@ from rich.table import Table
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
-from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, SdnCommands, VnetAliases
+from proxmoxsandbox._impl.sdn_commands import (
+    ZONE_REGEX,
+    IpamMapping,
+    SdnCommands,
+    VnetAliases,
+)
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     SdnConfigType,
@@ -115,10 +120,9 @@ class InfraCommands(abc.ABC):
 
             # Note we don't need a `do_update_all_sdn` call after these.
             await self.sdn_commands.create_dhcp_mapping(
-                vnet_id=vnet_id,
-                zone_id=sdn_zone_id,
-                mac_address=str(nic.mac).upper(),
-                ip_addr=str(nic.ipv4),
+                ipam_mapping=IpamMapping(
+                    vnet_id=vnet_id, zone_id=sdn_zone_id, mac=nic.mac, ipv4=nic.ipv4
+                )
             )
 
     async def find_proxmox_ids_start(self, task_name_start: str) -> str:
