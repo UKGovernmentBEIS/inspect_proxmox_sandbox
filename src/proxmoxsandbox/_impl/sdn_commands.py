@@ -279,6 +279,8 @@ class SdnCommands(abc.ABC):
 
         await self.do_update_all_sdn()
 
+        self._created_sdns.get().add(sdn_zone_id)
+
         return sdn_zone_id, existing_vnet_aliases
 
     async def do_update_all_sdn(self) -> None:
@@ -408,10 +410,15 @@ class SdnCommands(abc.ABC):
             self._created_ipam_mappings.get().append(ipam_mapping)
 
     async def cleanup(self) -> None:
-        if self._cleanup_completed.get():
+        cleanup_completed = self._cleanup_completed.get()
+
+        print(f"sdn cleanup; {cleanup_completed=}; {self._created_sdns.get()=}")
+
+        if cleanup_completed:
             return
 
         with trace_action(self.logger, self.TRACE_NAME, "cleanup all SDNs"):
-            await self.tear_down_sdn_ip_allocations(self._created_ipam_mappings.get())
-            await self.tear_down_sdn_zones_and_vnets(self._created_sdns.get())
+            await self.tear_down_sdn_zones_and_vnets(
+                self._created_sdns.get(), self._created_ipam_mappings.get()
+            )
             self._cleanup_completed.set(True)

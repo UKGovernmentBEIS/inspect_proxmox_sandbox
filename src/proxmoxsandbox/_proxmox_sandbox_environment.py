@@ -302,6 +302,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
+        print(f"task cleanup activated; {cleanup=}; {config=}")
+
         if config is None:
             config = ProxmoxSandboxEnvironmentConfig()
 

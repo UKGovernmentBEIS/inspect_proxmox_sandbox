@@ -159,6 +159,7 @@ class InfraCommands(abc.ABC):
         )
 
     async def cleanup(self) -> None:
+        print("infra_commands cleanup activated")
         await self.qemu_commands.cleanup()
         await self.sdn_commands.cleanup()
 
