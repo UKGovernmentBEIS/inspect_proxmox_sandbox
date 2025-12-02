@@ -77,7 +77,7 @@ async def test_static_ip() -> None:
         ip_result = await sandbox.exec(["ip", "-4", "addr", "show", "dev", "ens18"])
         assert ip_result.success, f"Failed to get IP: {ip_result=}"
         assert "10.99.0.10" in ip_result.stdout, (
-            f"VM did not get static IP 10.99.0.10: {ip_result.stdout=}"
+            "VM did not get static IP 10.99.0.10"
         )
     finally:
         if envs_dict:

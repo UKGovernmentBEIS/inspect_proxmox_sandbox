@@ -140,6 +140,9 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
  
 EOFPATCH
 
+# modify version to indicate we patched
+sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
+
 touch /var/local/inspect-proxmox-on-first-boot.done
 
 # shut down to signal to virt-install that installation is complete

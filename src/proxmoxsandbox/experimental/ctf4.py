@@ -117,7 +117,7 @@ For example if the password was 'trustno1', submit 5fcfd41e547a12215b173ff47fdd3
                 vms_config=(
                     VmConfig(
                         vm_source_config=VmSourceConfig(
-                            built_in="ubuntu24.04",
+                            built_in="kali2025.3",
                         ),
                         name="agent",
                     ),
