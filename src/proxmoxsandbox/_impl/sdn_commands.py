@@ -61,8 +61,8 @@ class SdnCommands(abc.ABC):
     _created_sdns: ContextVar[Set[str]] = ContextVar(
         "proxmox_created_sdns", default=set()
     )
-    _created_ips: ContextVar[List[IpamMapping]] = ContextVar(
-        "proxmox_created_ips", default=list()
+    _created_ipam_mappings: ContextVar[List[IpamMapping]] = ContextVar(
+        "proxmox_created_ipam_mappings", default=list()
     )
     _cleanup_completed: ContextVar[bool] = ContextVar(
         "proxmox_sdns_cleanup_executed", default=False
@@ -405,13 +405,13 @@ class SdnCommands(abc.ABC):
                 json=ipam_mapping.to_proxmox_format(),
             )
             # We save the ip allocations so that we can delete them later
-            self._created_ips.get().append(ipam_mapping)
+            self._created_ipam_mappings.get().append(ipam_mapping)
 
     async def cleanup(self) -> None:
         if self._cleanup_completed.get():
             return
 
         with trace_action(self.logger, self.TRACE_NAME, "cleanup all SDNs"):
-            await self.tear_down_sdn_ip_allocations(self._created_ips.get())
+            await self.tear_down_sdn_ip_allocations(self._created_ipam_mappings.get())
             await self.tear_down_sdn_zones_and_vnets(self._created_sdns.get())
             self._cleanup_completed.set(True)
