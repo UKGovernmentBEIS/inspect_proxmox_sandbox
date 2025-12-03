@@ -314,7 +314,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             infra_commands = InfraCommands(
                 async_proxmox=cls._create_async_proxmox_api(config), node=config.node
             )
-            await infra_commands.cleanup()
+            await infra_commands.task_cleanup()
         else:
             print(
                 "\nCleanup all sandbox releases with: "

@@ -522,7 +522,7 @@ class QemuCommands(abc.ABC):
         if vm_id is not None:
             self._running_proxmox_vms.get().add(vm_id)
 
-    async def cleanup(self) -> None:
+    async def task_cleanup(self) -> None:
         cleanup_completed = self._cleanup_completed.get()
         print(f"qemu_commands cleanup activated; {cleanup_completed=}")
         if cleanup_completed:

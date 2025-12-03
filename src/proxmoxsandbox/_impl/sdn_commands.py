@@ -50,6 +50,25 @@ class IpamMapping(BaseModel):
         }
 
 
+class PveIpamStatus(BaseModel):
+    hostname: Optional[str] = None
+    gateway: Optional[int] = None
+    ip: str
+    mac: Optional[str] = None
+    subnet: str
+    vmid: Optional[int] = None
+    vnet: str
+    zone: str
+
+    def to_ipam_mapping(self) -> IpamMapping:
+        return IpamMapping(
+            vnet_id=self.vnet,
+            zone_id=self.zone,
+            mac=MacAddress(self.mac) if self.mac is not None else None,
+            ipv4=ip_address(self.ip),
+        )
+
+
 class SdnCommands(abc.ABC):
     logger = getLogger(__name__)
 
@@ -383,6 +402,10 @@ class SdnCommands(abc.ABC):
     async def read_all_vnets(self):
         return await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
 
+    async def read_all_ipam_mappings(self) -> List[PveIpamStatus]:
+        res = await self.async_proxmox.request("GET", "/cluster/sdn/ipams/pve/status")
+        return [PveIpamStatus(**item) for item in res]
+
     async def create_ipam_mapping(self, ipam_mapping: IpamMapping) -> None:
         """
         Create a DHCP static mapping (host reservation) for a VM.
@@ -409,7 +432,7 @@ class SdnCommands(abc.ABC):
             # We save the ip allocations so that we can delete them later
             self._created_ipam_mappings.get().append(ipam_mapping)
 
-    async def cleanup(self) -> None:
+    async def task_cleanup(self) -> None:
         cleanup_completed = self._cleanup_completed.get()
 
         print(f"sdn cleanup; {cleanup_completed=}; {self._created_sdns.get()=}")

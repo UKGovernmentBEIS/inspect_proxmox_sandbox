@@ -158,10 +158,10 @@ class InfraCommands(abc.ABC):
             ]
         )
 
-    async def cleanup(self) -> None:
+    async def task_cleanup(self) -> None:
         print("infra_commands cleanup activated")
-        await self.qemu_commands.cleanup()
-        await self.sdn_commands.cleanup()
+        await self.qemu_commands.task_cleanup()
+        await self.sdn_commands.task_cleanup()
 
     async def cleanup_no_id(self) -> None:
         noticed_vnets = set()
@@ -192,6 +192,12 @@ class InfraCommands(abc.ABC):
         for zone in await self.sdn_commands.list_sdn_zones():
             if re.match(ZONE_REGEX, zone["zone"]):
                 zones_to_delete.add(zone["zone"])
+
+        noticed_ipam_mappings = [
+            mapping.to_ipam_mapping()
+            for mapping in await self.sdn_commands.read_all_ipam_mappings()
+            if mapping.zone in zones_to_delete and mapping.gateway is None
+        ]
 
         if not noticed_vms and not zones_to_delete:
             print(f"No resources to delete on {self.async_proxmox.base_url}.")
@@ -244,7 +250,6 @@ class InfraCommands(abc.ABC):
 
         for vm in noticed_vms:
             await self.qemu_commands.destroy_vm(vm["vmid"])
-        ipam_mappings = []  # TODO - read all IP allocations from proxmox itself
         await self.sdn_commands.tear_down_sdn_zones_and_vnets(
-            zones_to_delete, ipam_mappings
+            zones_to_delete, noticed_ipam_mappings
         )
