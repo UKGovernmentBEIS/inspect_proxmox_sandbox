@@ -27,6 +27,7 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.sdn_commands import IpamMapping
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
@@ -47,6 +48,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     qemu_commands: QemuCommands
     task_wrapper: TaskWrapper
     built_in_vm: BuiltInVM
+    all_ipam_mappings: Tuple[IpamMapping, ...]
     sdn_config: SdnConfigType
     vm_id: int
     all_vm_ids: Tuple[int, ...]
@@ -56,6 +58,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self,
         proxmox: AsyncProxmoxAPI,
         node: str,
+        ipam_mappings: Tuple[IpamMapping, ...],
         sdn_config: SdnConfigType,
         vm_id: int,
         all_vm_ids: Tuple[int, ...],
@@ -66,6 +69,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.qemu_commands = QemuCommands(async_proxmox=proxmox, node=node)
         self.built_in_vm = BuiltInVM(async_proxmox=proxmox, node=node)
         self.task_wrapper = TaskWrapper(async_proxmox=proxmox)
+        self.all_ipam_mappings = ipam_mappings
         self.sdn_config = sdn_config
         self.vm_id = vm_id
         self.all_vm_ids = all_vm_ids
@@ -197,7 +201,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         )
 
         async with concurrency("proxmox", 1):
-            vm_configs_with_ids, sdn_zone_id = await infra_commands.create_sdn_and_vms(
+            (
+                vm_configs_with_ids,
+                sdn_zone_id,
+                ipam_mappings,
+            ) = await infra_commands.create_sdn_and_vms(
                 proxmox_ids_start,
                 sdn_config=config.sdn_config,
                 vms_config=config.vms_config,
@@ -215,6 +223,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             vm_sandbox_environment = ProxmoxSandboxEnvironment(
                 proxmox=async_proxmox_api,
                 node=config.node,
+                ipam_mappings=ipam_mappings,
                 sdn_config=config.sdn_config,
                 vm_id=vm_config_and_id[0],
                 all_vm_ids=vm_ids,
@@ -280,6 +289,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 async with concurrency("proxmox", 1):
                     await any_vm_sandbox_environment.infra_commands.delete_sdn_and_vms(
                         sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
+                        ipam_mappings=any_vm_sandbox_environment.all_ipam_mappings,
                         vm_ids=any_vm_sandbox_environment.all_vm_ids,
                     )
         return None
@@ -292,6 +302,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
+        print(f"task cleanup activated; {cleanup=}; {config=}")
+
         if config is None:
             config = ProxmoxSandboxEnvironmentConfig()
 
@@ -302,7 +314,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             infra_commands = InfraCommands(
                 async_proxmox=cls._create_async_proxmox_api(config), node=config.node
             )
-            await infra_commands.cleanup()
+            await infra_commands.task_cleanup()
         else:
             print(
                 "\nCleanup all sandbox releases with: "
