@@ -31,18 +31,28 @@ This guide covers installing phpIPAM directly on a Proxmox VE server and integra
 phpIPAM is an open-source IP address management (IPAM) application that provides centralized IP address tracking. When integrated with Proxmox VE SDN, it offers several advantages over the built-in IPAM:
 
 - **Centralized Management**: Single source of truth for IP addresses across multiple zones
-- **Overlapping IP Support**: Properly handles overlapping IP ranges in different SDN zones
+- **Advanced Organization**: Support for sections, VRFs, and hierarchical subnet management
 - **Advanced Features**: VLAN management, subnet hierarchies, custom fields, and more
 - **Web Interface**: User-friendly web UI for IP management
 
 ### Use Case: Overlapping IP Ranges
 
-Proxmox's built-in IPAM does not support overlapping IP ranges across different simple zones. This is problematic for scenarios like:
-- Testing environments with identical network configurations
-- Multi-tenant environments where tenants use the same private IP ranges
-- Development/staging/production environments with matching IP schemes
+**Critical Limitation:** Proxmox's phpIPAM integration does NOT support overlapping IP ranges across different zones.
 
-phpIPAM solves this by maintaining context-aware IP allocation.
+When multiple zones use the same subnet (e.g., 192.168.100.0/24), Proxmox searches for existing subnets using phpIPAM's CIDR search endpoint (`/subnets/cidr/X.X.X.X/Y`), which returns all matching subnets across all sections. This means:
+
+- Even with separate phpIPAM sections configured, Proxmox cannot distinguish between them
+- The first matching subnet found will be reused for all zones
+- IP conflicts will occur when multiple zones try to allocate the same IPs
+
+**Root Cause:** Proxmox's phpIPAM plugin uses a section-agnostic subnet search mechanism. While phpIPAM's data model supports overlapping IPs in different sections, Proxmox's integration does not leverage this capability.
+
+**Workarounds:**
+1. **Use non-overlapping IP ranges** - The simplest and recommended solution
+2. **Separate phpIPAM instances** - Run completely separate phpIPAM installations on different servers/URLs
+3. **Use Proxmox's built-in PVE IPAM** - If overlapping IPs are required, consider using the built-in IPAM instead
+
+Scenarios like testing environments with identical network configurations or multi-tenant environments using the same private IP ranges are not supported with the current phpIPAM integration.
 
 ---
 
@@ -79,6 +89,7 @@ apt-get install -y \
   php-json \
   php-xml \
   php-fpm \
+  php-pear \
   git \
   libapache2-mod-php
 ```
@@ -274,7 +285,9 @@ pvesh create /cluster/sdn/zones \
 pvesh set /cluster/sdn/zones/zone1 --ipam phpipam1
 ```
 
-**Important:** You cannot change the IPAM of a zone that already has subnets defined. Delete subnets first if needed.
+**Important Notes:**
+- Zone IDs must be **8 characters or less** due to Proxmox SDN limitations
+- You cannot change the IPAM of a zone that already has subnets defined. Delete subnets first if needed.
 
 ### Add Subnets
 
@@ -399,6 +412,23 @@ if($app->app_security=="ssl_token") {
 
 **Solution:** Ensure the IPAM URL is `http://localhost/api/proxmox` (not just `http://localhost/api`). The `proxmox` part must match the `app_id` in the phpIPAM API table.
 
+### Zone ID Too Long
+
+**Cause:** Zone ID exceeds the 8-character limit.
+
+**Error message:**
+```
+400 Parameter verification failed.
+zone: invalid format - zone ID 'testzone1' can't be more length than 8 characters
+```
+
+**Solution:** Use a zone ID with 8 characters or less:
+```bash
+# Wrong: testzone1 (9 characters)
+# Correct: zone1 or testzone (both 8 characters or less)
+pvesh create /cluster/sdn/zones --zone zone1 --type simple --ipam phpipam1
+```
+
 ### Cannot Change Zone IPAM
 
 **Cause:** Zone already has subnets defined.
@@ -427,6 +457,43 @@ pvesh set /cluster/sdn
 # Check Proxmox logs
 journalctl -u pve-cluster -f
 ```
+
+### Overlapping IP Ranges Don't Work
+
+**Issue:** Multiple zones with the same subnet (e.g., 192.168.100.0/24) share the same phpIPAM subnet entry and encounter IP conflicts.
+
+**Cause:** Proxmox's phpIPAM integration uses the `/subnets/cidr/` API endpoint, which searches across all sections and returns all matching subnets. Proxmox cannot differentiate between subnets in different sections.
+
+**What you'll see:**
+- Second zone reuses the subnet from the first zone
+- Gateway IP allocation fails with HTTP 409 Conflict
+- Apache logs show: `POST /api/proxmox/addresses/ HTTP/1.1" 409`
+
+**Solution:**
+This is a fundamental limitation of the integration. Use one of these workarounds:
+1. Design your network with non-overlapping IP ranges
+2. Use separate phpIPAM instances (different servers/URLs) for different zones
+3. Consider Proxmox's built-in PVE IPAM if overlapping IPs are essential
+
+**Note:** Configuring separate phpIPAM sections does NOT solve this problem - the CIDR search is section-agnostic.
+
+### API Returns "Failed opening required 'PEAR.php'"
+
+**Cause:** The `php-pear` package is not installed.
+
+**Error message in Apache logs:**
+```
+PHP Fatal error: Failed opening required 'PEAR.php' (include_path='.:/usr/share/php')
+in /var/www/phpipam/functions/PEAR/Net/IPv4.php:24
+```
+
+**Solution:**
+```bash
+apt-get install -y php-pear
+# No need to restart Apache
+```
+
+This error typically occurs when creating the first subnet via Proxmox SDN.
 
 ### Apache/PHP Errors
 
@@ -507,6 +574,18 @@ mysql -u root phpipam < /root/phpipam-backup-20251203.sql
 
 ## Advanced Configuration
 
+### Important Note on IPAM IDs
+
+IPAM IDs in Proxmox cannot contain hyphens or special characters. Use alphanumeric characters only:
+
+```bash
+# ❌ FAILS - contains hyphen
+pvesh create /cluster/sdn/ipams --ipam phpipam-prod ...
+
+# ✅ WORKS - alphanumeric only
+pvesh create /cluster/sdn/ipams --ipam phpipamprod ...
+```
+
 ### Using Multiple Sections
 
 phpIPAM sections allow you to organize subnets. You can use different sections for different purposes:
@@ -552,12 +631,14 @@ To access the phpIPAM web interface from outside the Proxmox server:
 
 You now have phpIPAM installed and integrated with Proxmox VE SDN. This setup provides:
 
-- ✅ Centralized IP address management
-- ✅ Support for overlapping IP ranges across zones
+- ✅ Centralized IP address management for non-overlapping IP ranges
 - ✅ Web-based interface for IP tracking
 - ✅ Automatic IP registration via SDN integration
 - ✅ DHCP range management
 - ✅ API access for automation
+- ✅ Advanced features like sections, VLANs, and hierarchical subnet organization
+
+**Important:** Overlapping IP ranges across zones are NOT supported with this integration. Plan your network architecture to use non-overlapping IP ranges, or consider alternative IPAM solutions if overlapping IPs are required.
 
 For more information, consult:
 - [phpIPAM Documentation](https://phpipam.net/documents/)
@@ -626,6 +707,213 @@ systemctl restart pve-cluster
 
 ---
 
-**Document Version:** 1.0
+## Appendix: Testing Notes
+
+This section documents the comprehensive testing performed on this guide to ensure accuracy and identify limitations.
+
+### Testing Environment
+
+- **Proxmox Version:** 9.1.1 (kernel 6.17.2-2-pve)
+- **phpIPAM Version:** 1.6 branch
+- **PHP Version:** 8.4.11
+- **MariaDB Version:** 11.8.3
+- **Apache Version:** 2.4.65
+- **Debian Version:** Trixie
+- **Testing Date:** 2025-12-03
+
+### Test 1: Basic Installation and Integration
+
+The guide was followed step-by-step from a fresh Proxmox installation. This test identified several critical issues that have been corrected.
+
+#### Issues Found and Corrected
+
+**1. Missing PEAR Dependency (CRITICAL)**
+
+The `php-pear` package was not listed in dependencies but is required by phpIPAM. Without it, subnet creation fails with:
+
+```
+PHP Fatal error: Failed opening required 'PEAR.php' (include_path='.:/usr/share/php')
+in /var/www/phpipam/functions/PEAR/Net/IPv4.php:24
+```
+
+**Resolution:** Added `php-pear` to the dependency installation list.
+
+**2. Zone ID Length Restriction**
+
+Zone IDs must be 8 characters or less. Testing with `testzone1` (9 characters) produced:
+
+```
+400 Parameter verification failed.
+zone: invalid format - zone ID 'testzone1' can't be more length than 8 characters
+```
+
+**Resolution:** Added documentation of the 8-character limit.
+
+**3. IPAM ID Character Restrictions**
+
+IPAM IDs cannot contain hyphens or special characters. Testing with `phpipam-z1` produced:
+
+```
+400 Parameter verification failed.
+ipam: invalid format - ipam ID 'phpipam-z1' contains illegal characters
+```
+
+**Resolution:** Added documentation that only alphanumeric characters are allowed.
+
+#### Successful Verifications
+
+All core functionality was verified to work correctly:
+
+- ✅ Apache, MariaDB, PHP installation
+- ✅ phpIPAM git clone and checkout to branch 1.6
+- ✅ Database creation and schema import
+- ✅ Apache virtual host configuration
+- ✅ API configuration (api_allow_unsafe and 'none' security mode)
+- ✅ API application creation with 'none' security mode
+- ✅ API endpoint testing
+- ✅ Proxmox IPAM configuration
+- ✅ Zone and vnet creation
+- ✅ Subnet creation (after php-pear installation)
+- ✅ SDN configuration application
+- ✅ Network interface creation (vnet1, vnet2)
+- ✅ Gateway IP registration in phpIPAM
+- ✅ API communication between Proxmox and phpIPAM
+
+**Network Interfaces Created:**
+```bash
+4: vnet1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UNKNOWN
+    inet 192.168.100.1/24 scope global vnet1
+
+5: vnet2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UNKNOWN
+    inet 192.168.100.1/24 scope global vnet2
+```
+
+**API Communication Observed:**
+- `POST /api/proxmox/subnets/` → 201 (subnet created)
+- `POST /api/proxmox/addresses/` → 201 (IP allocated)
+- `GET /api/proxmox/subnets/cidr/192.168.100.0/24` → 200 (subnet lookup)
+
+### Test 2: Overlapping IP Ranges with Multiple Sections
+
+A comprehensive test was performed to determine if phpIPAM's section feature could enable overlapping IP ranges across zones.
+
+#### Test Configuration
+
+**phpIPAM Sections:**
+- Section 3: "Zone1 Networks"
+- Section 4: "Zone2 Networks"
+
+**Proxmox IPAM Configurations:**
+- `phpipamz1` pointing to Section 3
+- `phpipamz2` pointing to Section 4
+
+**Network Setup:**
+- Zone1 with vnet1 using phpipamz1
+- Zone2 with vnet2 using phpipamz2
+- Both zones configured with 192.168.100.0/24
+
+#### Test Results
+
+**phpIPAM Data Model: ✅ WORKS**
+
+phpIPAM's database properly supports overlapping IPs in different sections:
+
+```json
+Subnets created:
+[
+  {"id": 8, "subnet": "192.168.100.0", "mask": "24", "sectionId": 3},
+  {"id": 9, "subnet": "192.168.100.0", "mask": "24", "sectionId": 4}
+]
+
+IPs created (same IP in both subnets):
+Subnet 8: {"id": 12, "ip": "192.168.100.1", "hostname": "zone1-gw", "subnetId": 8}
+Subnet 9: {"id": 13, "ip": "192.168.100.1", "hostname": "zone2-gw", "subnetId": 9}
+```
+
+The IPs are properly isolated - each subnet maintains its own IP address space independently.
+
+**Proxmox Integration: ❌ DOES NOT WORK**
+
+Despite phpIPAM correctly storing overlapping ranges, Proxmox's integration cannot utilize this feature.
+
+**The Problem:**
+
+When Proxmox searches for a subnet, it uses:
+```bash
+GET /api/proxmox/subnets/cidr/192.168.100.0/24
+```
+
+This endpoint returns ALL matching subnets regardless of section:
+```json
+{
+  "code": 200,
+  "data": [
+    {"id": 8, "subnet": "192.168.100.0", "mask": "24", "sectionId": 3},
+    {"id": 9, "subnet": "192.168.100.0", "mask": "24", "sectionId": 4}
+  ]
+}
+```
+
+Proxmox receives both subnets and cannot determine which one to use for the current zone.
+
+**Apache Access Log Evidence:**
+
+```
+# Proxmox validates sections exist
+127.0.0.1 - GET /api/proxmox/sections/3 HTTP/1.1" 200
+127.0.0.1 - GET /api/proxmox/sections/4 HTTP/1.1" 200
+
+# Proxmox searches for subnet (section-agnostic!)
+127.0.0.1 - GET /api/proxmox/subnets/cidr/192.168.100.0/24 HTTP/1.1" 200
+```
+
+While Proxmox validates that the configured section exists, it uses a section-agnostic CIDR search when looking for subnets.
+
+#### Root Cause Analysis
+
+Proxmox's phpIPAM integration uses phpIPAM's CIDR search API (`/subnets/cidr/X.X.X.X/Y`), which is designed to find subnets by network address, not by section. This endpoint returns all matching subnets across all sections.
+
+For overlapping ranges to work, Proxmox would need to:
+1. Search for subnets within a specific section only, OR
+2. Filter CIDR search results by the configured section
+
+Neither approach is currently implemented in Proxmox's phpIPAM plugin.
+
+#### Test Conclusion
+
+**The multiple sections approach DOES NOT work for overlapping IP ranges with Proxmox's current phpIPAM integration.**
+
+While phpIPAM's data model fully supports overlapping IPs in different sections, Proxmox's integration code does not leverage this capability. The CIDR search endpoint used by Proxmox is section-agnostic, making it impossible for Proxmox to maintain proper section isolation.
+
+### Summary of Corrections Made
+
+Based on thorough testing, the following corrections were made to this guide:
+
+1. **Added php-pear to dependencies** - Critical for subnet validation
+2. **Removed incorrect overlapping IP claims** - Multiple sections do not solve this problem
+3. **Added clear explanation of overlapping IP limitation** - Documented the technical reason
+4. **Added character restrictions** - Zone IDs (8 chars max), IPAM IDs (alphanumeric only)
+5. **Added comprehensive troubleshooting** - Based on actual errors encountered
+6. **Updated conclusion** - Reflects actual capabilities and limitations
+
+All claims in this guide have been validated through hands-on testing.
+
+---
+
+**Document Version:** 1.2
 **Last Updated:** 2025-12-03
 **Tested On:** Proxmox VE 9.1.1, phpIPAM 1.6
+
+**Changelog (v1.2):**
+- **CORRECTED:** Removed incorrect claim about overlapping IP support via multiple sections
+- **TESTED:** Verified that Proxmox's CIDR search is section-agnostic, making overlapping IPs impossible
+- Added detailed explanation of why overlapping IPs don't work with root cause analysis
+- Added troubleshooting section for overlapping IP range issues
+- Added note about IPAM ID character restrictions (no hyphens)
+- Updated conclusion to reflect actual capabilities
+
+**Changelog (v1.1):**
+- Added `php-pear` to required dependencies
+- Clarified overlapping IP range limitations
+- Added zone ID length restriction (8 characters max)
+- Added troubleshooting entries for PEAR.php and zone ID length errors
