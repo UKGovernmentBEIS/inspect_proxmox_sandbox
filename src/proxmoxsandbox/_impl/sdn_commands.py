@@ -435,7 +435,7 @@ class SdnCommands(abc.ABC):
     async def task_cleanup(self) -> None:
         cleanup_completed = self._cleanup_completed.get()
 
-        print(f"sdn cleanup; {cleanup_completed=}; {self._created_sdns.get()=}")
+        self.logger.debug(f"sdn cleanup; {cleanup_completed=}; {self._created_sdns.get()=}")
 
         if cleanup_completed:
             return

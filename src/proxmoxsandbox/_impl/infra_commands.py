@@ -167,7 +167,7 @@ class InfraCommands(abc.ABC):
         )
 
     async def task_cleanup(self) -> None:
-        print("infra_commands cleanup activated")
+        self.logger.debug("infra_commands cleanup activated")
         await self.qemu_commands.task_cleanup()
         await self.sdn_commands.task_cleanup()
 
@@ -208,10 +208,10 @@ class InfraCommands(abc.ABC):
         ]
 
         if not noticed_vms and not zones_to_delete:
-            print(f"No resources to delete on {self.async_proxmox.base_url}.")
+            self.logger.info(f"No resources to delete on {self.async_proxmox.base_url}.")
             return
 
-        print(
+        self.logger.info(
             "The following VMs and SDNs will be destroyed on "
             + f"{self.async_proxmox.base_url}:"
         )

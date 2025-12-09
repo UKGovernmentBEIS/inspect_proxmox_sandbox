@@ -524,14 +524,14 @@ class QemuCommands(abc.ABC):
 
     async def task_cleanup(self) -> None:
         cleanup_completed = self._cleanup_completed.get()
-        print(f"qemu_commands cleanup activated; {cleanup_completed=}")
+        self.logger.debug(f"qemu_commands cleanup activated; {cleanup_completed=}")
         if cleanup_completed:
             return
 
         with trace_action(self.logger, self.TRACE_NAME, "cleanup all VMs"):
             running_proxmox_vms = self._running_proxmox_vms.get()
-            print(f"existing vm count: {len(running_proxmox_vms)}")
+            self.logger.debug(f"existing vm count: {len(running_proxmox_vms)}")
             for vm_id in running_proxmox_vms:
-                print(f"destroy_vm {vm_id=}")
+                self.logger.debug(f"destroy_vm {vm_id=}")
                 await self.destroy_vm(vm_id)
             self._cleanup_completed.set(True)
