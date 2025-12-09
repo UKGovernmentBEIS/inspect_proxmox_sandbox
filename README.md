@@ -237,6 +237,8 @@ sandbox = SandboxEnvironmentSpec(
 )
 ```
 
+Static IP address assignment is *not* supported with this feature.
+
 ## Using OVA files
 
 Proxmox supports OVA import but not OVA export. It is possible to extract the disk images of VMs 
