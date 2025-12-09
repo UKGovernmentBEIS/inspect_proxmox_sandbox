@@ -110,6 +110,14 @@ class InfraCommands(abc.ABC):
         # As such, the static-ip IPAM allocation is incompatible with the predefined
         # VNET functionality, unless we add logic to grab the zone id the alias belongs
         # to here.
+        if not sdn_zone_id:
+            if vm_config.nics and any(nic.ipv4 for nic in vm_config.nics):
+                raise ValueError(
+                    "Static IP configuration requires SDN configuration "
+                    "to be present."
+                )
+
+
         if not (vm_config.nics and sdn_zone_id):
             return []
 
