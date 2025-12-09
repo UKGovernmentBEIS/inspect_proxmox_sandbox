@@ -76,7 +76,7 @@ async def auto_sdn_vnet_aliases(
     sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(ids_start, "auto")
     assert sdn_zone_id is not None
     yield vnet_aliases
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id)
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
 @pytest.fixture(scope="function")

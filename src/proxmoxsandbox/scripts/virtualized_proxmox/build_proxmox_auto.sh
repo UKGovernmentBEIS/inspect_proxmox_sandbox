@@ -90,8 +90,58 @@ rm -f /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 # install dnsmasq for SDN, and xterm so we can use the resize command in terminal windows
 apt update
 apt upgrade -y
-apt install -y dnsmasq xterm
+apt install -y dnsmasq xterm patch
 systemctl disable --now dnsmasq
+
+# Fix IPAM bug, see https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/
+# and https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
+
+cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
+--- a/usr/share/perl5/PVE/Network/SDN/Subnets.pm
++++ b/usr/share/perl5/PVE/Network/SDN/Subnets.pm
+@@ -235,6 +235,30 @@ sub add_next_free_ip {
+     #verify dns zones before ipam
+     verify_dns_zone($dnszone, $dns) if !$skipdns;
+ 
++    if ($mac && $ipamid) {
++        my ($zoneid) = split(/-/, $subnetid);
++        my ($existing_ip4, $existing_ip6) = PVE::Network::SDN::Ipams::get_ips_from_mac(
++            $mac, $zoneid, $zone,
++        );
++
++        my $is_ipv4 = Net::IP::ip_is_ipv4($subnet->{network});
++        my $existing_ip = $is_ipv4 ? $existing_ip4 : $existing_ip6;
++
++        if ($existing_ip) {
++            my $ip_obj = NetAddr::IP->new($existing_ip);
++            my $subnet_obj = NetAddr::IP->new($subnet->{cidr});
++
++            if ($subnet_obj->contains($ip_obj)) {
++                $ip = $existing_ip;
++
++                eval { PVE::Network::SDN::Ipams::add_cache_mac_ip($mac, $ip); };
++                warn $@ if $@;
++
++                goto DNS_SETUP;
++            }
++        }
++    }
++
+     if ($ipamid) {
+         my $ipam_cfg = PVE::Network::SDN::Ipams::config();
+         my $plugin_config = $ipam_cfg->{ids}->{$ipamid};
+@@ -267,6 +291,7 @@ sub add_next_free_ip {
+         warn $@ if $@;
+     }
+ 
++DNS_SETUP:
+     eval {
+         my $reversednszone = get_reversedns_zone($subnetid, $subnet, $reversedns, $ip);
+ 
+EOFPATCH
+
+# modify version to indicate we patched
+sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
 
 touch /var/local/inspect-proxmox-on-first-boot.done
 

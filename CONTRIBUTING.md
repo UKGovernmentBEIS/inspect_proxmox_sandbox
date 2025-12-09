@@ -29,7 +29,8 @@ or prefix your pytest (etc.) commands with `uv run ...`
 If you want to spin up a Proxmox instance locally, you can use the script `src/proxmoxsandbox/scripts/virtualized_proxmox/build_proxmox_auto.sh`.
 It has been tested on Ubuntu 24.04.
 
-It will handle the extra configuration mentioned in this project's README.
+It will handle the extra configuration mentioned in this project's README, and apply the patch
+mentioned in https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
 ## Tests
 
@@ -61,7 +62,7 @@ uv run ruff format .
 manually:
 
 ```bash
-mypy
+uv run mypy
 ```
 
 ## Design Notes
