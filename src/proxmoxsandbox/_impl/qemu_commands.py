@@ -434,7 +434,7 @@ class QemuCommands(abc.ABC):
 
                     netx = f"{nic_prefix},bridge={bridge_name}"
                     if nic.mac:
-                        netx += f",macaddr={nic.mac.upper()}"
+                        netx += f",macaddr={str(nic.mac).upper()}"
                     network_update_json[f"net{i}"] = netx
 
             if network_update_json:

@@ -4,7 +4,7 @@ import re
 import sys
 from logging import getLogger
 from random import randint
-from typing import Collection, List, Set, Tuple
+from typing import Collection, List, Sequence, Set, Tuple
 
 from inspect_ai.util import trace_action
 from rich import box, print
@@ -90,7 +90,7 @@ class InfraCommands(abc.ABC):
     async def delete_sdn_and_vms(
         self,
         sdn_zone_id: str | None,
-        ipam_mappings: List[IpamMapping],
+        ipam_mappings: Sequence[IpamMapping],
         vm_ids: Tuple[int, ...],
     ):
         for vm_id in vm_ids:
@@ -113,10 +113,8 @@ class InfraCommands(abc.ABC):
         if not sdn_zone_id:
             if vm_config.nics and any(nic.ipv4 for nic in vm_config.nics):
                 raise ValueError(
-                    "Static IP configuration requires SDN configuration "
-                    "to be present."
+                    "Static IP configuration requires SDN configuration to be present."
                 )
-
 
         if not (vm_config.nics and sdn_zone_id):
             return []
@@ -204,11 +202,15 @@ class InfraCommands(abc.ABC):
         noticed_ipam_mappings = [
             mapping.to_ipam_mapping()
             for mapping in await self.sdn_commands.read_all_ipam_mappings()
-            if mapping.zone in zones_to_delete and mapping.gateway is None
+            if mapping.zone in zones_to_delete
+            and mapping.gateway is None
+            and mapping.mac is not None
         ]
 
         if not noticed_vms and not zones_to_delete:
-            self.logger.info(f"No resources to delete on {self.async_proxmox.base_url}.")
+            self.logger.info(
+                f"No resources to delete on {self.async_proxmox.base_url}."
+            )
             return
 
         self.logger.info(

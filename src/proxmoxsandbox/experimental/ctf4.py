@@ -1,10 +1,10 @@
-from ipaddress import ip_address, ip_network
 import os
 import pathlib
 import shutil
 import subprocess
 import tempfile
 import zipfile
+from ipaddress import ip_address, ip_network
 
 import platformdirs
 import pycurl
@@ -148,7 +148,8 @@ For example if the password was 'trustno1', submit 5fcfd41e547a12215b173ff47fdd3
                                 SubnetConfig(
                                     cidr=ip_network("192.168.20.0/24"),
                                     gateway=ip_address("192.168.20.1"),
-                                    # If you set snat=False, VMs will see each other but not the wider Internet.
+                                    # If you set snat=False, VMs will see each other
+                                    # but not the wider Internet.
                                     snat=True,
                                     dhcp_ranges=(
                                         DhcpRange(

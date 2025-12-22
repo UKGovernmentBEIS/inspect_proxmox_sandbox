@@ -4,7 +4,7 @@ from contextvars import ContextVar
 from ipaddress import ip_address, ip_network
 from logging import getLogger
 from random import shuffle
-from typing import Collection, List, Optional, Set, Tuple, TypeAlias
+from typing import Collection, List, Optional, Sequence, Set, Tuple, TypeAlias
 
 from inspect_ai.util import trace_action
 from pydantic import BaseModel
@@ -38,10 +38,12 @@ STATIC_SDN_START = "inspvm"
 class IpamMapping(BaseModel):
     vnet_id: str
     zone_id: str
-    mac: MacAddress
+    mac: Optional[MacAddress]
     ipv4: IPvAnyAddress
 
     def to_proxmox_format(self) -> ProxmoxJsonDataType:
+        if self.mac is None:
+            raise ValueError("MAC address is required for IPAM mapping operations")
         return {
             "ip": str(self.ipv4),
             "vnet": self.vnet_id,
@@ -333,7 +335,7 @@ class SdnCommands(abc.ABC):
         return relevant_subnet_cidrs
 
     async def tear_down_sdn_ip_allocations(
-        self, ipam_mappings: Tuple[IpamMapping, ...]
+        self, ipam_mappings: Sequence[IpamMapping]
     ) -> None:
         # Normally, if you have created an IPAM entry for a VM and you delete
         # that VM, the IPAM entry is automatically deleted. The infra_commands
@@ -358,16 +360,18 @@ class SdnCommands(abc.ABC):
                     )
                 except Exception as _:
                     self.logger.debug(
-                        f"Lease {p['ip']} for {p['mac']} in {p['vnet']} inside {p['zone']} already deleted."
+                        f"Lease {p['ip']} for {p['mac']} "
+                        f"in {p['vnet']} inside {p['zone']} "
+                        "already deleted."
                     )
 
     async def tear_down_sdn_zone_and_vnet(
-        self, sdn_zone_id: str, ipam_mappings: Tuple[IpamMapping, ...]
+        self, sdn_zone_id: str, ipam_mappings: Sequence[IpamMapping]
     ) -> None:
         await self.tear_down_sdn_zones_and_vnets([sdn_zone_id], ipam_mappings)
 
     async def tear_down_sdn_zones_and_vnets(
-        self, sdn_zone_ids: Collection[str], ipam_mappings: Tuple[IpamMapping, ...]
+        self, sdn_zone_ids: Collection[str], ipam_mappings: Sequence[IpamMapping]
     ) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"delete SDNs {sdn_zone_ids}"):
             # We need to delete allocated ips first before we can remove
@@ -435,7 +439,9 @@ class SdnCommands(abc.ABC):
     async def task_cleanup(self) -> None:
         cleanup_completed = self._cleanup_completed.get()
 
-        self.logger.debug(f"sdn cleanup; {cleanup_completed=}; {self._created_sdns.get()=}")
+        self.logger.debug(
+            f"sdn cleanup; {cleanup_completed=}; {self._created_sdns.get()=}"
+        )
 
         if cleanup_completed:
             return
