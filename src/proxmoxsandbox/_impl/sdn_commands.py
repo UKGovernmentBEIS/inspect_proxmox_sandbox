@@ -422,7 +422,10 @@ class SdnCommands(abc.ABC):
             self.TRACE_NAME,
             f"create IPAM mapping {ipam_mapping=}",
         ):
-            if "aisi" not in self.async_proxmox.discovered_proxmox_version.version:
+            if (
+                "aisi"
+                not in self.async_proxmox.get_discovered_proxmox_version().version
+            ):
                 raise NotImplementedError(
                     "IPAM DHCP mappings are only supported on Proxmox "
                     "versions with the aisi patch."

@@ -52,7 +52,7 @@ class InfraCommands(abc.ABC):
         proxmox_ids_start: str,
         sdn_config: SdnConfigType,
         vms_config: Tuple[VmConfig, ...],
-    ) -> Tuple[Tuple[Tuple[str, VmConfig], ...], str, Tuple[IpamMapping, ...]]:
+    ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
         vm_configs_with_ids = []
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config

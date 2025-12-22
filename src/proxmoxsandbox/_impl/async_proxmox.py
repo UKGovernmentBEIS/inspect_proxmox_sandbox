@@ -64,6 +64,11 @@ class AsyncProxmoxAPI:
             version_info = await self.request("GET", "/version")
             self.discovered_proxmox_version = ProxmoxVersionInfo(**version_info)
 
+    def get_discovered_proxmox_version(self) -> ProxmoxVersionInfo:
+        if self.discovered_proxmox_version is None:
+            raise ValueError("Need to be logged in")
+        return self.discovered_proxmox_version
+
     async def request(
         self,
         method: str,

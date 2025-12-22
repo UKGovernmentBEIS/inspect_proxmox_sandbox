@@ -82,7 +82,7 @@ class BuiltInVM(abc.ABC):
         Raises:
             ValueError: If the Proxmox version is below the required version
         """
-        release_string = self.async_proxmox.discovered_proxmox_version.release
+        release_string = self.async_proxmox.get_discovered_proxmox_version().release
 
         # Parse version string (e.g., "8.2.2" or "9.0")
         match = re.match(r"(\d+)\.(\d+)", release_string)
@@ -408,13 +408,13 @@ runcmd:
                 download_path = os.path.join(self.cache_dir, download_filename)
                 with open(download_path, "wb") as f:
                     c = pycurl.Curl()
-                    c.setopt(c.URL, source_image_source_url)
-                    c.setopt(c.WRITEDATA, f)
-                    c.setopt(c.FOLLOWLOCATION, True)
-                    c.setopt(c.FAILONERROR, True)
+                    c.setopt(c.URL, source_image_source_url)  # type: ignore[attr-defined]
+                    c.setopt(c.WRITEDATA, f)  # type: ignore[attr-defined]
+                    c.setopt(c.FOLLOWLOCATION, True)  # type: ignore[attr-defined]
+                    c.setopt(c.FAILONERROR, True)  # type: ignore[attr-defined]
                     try:
                         c.perform()
-                        status_code = c.getinfo(c.RESPONSE_CODE)
+                        status_code = c.getinfo(c.RESPONSE_CODE)  # type: ignore[attr-defined]
                         if status_code >= 400:
                             raise ValueError(
                                 f"Download failed with status code: {status_code}"
