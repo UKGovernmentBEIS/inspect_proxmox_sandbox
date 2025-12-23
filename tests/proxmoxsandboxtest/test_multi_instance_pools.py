@@ -43,7 +43,8 @@ def mock_infra_commands():
         vm_config_mock.name = None
         infra.create_sdn_and_vms = AsyncMock(return_value=(
             [(101, vm_config_mock)],  # vm_configs_with_ids
-            "zone1"  # sdn_zone_id
+            "zone1",  # sdn_zone_id
+            (),  # ipam_mappings
         ))
         infra.delete_sdn_and_vms = AsyncMock()
         mock.return_value = infra
