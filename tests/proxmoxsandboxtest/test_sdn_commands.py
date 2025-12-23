@@ -1,6 +1,6 @@
 from pytest import raises
 
-from proxmoxsandbox._impl.sdn_commands import SdnCommands
+from proxmoxsandbox._impl.sdn_commands import IpamMapping, SdnCommands
 from proxmoxsandbox.schema import DhcpRange, SdnConfig, SubnetConfig, VnetConfig
 
 
@@ -30,7 +30,7 @@ async def test_create_sdn_with_vnets(ids_start: str, sdn_commands: SdnCommands) 
     assert vnet_aliases[0][1] is None
     assert vnet_aliases[1][1] == "test_create_sdn_with_vnets"
 
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id)
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
 async def test_create_sdn_with_vnets_and_subnet(
@@ -58,7 +58,7 @@ async def test_create_sdn_with_vnets_and_subnet(
     assert sdn_zone_id is not None
     assert len(vnet_aliases) == 1
 
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id)
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
 async def test_inconsistent_ipam_setting_true_but_no_dhcp(
@@ -152,7 +152,7 @@ async def test_create_sdn_auto(ids_start: str, sdn_commands: SdnCommands) -> Non
     assert sdn_zone_id is not None
     assert len(vnet_aliases) == 1
 
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id)
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
 async def test_create_sdn_none(ids_start: str, sdn_commands: SdnCommands) -> None:
@@ -162,3 +162,49 @@ async def test_create_sdn_none(ids_start: str, sdn_commands: SdnCommands) -> Non
 
     assert sdn_zone_id is None
     assert vnet_aliases == []
+
+
+async def test_create_dhcp_mapping(ids_start: str, sdn_commands: SdnCommands) -> None:
+    """Test creating a DHCP static mapping."""
+    from ipaddress import ip_address, ip_network
+
+    sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(
+        proxmox_ids_start=ids_start,
+        sdn_config=SdnConfig(
+            vnet_configs=(
+                VnetConfig(
+                    alias="test_dhcp_mapping",
+                    subnets=(
+                        SubnetConfig(
+                            cidr=ip_network("10.33.33.0/24"),
+                            gateway=ip_address("10.33.33.1"),
+                            snat=True,
+                            dhcp_ranges=(
+                                DhcpRange(
+                                    start=ip_address("10.33.33.50"),
+                                    end=ip_address("10.33.33.100"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            use_pve_ipam_dnsnmasq=True,
+        ),
+    )
+
+    vnet_id = vnet_aliases[0][0]
+
+    other_ipam_mapping = IpamMapping(
+        vnet_id=vnet_id,
+        zone_id=sdn_zone_id,
+        mac="52:54:00:AA:BB:CC",
+        ipv4="10.33.33.10",
+    )
+    await sdn_commands.create_ipam_mapping(other_ipam_mapping)
+
+    # If we didn't have the new ip-cleanup logic in place, the above mapping would
+    # block subnet/vnet/zone deletion since the "VM" with that static allocation
+    # is not deleted by PVE and thus the IPAM entry would keep existing by default.
+    # AOC note: this now no longer makes sense
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, (other_ipam_mapping,))

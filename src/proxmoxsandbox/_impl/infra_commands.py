@@ -4,7 +4,7 @@ import re
 import sys
 from logging import getLogger
 from random import randint
-from typing import Collection, Set, Tuple
+from typing import Collection, List, Sequence, Set, Tuple
 
 from inspect_ai.util import trace_action
 from rich import box, print
@@ -14,7 +14,12 @@ from rich.table import Table
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
-from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, SdnCommands
+from proxmoxsandbox._impl.sdn_commands import (
+    ZONE_REGEX,
+    IpamMapping,
+    SdnCommands,
+    VnetAliases,
+)
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     SdnConfigType,
@@ -47,7 +52,7 @@ class InfraCommands(abc.ABC):
         proxmox_ids_start: str,
         sdn_config: SdnConfigType,
         vms_config: Tuple[VmConfig, ...],
-    ):
+    ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
         vm_configs_with_ids = []
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config
@@ -55,7 +60,16 @@ class InfraCommands(abc.ABC):
 
         known_builtins = await self.built_in_vm.known_builtins()
 
+        ipam_mappings = []
+
         for vm_config in vms_config:
+            # We have to create the IPAM entries before booting the VMs
+            # otherwise they will not get the defined static IPs.
+            per_vm_ipam_mappings = await self.create_ipam_mappings(
+                vnet_aliases, vm_config, sdn_zone_id
+            )
+            ipam_mappings.extend(per_vm_ipam_mappings)
+
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
                 vm_id = await self.qemu_commands.create_and_start_vm(
                     sdn_vnet_aliases=vnet_aliases,
@@ -71,16 +85,63 @@ class InfraCommands(abc.ABC):
                 vm_configs_with_id[0], vm_configs_with_id[1].is_sandbox
             )
 
-        # TODO types here
-        return vm_configs_with_ids, sdn_zone_id
+        return tuple(vm_configs_with_ids), sdn_zone_id, tuple(ipam_mappings)
 
     async def delete_sdn_and_vms(
-        self, sdn_zone_id: str | None, vm_ids: Tuple[int, ...]
+        self,
+        sdn_zone_id: str | None,
+        ipam_mappings: Sequence[IpamMapping],
+        vm_ids: Tuple[int, ...],
     ):
         for vm_id in vm_ids:
             await self.qemu_commands.destroy_vm(vm_id=vm_id)
         if sdn_zone_id is not None:
-            await self.sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id=sdn_zone_id)
+            await self.sdn_commands.tear_down_sdn_zone_and_vnet(
+                sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings
+            )
+
+    async def create_ipam_mappings(
+        self,
+        sdn_vnet_aliases: VnetAliases,
+        vm_config: VmConfig,
+        sdn_zone_id: str | None,
+    ) -> List[IpamMapping]:
+        # `sdn_zone_id` _might_ be None, see my comment in `sdn_commands` about this.
+        # As such, the static-ip IPAM allocation is incompatible with the predefined
+        # VNET functionality, unless we add logic to grab the zone id the alias belongs
+        # to here.
+        if not sdn_zone_id:
+            if vm_config.nics and any(nic.ipv4 for nic in vm_config.nics):
+                raise ValueError(
+                    "Static IP configuration requires SDN configuration to be present."
+                )
+
+        if not (vm_config.nics and sdn_zone_id):
+            return []
+
+        alias_mapping = self.qemu_commands._convert_sdn_vnet_aliases(sdn_vnet_aliases)
+
+        ipam_mappings: List[IpamMapping] = []
+
+        for nic in vm_config.nics:
+            if not (nic.mac and nic.ipv4):
+                continue
+
+            if nic.vnet_alias in alias_mapping:
+                vnet_id = alias_mapping[nic.vnet_alias]
+            else:
+                raise ValueError(
+                    f"VNET alias '{nic.vnet_alias}' not found. "
+                    f"Available: {list(alias_mapping.keys())}"
+                )
+
+            # Note we don't need a `do_update_all_sdn` call after these.
+            ipam_mapping = IpamMapping(
+                vnet_id=vnet_id, zone_id=sdn_zone_id, mac=nic.mac, ipv4=nic.ipv4
+            )
+            await self.sdn_commands.create_ipam_mapping(ipam_mapping)
+            ipam_mappings.append(ipam_mapping)
+        return ipam_mappings
 
     async def find_proxmox_ids_start(self, task_name_start: str) -> str:
         existing_zone_ids = set(
@@ -103,9 +164,10 @@ class InfraCommands(abc.ABC):
             ]
         )
 
-    async def cleanup(self) -> None:
-        await self.qemu_commands.cleanup()
-        await self.sdn_commands.cleanup()
+    async def task_cleanup(self) -> None:
+        self.logger.debug("infra_commands cleanup activated")
+        await self.qemu_commands.task_cleanup()
+        await self.sdn_commands.task_cleanup()
 
     async def cleanup_no_id(self) -> None:
         noticed_vnets = set()
@@ -137,11 +199,21 @@ class InfraCommands(abc.ABC):
             if re.match(ZONE_REGEX, zone["zone"]):
                 zones_to_delete.add(zone["zone"])
 
+        noticed_ipam_mappings = [
+            mapping.to_ipam_mapping()
+            for mapping in await self.sdn_commands.read_all_ipam_mappings()
+            if mapping.zone in zones_to_delete
+            and mapping.gateway is None
+            and mapping.mac is not None
+        ]
+
         if not noticed_vms and not zones_to_delete:
-            print(f"No resources to delete on {self.async_proxmox.base_url}.")
+            self.logger.info(
+                f"No resources to delete on {self.async_proxmox.base_url}."
+            )
             return
 
-        print(
+        self.logger.info(
             "The following VMs and SDNs will be destroyed on "
             + f"{self.async_proxmox.base_url}:"
         )
@@ -188,4 +260,6 @@ class InfraCommands(abc.ABC):
 
         for vm in noticed_vms:
             await self.qemu_commands.destroy_vm(vm["vmid"])
-        await self.sdn_commands.tear_down_sdn_zones_and_vnets(zones_to_delete)
+        await self.sdn_commands.tear_down_sdn_zones_and_vnets(
+            zones_to_delete, noticed_ipam_mappings
+        )
