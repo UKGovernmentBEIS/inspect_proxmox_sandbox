@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.5 - 2025-11-28
+
+- Support static IPv4 allocation
+
 ## 0.9.4 - 2025-11-25
 
 - OOM and AMD CPU fixes in build_proxmox_auto
