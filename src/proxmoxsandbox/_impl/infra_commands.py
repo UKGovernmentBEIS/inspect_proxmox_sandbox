@@ -55,11 +55,18 @@ class InfraCommands(abc.ABC):
 
         known_builtins = await self.built_in_vm.known_builtins()
 
+        # Create ALL DHCP mappings FIRST, before creating/starting any VMs.
+        # This prevents race conditions where a booting VM's DHCP request
+        # causes Proxmox to auto-allocate IPs that we wanted to reserve.
+        self.logger.info(
+            f"[INFRA_DEBUG] Creating all DHCP mappings first for {len(vms_config)} VMs"
+        )
         for vm_config in vms_config:
-            # We have to create the IPAM entries before booting the VMs
-            # otherwise they will not get the defined static IPs.
             await self.create_dhcp_mappings(vnet_aliases, vm_config, sdn_zone_id)
+        self.logger.info("[INFRA_DEBUG] All DHCP mappings created, now creating VMs")
 
+        # Now create and start VMs
+        for vm_config in vms_config:
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
                 vm_id = await self.qemu_commands.create_and_start_vm(
                     sdn_vnet_aliases=vnet_aliases,

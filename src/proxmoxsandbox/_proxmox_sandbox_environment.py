@@ -59,6 +59,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     # Multi-instance pool fields
     instance: ProxmoxInstanceConfig | None
     pool_id: str | None
+    # OS type for Windows support
+    os_type: str | None
 
     def __init__(
         self,
@@ -70,6 +72,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         sdn_zone_id: str | None,
         instance: ProxmoxInstanceConfig | None = None,
         pool_id: str | None = None,
+        os_type: str | None = None,
     ):
         self.infra_commands = InfraCommands(async_proxmox=proxmox, node=node)
         self.agent_commands = AgentCommands(async_proxmox=proxmox, node=node)
@@ -82,6 +85,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.sdn_zone_id = sdn_zone_id
         self.instance = instance
         self.pool_id = pool_id
+        self.os_type = os_type
 
     # originally from k8s sandbox
     def _pipe_user_input(self, stdin: str | bytes) -> str:
@@ -106,6 +110,64 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # `-k 5s` sends SIGKILL after grace period in case user command doesn't respect
         # SIGTERM.
         return f"timeout -k 5s {timeout}s "
+
+    def _is_windows(self) -> bool:
+        """Check if this VM is running Windows based on os_type."""
+        if self.os_type is None:
+            return False
+        # Windows os_types: w2k, w2k3, w2k8, win10, win11, win7, win8, wvista, wxp
+        return self.os_type.startswith("w")
+
+    def _build_batch_script(
+        self,
+        tmp_start: str,
+        command: List[str],
+        stdin: str | bytes | None,
+        cwd: str | None,
+        env: dict[str, str],
+        user: str | None,
+        timeout: int | None,
+    ) -> str:
+        """Build a batch script for Windows VMs."""
+        lines = ["@echo off"]
+
+        # Remove old output files
+        lines.append(f'del /f /q "{tmp_start}script.stdout" 2>nul')
+        lines.append(f'del /f /q "{tmp_start}script.stderr" 2>nul')
+        lines.append(f'del /f /q "{tmp_start}script.returncode" 2>nul')
+
+        # Set environment variables
+        for key, value in env.items():
+            # Escape special batch characters
+            escaped_value = value.replace("%", "%%").replace("^", "^^")
+            lines.append(f'set "{key}={escaped_value}"')
+
+        # Change directory if specified
+        if cwd is not None:
+            lines.append(f'cd /d "{cwd}"')
+
+        # Build the command - escape for batch
+        escaped_args = []
+        for arg in command:
+            # Escape special characters for cmd.exe
+            escaped_arg = (
+                arg.replace("^", "^^")
+                .replace("&", "^&")
+                .replace("|", "^|")
+                .replace("<", "^<")
+                .replace(">", "^>")
+            )
+            if " " in arg or '"' in arg:
+                escaped_arg = f'"{escaped_arg}"'
+            escaped_args.append(escaped_arg)
+        cmd_str = " ".join(escaped_args)
+
+        # Execute command with output redirection
+        # Note: stdin piping in batch is limited, skip for now
+        lines.append(f'{cmd_str} > "{tmp_start}script.stdout" 2> "{tmp_start}script.stderr"')
+        lines.append(f'echo %ERRORLEVEL% > "{tmp_start}script.returncode"')
+
+        return "\r\n".join(lines)
 
     # originally from k8s sandbox
     # TODO extract this to its own module and unit test it locally
@@ -276,6 +338,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     sdn_zone_id=sdn_zone_id,
                     instance=instance,
                     pool_id=pool_id,
+                    os_type=vm_config_and_id[1].os_type,
                 )
                 if not found_default and vm_config_and_id[1].is_sandbox:
                     sandboxes["default"] = vm_sandbox_environment
@@ -533,7 +596,18 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
 
-        tmp_start = f"/tmp/{__name__}{time.time_ns()}_"
+        is_windows = self._is_windows()
+
+        # Use Windows-compatible temp path for Windows VMs
+        # C:\Windows\Temp always exists, unlike C:\Temp
+        if is_windows:
+            tmp_start = f"C:\\Windows\\Temp\\{__name__}{time.time_ns()}_"
+            self.logger.info(
+                f"[WINDOWS_EXEC] Using Windows paths for VM {self.vm_id}, "
+                f"os_type={self.os_type}, tmp_start={tmp_start}"
+            )
+        else:
+            tmp_start = f"/tmp/{__name__}{time.time_ns()}_"
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
@@ -559,21 +633,35 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 return exec_status
 
-        script = self._build_shell_script(
-            tmp_start=tmp_start,
-            command=cmd,
-            stdin=input,
-            cwd=cwd,
-            env=env,
-            user=user,
-            timeout=timeout,
-        )
-
-        await self._write_file_only(f"{tmp_start}script.sh", script)
-
-        exec_post_response = await self.agent_commands.exec_command(
-            vm_id=self.vm_id, command=["sh", f"{tmp_start}script.sh"]
-        )
+        if is_windows:
+            script = self._build_batch_script(
+                tmp_start=tmp_start,
+                command=cmd,
+                stdin=input,
+                cwd=cwd,
+                env=env,
+                user=user,
+                timeout=timeout,
+            )
+            script_path = f"{tmp_start}script.bat"
+            await self._write_file_only(script_path, script)
+            exec_post_response = await self.agent_commands.exec_command(
+                vm_id=self.vm_id, command=["cmd.exe", "/c", script_path]
+            )
+        else:
+            script = self._build_shell_script(
+                tmp_start=tmp_start,
+                command=cmd,
+                stdin=input,
+                cwd=cwd,
+                env=env,
+                user=user,
+                timeout=timeout,
+            )
+            await self._write_file_only(f"{tmp_start}script.sh", script)
+            exec_post_response = await self.agent_commands.exec_command(
+                vm_id=self.vm_id, command=["sh", f"{tmp_start}script.sh"]
+            )
 
         exec_response_pid = exec_post_response["pid"]
 
@@ -624,10 +712,16 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
 
         # cleanup - we don't need to wait for the result of this
-        await self.agent_commands.exec_command(
-            vm_id=self.vm_id,
-            command=["sh", "-c", f"rm -f {tmp_start}*"],
-        )
+        if is_windows:
+            await self.agent_commands.exec_command(
+                vm_id=self.vm_id,
+                command=["cmd.exe", "/c", f'del /f /q "{tmp_start}*" 2>nul'],
+            )
+        else:
+            await self.agent_commands.exec_command(
+                vm_id=self.vm_id,
+                command=["sh", "-c", f"rm -f {tmp_start}*"],
+            )
 
         if exec_response.returncode == 124:
             raise TimeoutError("Command timed out")
@@ -689,7 +783,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
         # Writes contents to file, handling large files by splitting them into chunks
-        # and recombining using cat.
+        # and recombining using cat (Linux) or copy /b (Windows).
 
         CHUNK_SIZE = (
             40 * 1024
@@ -699,7 +793,18 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # potentially be increased here. Would need to check the
         # version number to ensure backward compatibility.
 
-        await self.exec(cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())])
+        is_windows = self._is_windows()
+
+        # Create parent directory
+        if is_windows:
+            parent_dir = str(Path(file).parent)
+            await self.exec(
+                cmd=["cmd.exe", "/c", f'if not exist "{parent_dir}" mkdir "{parent_dir}"']
+            )
+        else:
+            await self.exec(
+                cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())]
+            )
 
         # If content is small enough, write directly
         if len(contents) <= CHUNK_SIZE:
@@ -714,29 +819,58 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # Calculate padding width based on number of chunks
         padding_width = len(str(len(chunks) - 1))
 
-        tmp_start = f"/tmp/{__name__}_write_file_{time.time_ns()}_"
+        # Use appropriate temp directory
+        if is_windows:
+            tmp_start = f"C:\\Windows\\Temp\\{__name__}_write_file_{time.time_ns()}_"
+            temp_dir = f"{tmp_start}split_{Path(file).name}"
+        else:
+            tmp_start = f"/tmp/{__name__}_write_file_{time.time_ns()}_"
+            temp_dir = f"{tmp_start}split_{Path(file).name}"
 
-        temp_dir = f"{tmp_start}split_{Path(file).name}"
         try:
-            await self.exec(cmd=["mkdir", "-p", "--", temp_dir])
+            if is_windows:
+                await self.exec(
+                    cmd=["cmd.exe", "/c", f'if not exist "{temp_dir}" mkdir "{temp_dir}"']
+                )
+            else:
+                await self.exec(cmd=["mkdir", "-p", "--", temp_dir])
 
             # Write chunks to temp files with zero-padded numbers
             for i, chunk in enumerate(chunks):
-                chunk_file = f"{temp_dir}/chunk_{i:0{padding_width}d}"
+                if is_windows:
+                    chunk_file = f"{temp_dir}\\chunk_{i:0{padding_width}d}"
+                else:
+                    chunk_file = f"{temp_dir}/chunk_{i:0{padding_width}d}"
                 await self._write_file_only(chunk_file, chunk)
 
-            combine_script = (
-                f"rm -f {file}\n"
-                f'for i in $(seq -f "%0{padding_width}.0f" 0 {len(chunks) - 1}); do\n'
-                f'  cat "{temp_dir}/chunk_$i" >> {file}\n'
-                f"done\n"
-            )
-            combine_script_path = f"{temp_dir}/combine.sh"
-            await self._write_file_only(combine_script_path, combine_script)
-            await self.exec(cmd=["sh", combine_script_path])
+            if is_windows:
+                # Batch script to combine chunks using copy /b
+                combine_script = f'@echo off\r\ndel /f /q "{file}" 2>nul\r\n'
+                for i in range(len(chunks)):
+                    chunk_file = f"{temp_dir}\\chunk_{i:0{padding_width}d}"
+                    if i == 0:
+                        combine_script += f'copy /b "{chunk_file}" "{file}"\r\n'
+                    else:
+                        combine_script += f'copy /b "{file}"+"{chunk_file}" "{file}"\r\n'
+                combine_script_path = f"{temp_dir}\\combine.bat"
+                await self._write_file_only(combine_script_path, combine_script)
+                await self.exec(cmd=["cmd.exe", "/c", combine_script_path])
+            else:
+                combine_script = (
+                    f"rm -f {file}\n"
+                    f'for i in $(seq -f "%0{padding_width}.0f" 0 {len(chunks) - 1}); do\n'
+                    f'  cat "{temp_dir}/chunk_$i" >> {file}\n'
+                    f"done\n"
+                )
+                combine_script_path = f"{temp_dir}/combine.sh"
+                await self._write_file_only(combine_script_path, combine_script)
+                await self.exec(cmd=["sh", combine_script_path])
 
         finally:
-            await self.exec(cmd=["rm", "-rf", temp_dir])
+            if is_windows:
+                await self.exec(cmd=["cmd.exe", "/c", f'rmdir /s /q "{temp_dir}"'])
+            else:
+                await self.exec(cmd=["rm", "-rf", temp_dir])
 
     @override
     async def read_file(self, file: str, text: bool = True) -> Union[str | bytes]:  # type: ignore
