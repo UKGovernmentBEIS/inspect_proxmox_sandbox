@@ -4,9 +4,12 @@ from contextvars import ContextVar
 from ipaddress import ip_address, ip_network
 from logging import getLogger
 from random import shuffle
-from typing import Collection, List, Optional, Set, Tuple, TypeAlias
+from typing import Collection, List, Optional, Sequence, Set, Tuple, TypeAlias
 
 from inspect_ai.util import trace_action
+from pydantic import BaseModel
+from pydantic.networks import IPvAnyAddress
+from pydantic_extra_types.mac_address import MacAddress
 
 from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
@@ -32,6 +35,42 @@ ZONE_REGEX = "...[0-9]{3}z"
 STATIC_SDN_START = "inspvm"
 
 
+class IpamMapping(BaseModel):
+    vnet_id: str
+    zone_id: str
+    mac: Optional[MacAddress]
+    ipv4: IPvAnyAddress
+
+    def to_proxmox_format(self) -> ProxmoxJsonDataType:
+        if self.mac is None:
+            raise ValueError("MAC address is required for IPAM mapping operations")
+        return {
+            "ip": str(self.ipv4),
+            "vnet": self.vnet_id,
+            "zone": self.zone_id,
+            "mac": str(self.mac).upper(),
+        }
+
+
+class PveIpamStatus(BaseModel):
+    hostname: Optional[str] = None
+    gateway: Optional[int] = None
+    ip: str
+    mac: Optional[str] = None
+    subnet: str
+    vmid: Optional[int] = None
+    vnet: str
+    zone: str
+
+    def to_ipam_mapping(self) -> IpamMapping:
+        return IpamMapping(
+            vnet_id=self.vnet,
+            zone_id=self.zone,
+            mac=MacAddress(self.mac) if self.mac is not None else None,
+            ipv4=ip_address(self.ip),
+        )
+
+
 class SdnCommands(abc.ABC):
     logger = getLogger(__name__)
 
@@ -43,9 +82,14 @@ class SdnCommands(abc.ABC):
     _created_sdns: ContextVar[Set[str]] = ContextVar(
         "proxmox_created_sdns", default=set()
     )
+<<<<<<< HEAD
     # (vnet_id, zone_id, mac_address, ip_addr)
     _created_ips: ContextVar[List[ProxmoxJsonDataType]] = ContextVar(
         "proxmox_created_ips", default=list()
+=======
+    _created_ipam_mappings: ContextVar[List[IpamMapping]] = ContextVar(
+        "proxmox_created_ipam_mappings", default=list()
+>>>>>>> main
     )
     _cleanup_completed: ContextVar[bool] = ContextVar(
         "proxmox_sdns_cleanup_executed", default=False
@@ -262,6 +306,11 @@ class SdnCommands(abc.ABC):
 
         await self.do_update_all_sdn()
 
+<<<<<<< HEAD
+=======
+        self._created_sdns.get().add(sdn_zone_id)
+
+>>>>>>> main
         return sdn_zone_id, existing_vnet_aliases
 
     async def do_update_all_sdn(self) -> None:
@@ -294,7 +343,13 @@ class SdnCommands(abc.ABC):
             relevant_subnet_cidrs += cidrs
         return relevant_subnet_cidrs
 
+<<<<<<< HEAD
     async def tear_down_sdn_ip_allocations(self) -> None:
+=======
+    async def tear_down_sdn_ip_allocations(
+        self, ipam_mappings: Sequence[IpamMapping]
+    ) -> None:
+>>>>>>> main
         # Normally, if you have created an IPAM entry for a VM and you delete
         # that VM, the IPAM entry is automatically deleted. The infra_commands
         # function `delete_sdn_and_vms` calls VM deletions before SDN deletions,
@@ -303,6 +358,7 @@ class SdnCommands(abc.ABC):
         # the deletion of the subnet, and therefore the VNET, and therefore the zone.
         # So I think this function and its additional logic is warranted to make sure
         # the SDN is cleared _no matter what_.
+<<<<<<< HEAD
         dhcp_allocations = self._created_ips.get()
         with trace_action(self.logger, self.TRACE_NAME, "delete IPAM IP allocations"):
             for allocation in dhcp_allocations:
@@ -325,14 +381,44 @@ class SdnCommands(abc.ABC):
 
     async def tear_down_sdn_zone_and_vnet(self, sdn_zone_id: str) -> None:
         await self.tear_down_sdn_zones_and_vnets([sdn_zone_id])
+=======
+        with trace_action(self.logger, self.TRACE_NAME, "delete IPAM IP allocations"):
+            for ipam_mapping in ipam_mappings:
+                p = ipam_mapping.to_proxmox_format()
+
+                # DELETE requests require query parameters not JSON
+                query_params = (
+                    f"?ip={p['ip']}&vnet={p['vnet']}&zone={p['zone']}&mac={p['mac']}"
+                )
+                try:
+                    await self.async_proxmox.request(
+                        "DELETE",
+                        f"/cluster/sdn/vnets/{p['vnet']}/ips{query_params}",
+                    )
+                except Exception as _:
+                    self.logger.debug(
+                        f"Lease {p['ip']} for {p['mac']} "
+                        f"in {p['vnet']} inside {p['zone']} "
+                        "already deleted."
+                    )
+
+    async def tear_down_sdn_zone_and_vnet(
+        self, sdn_zone_id: str, ipam_mappings: Sequence[IpamMapping]
+    ) -> None:
+        await self.tear_down_sdn_zones_and_vnets([sdn_zone_id], ipam_mappings)
+>>>>>>> main
 
     async def tear_down_sdn_zones_and_vnets(
-        self, sdn_zone_ids: Collection[str]
+        self, sdn_zone_ids: Collection[str], ipam_mappings: Sequence[IpamMapping]
     ) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"delete SDNs {sdn_zone_ids}"):
             # We need to delete allocated ips first before we can remove
             # subnets or vnets or zones.
+<<<<<<< HEAD
             await self.tear_down_sdn_ip_allocations()
+=======
+            await self.tear_down_sdn_ip_allocations(ipam_mappings)
+>>>>>>> main
 
             for sdn_zone_id in sdn_zone_ids:
                 all_vnets = await self.read_all_vnets()
@@ -362,6 +448,7 @@ class SdnCommands(abc.ABC):
     async def read_all_vnets(self):
         return await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
 
+<<<<<<< HEAD
     async def create_dhcp_mapping(
         self,
         vnet_id: str,
@@ -369,18 +456,30 @@ class SdnCommands(abc.ABC):
         mac_address: str,
         ip_addr: str,
     ) -> None:
+=======
+    async def read_all_ipam_mappings(self) -> List[PveIpamStatus]:
+        res = await self.async_proxmox.request("GET", "/cluster/sdn/ipams/pve/status")
+        return [PveIpamStatus(**item) for item in res]
+
+    async def create_ipam_mapping(self, ipam_mapping: IpamMapping) -> None:
+>>>>>>> main
         """
         Create a DHCP static mapping (host reservation) for a VM.
 
         Args:
+<<<<<<< HEAD
             vnet_id: The VNet ID where the mapping should be created
             zone_id: The SDN zone ID containing the VNet
             mac_address: The MAC address for the mapping
             ip_addr: The static IP address to assign
+=======
+            ipam_mapping: details of MAC->IP mapping to create
+>>>>>>> main
         """
         with trace_action(
             self.logger,
             self.TRACE_NAME,
+<<<<<<< HEAD
             f"create DHCP mapping {vnet_id=} {zone_id=} {mac_address=} {ip_addr=}",
         ):
             # This is probably not how you're supposed to do this stuff.
@@ -405,8 +504,39 @@ class SdnCommands(abc.ABC):
 
     async def cleanup(self) -> None:
         if self._cleanup_completed.get():
+=======
+            f"create IPAM mapping {ipam_mapping=}",
+        ):
+            if (
+                "aisi"
+                not in self.async_proxmox.get_discovered_proxmox_version().version
+            ):
+                raise NotImplementedError(
+                    "IPAM DHCP mappings are only supported on Proxmox "
+                    "versions with the aisi patch."
+                )
+
+            await self.async_proxmox.request(
+                "POST",
+                f"/cluster/sdn/vnets/{ipam_mapping.vnet_id}/ips",
+                json=ipam_mapping.to_proxmox_format(),
+            )
+            # We save the ip allocations so that we can delete them later
+            self._created_ipam_mappings.get().append(ipam_mapping)
+
+    async def task_cleanup(self) -> None:
+        cleanup_completed = self._cleanup_completed.get()
+
+        self.logger.debug(
+            f"sdn cleanup; {cleanup_completed=}; {self._created_sdns.get()=}"
+        )
+
+        if cleanup_completed:
+>>>>>>> main
             return
 
         with trace_action(self.logger, self.TRACE_NAME, "cleanup all SDNs"):
-            await self.tear_down_sdn_zones_and_vnets(self._created_sdns.get())
+            await self.tear_down_sdn_zones_and_vnets(
+                self._created_sdns.get(), self._created_ipam_mappings.get()
+            )
             self._cleanup_completed.set(True)

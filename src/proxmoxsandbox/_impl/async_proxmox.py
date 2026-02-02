@@ -12,9 +12,16 @@ from inspect_ai.util import (
     OutputLimitExceededError,
     trace_action,
 )
+from pydantic import BaseModel
 from pydantic_core import from_json
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
+
+
+class ProxmoxVersionInfo(BaseModel):
+    release: str
+    repoid: str
+    version: str
 
 
 class AsyncProxmoxAPI:
@@ -29,6 +36,7 @@ class AsyncProxmoxAPI:
     verify_tls: bool
     ticket: Optional[str] = None
     csrf_token: Optional[str] = None
+    discovered_proxmox_version: Optional[ProxmoxVersionInfo] = None
 
     # note: host *includes* :port
     def __init__(self, host: str, user: str, password: str, verify_tls: bool = True):
@@ -53,6 +61,13 @@ class AsyncProxmoxAPI:
             data = response.json()["data"]
             self.ticket = data["ticket"]
             self.csrf_token = data["CSRFPreventionToken"]
+            version_info = await self.request("GET", "/version")
+            self.discovered_proxmox_version = ProxmoxVersionInfo(**version_info)
+
+    def get_discovered_proxmox_version(self) -> ProxmoxVersionInfo:
+        if self.discovered_proxmox_version is None:
+            raise ValueError("Need to be logged in")
+        return self.discovered_proxmox_version
 
     async def request(
         self,
