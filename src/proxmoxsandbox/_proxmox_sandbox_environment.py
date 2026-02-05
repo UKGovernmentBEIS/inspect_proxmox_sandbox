@@ -666,6 +666,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         exec_response_pid = exec_post_response["pid"]
 
         assert isinstance(exec_response_pid, int)
+        self.logger.debug(
+            f"VM {self.vm_id} exec pid={exec_response_pid}: {cmd[:100]}"
+        )
 
         with trace_action(
             self.logger,

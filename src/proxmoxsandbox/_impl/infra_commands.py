@@ -58,15 +58,12 @@ class InfraCommands(abc.ABC):
         # Create ALL DHCP mappings FIRST, before creating/starting any VMs.
         # This prevents race conditions where a booting VM's DHCP request
         # causes Proxmox to auto-allocate IPs that we wanted to reserve.
-        self.logger.info(
-            f"[INFRA_DEBUG] Creating all DHCP mappings first for {len(vms_config)} VMs"
-        )
         for vm_config in vms_config:
             await self.create_dhcp_mappings(vnet_aliases, vm_config, sdn_zone_id)
-        self.logger.info("[INFRA_DEBUG] All DHCP mappings created, now creating VMs")
 
         # Now create and start VMs
-        for vm_config in vms_config:
+        for i, vm_config in enumerate(vms_config):
+            self.logger.info(f"Creating VM {i+1}/{len(vms_config)}: {vm_config.name}")
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
                 vm_id = await self.qemu_commands.create_and_start_vm(
                     sdn_vnet_aliases=vnet_aliases,
@@ -77,10 +74,10 @@ class InfraCommands(abc.ABC):
 
         # TODO check for failed starts in the log somehow
 
-        for vm_configs_with_id in vm_configs_with_ids:
-            await self.qemu_commands.await_vm(
-                vm_configs_with_id[0], vm_configs_with_id[1].is_sandbox
-            )
+        for vm_id, vm_config in vm_configs_with_ids:
+            self.logger.info(f"Waiting for VM {vm_config.name} (ID={vm_id})")
+            await self.qemu_commands.await_vm(vm_id, vm_config.is_sandbox)
+            self.logger.info(f"VM {vm_config.name} is ready")
 
         # TODO types here
         return vm_configs_with_ids, sdn_zone_id

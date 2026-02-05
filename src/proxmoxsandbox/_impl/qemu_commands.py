@@ -61,7 +61,9 @@ class QemuCommands(abc.ABC):
             vm_status = await self.async_proxmox.request(
                 "GET", f"/nodes/{self.node}/qemu/{vm_id}/status/current"
             )
-            if vm_status["status"] != status_for_wait:
+            current_status = vm_status["status"]
+            if current_status != status_for_wait:
+                self.logger.debug(f"VM {vm_id} status is {current_status}, waiting for {status_for_wait}")
                 raise ValueError(f"vm {vm_id} not {status_for_wait}")
 
         with trace_action(
@@ -72,18 +74,23 @@ class QemuCommands(abc.ABC):
             await is_in_status()
 
         if is_sandbox and status_for_wait == "running":
+            attempt_count = [0]  # Use list to allow mutation in nested function
 
             @tenacity.retry(
                 wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
                 stop=tenacity.stop_after_delay(300),
             )
             async def qemu_agent_reachable() -> None:
+                attempt_count[0] += 1
+                if attempt_count[0] % 10 == 1:  # Log every 10 attempts
+                    self.logger.info(f"VM {vm_id} QEMU agent ping attempt {attempt_count[0]}")
                 await self.ping_qemu_agent(vm_id)
 
             with trace_action(
                 self.logger, self.TRACE_NAME, f"await VM {vm_id} QEMU agent"
             ):
                 await qemu_agent_reachable()
+            self.logger.info(f"VM {vm_id} QEMU agent responded after {attempt_count[0]} attempts")
 
     async def destroy_vm(self, vm_id: int) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"stop VM {vm_id}"):
@@ -200,6 +207,7 @@ class QemuCommands(abc.ABC):
                 ova_tag = f"ova-{vm_config.vm_source_config.ova.name}-{ova_size}"
                 ova_tag = re.sub(r"[^a-zA-Z0-9_\-]", "_", ova_tag)
                 ova_tag = ova_tag.lower()
+                self.logger.info(f"Looking for existing template with tag: {ova_tag}")
 
                 existing_vms = await self.list_vms()
 
@@ -213,9 +221,11 @@ class QemuCommands(abc.ABC):
                         and ova_tag in existing_vm["tags"].split(";")
                     ):
                         found_existing_template = existing_vm["vmid"]
+                        self.logger.info(f"Found existing template: vmid={found_existing_template}")
                         break
 
                 if found_existing_template is None:
+                    self.logger.info(f"No existing template found, importing from OVA")
                     await self.storage_commands.upload_file_to_storage(
                         file=vm_config.vm_source_config.ova,
                         content_type="import",
@@ -287,6 +297,7 @@ class QemuCommands(abc.ABC):
                     )
 
                     await self.remove_existing_nics(new_vm_template_id)
+                    self.logger.info(f"New template created: vmid={new_vm_template_id}")
 
                 else:
                     new_vm_template_id = found_existing_template
@@ -514,9 +525,13 @@ class QemuCommands(abc.ABC):
             json_for_create["bios"] = "ovmf"
 
     async def ping_qemu_agent(self, vm_id: int):
-        await self.async_proxmox.request(
-            "POST", f"/nodes/{self.node}/qemu/{vm_id}/agent/ping"
-        )
+        try:
+            await self.async_proxmox.request(
+                "POST", f"/nodes/{self.node}/qemu/{vm_id}/agent/ping"
+            )
+        except Exception as e:
+            self.logger.debug(f"VM {vm_id} agent ping failed: {type(e).__name__}: {e}")
+            raise
 
     async def connection_url(self, vm_id: int) -> str:
         return f"{self.async_proxmox.base_url}/?console=kvm&novnc=1&vmid={vm_id}&node={self.node}"  # noqa: E501
