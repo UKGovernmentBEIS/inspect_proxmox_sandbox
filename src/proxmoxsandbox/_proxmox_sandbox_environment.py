@@ -4,7 +4,7 @@ import re
 import shlex
 import time
 from logging import getLogger
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Generator, List, Tuple, Type, Union
 
 import tenacity
@@ -825,7 +825,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # Use appropriate temp directory
         if is_windows:
             tmp_start = f"C:\\Windows\\Temp\\{__name__}_write_file_{time.time_ns()}_"
-            temp_dir = f"{tmp_start}split_{Path(file).name}"
+            temp_dir = f"{tmp_start}split_{PureWindowsPath(file).name}"
         else:
             tmp_start = f"/tmp/{__name__}_write_file_{time.time_ns()}_"
             temp_dir = f"{tmp_start}split_{Path(file).name}"

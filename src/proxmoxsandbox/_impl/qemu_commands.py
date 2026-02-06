@@ -182,8 +182,14 @@ class QemuCommands(abc.ABC):
         ):
             raise NotImplementedError("disk_controller is only supported for OVA")
 
-        if (vm_config.os_type != "l26") and (vm_config.vm_source_config.ova is None):
-            raise NotImplementedError("os_type is only supported for OVA")
+        if (
+            vm_config.os_type != "l26"
+            and vm_config.vm_source_config.ova is None
+            and vm_config.vm_source_config.existing_vm_template_tag is None
+        ):
+            raise NotImplementedError(
+                "os_type is only supported for OVA or existing_vm_template_tag"
+            )
 
         if vm_config.vm_source_config.built_in:
             vm_id_to_clone = built_in_vm_ids[vm_config.vm_source_config.built_in]

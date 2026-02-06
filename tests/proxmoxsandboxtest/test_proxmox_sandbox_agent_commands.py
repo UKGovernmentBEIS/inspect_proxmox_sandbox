@@ -1,8 +1,8 @@
 import hashlib
-import subprocess
 from pathlib import Path
 from typing import List
 
+import pytest
 from inspect_ai.util._sandbox.self_check import self_check
 
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
@@ -13,22 +13,41 @@ from .proxmox_sandbox_utils import setup_requests_logging
 async def test_exec_10mb_limit(
     proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
 ) -> None:
-    i = (
+    num_chars = (
         pow(2, 20) * 10 - 1000
     )  # 10 MiB - 1000, there are vagaries around the extra from JSON marshalling
-    print(f"Testing exec with {i} characters")
-    exec_string = ["perl", "-E", "print 'a' x " + str(i)]
 
-    expected = subprocess.run(exec_string, stdout=subprocess.PIPE).stdout.decode(
-        "utf-8"
-    )
+    if proxmox_sandbox_environment._is_windows():
+        exec_cmd = [
+            "powershell",
+            "-Command",
+            f"Write-Host -NoNewline ('a' * {num_chars})",
+        ]
+    else:
+        exec_cmd = ["perl", "-E", f"print 'a' x {num_chars}"]
 
-    exec_result = await proxmox_sandbox_environment.exec(exec_string, timeout=60)
-    assert len(exec_result.stdout) == len(expected)
-    assert exec_result.stdout == expected
+    exec_result = await proxmox_sandbox_environment.exec(exec_cmd, timeout=120)
+    assert len(exec_result.stdout) == num_chars
+    assert exec_result.stdout == "a" * num_chars
 
 
 CURRENT_DIR = Path(__file__).parent
+
+
+async def test_write_file_small(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    test_content = b"Hello from test_write_file_small!"
+
+    if proxmox_sandbox_environment._is_windows():
+        dest_path = "C:\\Windows\\Temp\\test_small.txt"
+    else:
+        dest_path = "/tmp/test_small.txt"
+
+    await proxmox_sandbox_environment.write_file(dest_path, test_content)
+    read_back = await proxmox_sandbox_environment.read_file(dest_path, text=False)
+
+    assert read_back == test_content
 
 
 async def test_write_file_large(
@@ -41,21 +60,32 @@ async def test_write_file_large(
         md5.update(file_contents)
         expected_md5 = md5.hexdigest()
         assert expected_md5 == "b6059a0fec3d0e431531abeabff212fe"
-        await proxmox_sandbox_environment.write_file(
-            "oVirtTinyCore64-13.11.ova", file_contents
+
+    if proxmox_sandbox_environment._is_windows():
+        dest_path = "C:\\Windows\\Temp\\test_large_file.ova"
+    else:
+        dest_path = "test_large_file.ova"
+
+    await proxmox_sandbox_environment.write_file(dest_path, file_contents)
+
+    if proxmox_sandbox_environment._is_windows():
+        exec_result = await proxmox_sandbox_environment.exec(
+            ["certutil", "-hashfile", dest_path, "MD5"], timeout=60
         )
-    exec_result = await proxmox_sandbox_environment.exec(
-        ["md5sum", "oVirtTinyCore64-13.11.ova"]
-    )
-    assert (
-        exec_result.stdout
-        == "b6059a0fec3d0e431531abeabff212fe  oVirtTinyCore64-13.11.ova\n"
-    )
+        assert expected_md5 in exec_result.stdout.lower()
+    else:
+        exec_result = await proxmox_sandbox_environment.exec(
+            ["md5sum", dest_path], timeout=60
+        )
+        assert exec_result.stdout.startswith(expected_md5)
 
 
 async def test_self_check(
     proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
 ) -> None:
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("self_check uses Linux-specific paths and commands")
+
     setup_requests_logging()
 
     known_failures: List[str] = [
