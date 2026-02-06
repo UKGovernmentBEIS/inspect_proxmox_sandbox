@@ -150,6 +150,24 @@ class VmNicConfig(BaseModel, frozen=True):
         return self
 
 
+# Proxmox QEMU OS types. See https://pve.proxmox.com/wiki/Manual:_qm.conf
+OsType: TypeAlias = Literal[
+    "l24",  # Linux 2.4 kernel
+    "l26",  # Linux 2.6+  kernel
+    "other",
+    "solaris",
+    "w2k",  # Windows 2000
+    "w2k3",  # Windows 2003
+    "w2k8",  # Windows 2008
+    "win10",  # Windows 10/2016/2019
+    "win11",  # Windows 11/2022/2025
+    "win7",  # Windows 7/2008r2
+    "win8",  # Windows 8/2012
+    "wvista",  # Windows Vista/2008
+    "wxp",  # Windows XP/2003
+]
+
+
 class VmConfig(BaseModel, frozen=True):
     """
     Configuration for a virtual machine.
@@ -192,23 +210,7 @@ class VmConfig(BaseModel, frozen=True):
     disk_controller: Optional[Literal["scsi", "ide"]] = None
     nic_controller: Optional[Literal["virtio", "e1000"]] = None
     firewall: bool = False
-    os_type: Optional[
-        Literal[
-            "l24",
-            "l26",
-            "other",
-            "solaris",
-            "w2k",
-            "w2k3",
-            "w2k8",
-            "win10",
-            "win11",
-            "win7",
-            "win8",
-            "wvista",
-            "wxp",
-        ]
-    ] = "l26"
+    os_type: Optional[OsType] = "l26"
 
 
 class ProxmoxInstanceConfig(BaseModel, frozen=True):

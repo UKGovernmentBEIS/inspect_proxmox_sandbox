@@ -531,13 +531,9 @@ class QemuCommands(abc.ABC):
             json_for_create["bios"] = "ovmf"
 
     async def ping_qemu_agent(self, vm_id: int):
-        try:
-            await self.async_proxmox.request(
-                "POST", f"/nodes/{self.node}/qemu/{vm_id}/agent/ping"
-            )
-        except Exception as e:
-            self.logger.debug(f"VM {vm_id} agent ping failed: {type(e).__name__}: {e}")
-            raise
+        await self.async_proxmox.request(
+            "POST", f"/nodes/{self.node}/qemu/{vm_id}/agent/ping"
+        )
 
     async def connection_url(self, vm_id: int) -> str:
         return f"{self.async_proxmox.base_url}/?console=kvm&novnc=1&vmid={vm_id}&node={self.node}"  # noqa: E501

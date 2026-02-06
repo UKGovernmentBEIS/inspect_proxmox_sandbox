@@ -30,6 +30,7 @@ from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
 from proxmoxsandbox.schema import (
+    OsType,
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
     SdnConfigType,
@@ -60,7 +61,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     instance: ProxmoxInstanceConfig | None
     pool_id: str | None
     # OS type for Windows support
-    os_type: str | None
+    os_type: OsType | None
 
     def __init__(
         self,
@@ -72,7 +73,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         sdn_zone_id: str | None,
         instance: ProxmoxInstanceConfig | None = None,
         pool_id: str | None = None,
-        os_type: str | None = None,
+        os_type: OsType | None = None,
     ):
         self.infra_commands = InfraCommands(async_proxmox=proxmox, node=node)
         self.agent_commands = AgentCommands(async_proxmox=proxmox, node=node)
@@ -598,8 +599,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         is_windows = self._is_windows()
 
-        # Use Windows-compatible temp path for Windows VMs
-        # C:\Windows\Temp always exists, unlike C:\Temp
+        # Hardcoded path because the QEMU guest agent doesn't expand
+        # environment variables like %TEMP%. C:\Windows\Temp always exists.
         if is_windows:
             tmp_start = f"C:\\Windows\\Temp\\{__name__}{time.time_ns()}_"
             self.logger.info(

@@ -352,7 +352,7 @@ class SdnCommands(abc.ABC):
                                 f"/cluster/sdn/vnets/{vnet}/subnets/{subnet_id}",
                             )
                         except Exception as e:
-                            self.logger.warning(f"Failed to delete subnet {subnet_id}: {e}")
+                            self.logger.error(f"Failed to delete subnet {subnet_id}: {e}")
                     await self.async_proxmox.request(
                         "DELETE", f"/cluster/sdn/vnets/{vnet}"
                     )
