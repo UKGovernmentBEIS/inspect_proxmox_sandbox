@@ -346,10 +346,13 @@ class SdnCommands(abc.ABC):
                     )
                     for subnet_details in subnets:
                         subnet_id = subnet_details["id"]
-                        await self.async_proxmox.request(
-                            "DELETE",
-                            f"/cluster/sdn/vnets/{vnet}/subnets/{subnet_id}",
-                        )
+                        try:
+                            await self.async_proxmox.request(
+                                "DELETE",
+                                f"/cluster/sdn/vnets/{vnet}/subnets/{subnet_id}",
+                            )
+                        except Exception as e:
+                            self.logger.error(f"Failed to delete subnet {subnet_id}: {e}")
                     await self.async_proxmox.request(
                         "DELETE", f"/cluster/sdn/vnets/{vnet}"
                     )
@@ -383,10 +386,6 @@ class SdnCommands(abc.ABC):
             self.TRACE_NAME,
             f"create DHCP mapping {vnet_id=} {zone_id=} {mac_address=} {ip_addr=}",
         ):
-            # This is probably not how you're supposed to do this stuff.
-            # please correct me, I'm not a dev.
-
-            # We tack the ip allocations so that we can delete them later
             reservation: ProxmoxJsonDataType = {
                 "ip": ip_addr,
                 "vnet": vnet_id,
