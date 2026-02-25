@@ -227,6 +227,101 @@ async def check_os(sandbox: SandboxEnvironment, expected_in_id: str):
     )
 
 
+async def test_allow_domains() -> None:
+    """Test that allow_domains gates sandbox egress to the listed domains.
+
+    Checks:
+    - curl to an allowed domain succeeds (DNS resolved, IP added to nftset, forwarded)
+    - curl to a blocked domain fails (dnsmasq returns SERVFAIL, no IP, no nftset entry)
+    - curl to a direct IP (no prior DNS resolution) also fails — bypassing DNS via raw
+      IPs is not possible because the IP was never added to the nftset
+
+    Edge case NOT covered by this test (needs access to Proxmox host IP):
+      A sandbox VM cannot reach the Proxmox host directly because the host's RFC1918 IP
+      is never in the nftset.  This prevents a VM→Proxmox→other-VM lateral escape path.
+      Manually verify: `curl http://<proxmox_host_ip>` from inside a sandbox should
+      fail with allow_domains set.
+    """
+    from ipaddress import ip_address, ip_network
+
+    envs_dict: Dict[str, SandboxEnvironment] = {}
+    sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
+        sdn_config=SdnConfig(
+            vnet_configs=(
+                VnetConfig(
+                    alias="allow-test",
+                    subnets=(
+                        SubnetConfig(
+                            cidr=ip_network("10.88.0.0/24"),
+                            gateway=ip_address("10.88.0.1"),
+                            snat=True,
+                            dhcp_ranges=(
+                                DhcpRange(
+                                    start=ip_address("10.88.0.50"),
+                                    end=ip_address("10.88.0.100"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            use_pve_ipam_dnsnmasq=True,
+            allow_domains=("cloudflare.com",),
+        ),
+        vms_config=(
+            VmConfig(
+                name="allow-test-vm",
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                ram_mb=512,
+                vcpus=1,
+            ),
+        ),
+    )
+    task_name = "test_allow_domains"
+    try:
+        _, envs_dict = await setup_sandbox(task_name, sandbox_env_config)
+        sandbox = envs_dict["default"]
+
+        # Positive: allowed domain should resolve and be reachable.
+        # DNS query → gateway dnsmasq → 8.8.8.8 → IP added to nftset → forwarded.
+        curl_allowed = await sandbox.exec(
+            ["curl", "--fail", "--max-time", "15", "http://cloudflare.com"],
+            timeout=20,
+        )
+        assert curl_allowed.success, (
+            f"curl to cloudflare.com (allowed) should succeed: {curl_allowed=}"
+        )
+
+        # Negative: blocked domain should fail at DNS (SERVFAIL from gateway dnsmasq).
+        curl_blocked = await sandbox.exec(
+            ["curl", "--fail", "--max-time", "5", "http://google.com"],
+            timeout=10,
+        )
+        assert not curl_blocked.success, (
+            f"curl to google.com (not in allowlist) should fail: {curl_blocked=}"
+        )
+
+        # Negative: direct IP with no prior DNS resolution is also blocked.
+        # 8.8.8.8 is Google's DNS — an IP the sandbox might know, but since the
+        # sandbox never resolved it via the gateway's dnsmasq, it's not in the nftset.
+        curl_direct_ip = await sandbox.exec(
+            ["curl", "--fail", "--max-time", "5", "http://8.8.8.8"],
+            timeout=10,
+        )
+        assert not curl_direct_ip.success, (
+            f"curl to 8.8.8.8 (direct IP, not in nftset) should fail: {curl_direct_ip=}"
+        )
+
+    finally:
+        if envs_dict:
+            await ProxmoxSandboxEnvironment.sample_cleanup(
+                task_name=task_name,
+                config=sandbox_env_config,
+                environments=envs_dict,
+                interrupted=False,
+            )
+
+
 async def test_multiple_sandboxes_isolated(sandbox_env_config) -> None:
     sandboxes = {}
 
