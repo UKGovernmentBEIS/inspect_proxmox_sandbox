@@ -107,7 +107,7 @@ class SdnConfig(BaseModel, frozen=True):
 
     @model_validator(mode="after")
     def _validate_allow_domains_constraints(self) -> "SdnConfig":
-        """Fail fast on configurations that are statically incompatible with allow_domains.
+        """Fail fast on configs statically incompatible with allow_domains.
 
         Dynamic constraints (e.g. no free external CIDR) can only be checked at
         provision time; these are the structural ones that can be caught now.

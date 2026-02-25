@@ -115,25 +115,52 @@ table inet gateway {{
 def _dnsmasq_allowlist_config(gateway_ip: str, allow_domains: Tuple[str, ...]) -> str:
     """Generate the per-eval dnsmasq allowlist config for the gateway VM.
 
-    Each allowed domain gets:
-    - server=/<domain>/8.8.8.8  — forward DNS queries to Google
-    - nftset=/<domain>/4#inet#gateway#allowed_ips  — add resolved IPs to nftables set
+    Each allowed domain gets server=/<domain>/8.8.8.8 so dnsmasq forwards
+    those queries upstream.  dnsmasq's /domain/ syntax matches the apex and
+    all subdomains, so "debian.org" covers mirrors.debian.org too.
 
-    dnsmasq's /domain/ syntax matches the apex domain AND all subdomains, so
-    "debian.org" covers both debian.org and mirrors.debian.org.
+    Without a global server= directive, any unlisted domain gets SERVFAIL.
 
-    Without a global server= directive (removed from base.conf), any domain NOT
-    listed here gets SERVFAIL — dnsmasq has no upstream to ask.
+    listen-address is set to the gateway's sandbox-facing IP only (not
+    127.0.0.1) to avoid conflicting with systemd-resolved on the loopback.
+
+    nftset= is intentionally omitted: Debian 13's dnsmasq package may not be
+    compiled with --enable-nftset.  The nftables allowed_ips set is populated
+    at provision time by _pre_resolve_script instead.
     """
     lines = [
         "# Per-eval allowlist — generated at provision time.",
-        f"listen-address=127.0.0.1,{gateway_ip}",
+        f"listen-address={gateway_ip}",
         "",
     ]
     for domain in allow_domains:
         lines.append(f"server=/{domain}/8.8.8.8")
-        lines.append(f"nftset=/{domain}/4#inet#gateway#allowed_ips")
     return "\n".join(lines) + "\n"
+
+
+def _pre_resolve_script(allow_domains: Tuple[str, ...]) -> str:
+    """Return a Python script that resolves allowed domains and seeds the nftables set.
+
+    Run once at provision time so traffic to those IPs is forwarded even before
+    the first DNS query (and without relying on dnsmasq nftset support).
+    """
+    domains_repr = repr(list(allow_domains))
+    return (
+        "\n".join(
+            [
+                "import socket, subprocess",
+                f"domains = {domains_repr}",
+                "ips = list({{r[4][0] for d in domains"
+                " for r in socket.getaddrinfo(d, None, socket.AF_INET)}})",
+                "if ips:",
+                "    nft_in = 'add element inet gateway allowed_ips { '"
+                " + ', '.join(ips) + ' }'",
+                "    subprocess.run(['nft', '-f', '-'], input=nft_in,"
+                " text=True, check=True)",
+            ]
+        )
+        + "\n"
+    )
 
 
 class InfraCommands(abc.ABC):
@@ -414,6 +441,41 @@ class InfraCommands(abc.ABC):
 
         await wait_for_dnsmasq_restart()
 
+        # Seed the nftables allowed_ips set by resolving the allowed domains now,
+        # rather than waiting for the first DNS query (which requires dnsmasq nftset
+        # support that Debian 13's package may not have compiled in).
+        pre_resolve = _pre_resolve_script(allow_domains)
+        await agent_commands.write_file(
+            vm_id=new_vm_id,
+            content=pre_resolve.encode("utf-8"),
+            filepath="/tmp/pre_resolve.py",
+        )
+        resolve_res = await agent_commands.exec_command(
+            vm_id=new_vm_id,
+            command=["python3", "/tmp/pre_resolve.py"],
+        )
+
+        @tenacity.retry(
+            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            stop=tenacity.stop_after_delay(30),
+            retry=tenacity.retry_if_result(lambda x: x is False),
+        )
+        async def wait_for_pre_resolve() -> bool:
+            status = await agent_commands.get_agent_exec_status(
+                vm_id=new_vm_id, pid=resolve_res["pid"]
+            )
+            if status["exited"] == 1:
+                if status["exitcode"] != 0:
+                    raise ValueError(
+                        f"pre-resolve failed: "
+                        f"stdout={status.get('out-data', '')!r}, "
+                        f"stderr={status.get('err-data', '')!r}"
+                    )
+                return True
+            return False
+
+        await wait_for_pre_resolve()
+
         return new_vm_id
 
     async def create_sdn_and_vms(
@@ -458,9 +520,7 @@ class InfraCommands(abc.ABC):
             sandbox_cidr = str(sdn_config.vnet_configs[0].subnets[0].cidr)
             gateway_ip = _gateway_ip_for_subnet(sandbox_cidr)
             gateway_mac = _gateway_mac(proxmox_ids_start)
-            with trace_action(
-                self.logger, self.TRACE_NAME, "provision gateway VM"
-            ):
+            with trace_action(self.logger, self.TRACE_NAME, "provision gateway VM"):
                 gateway_vm_id = await self._provision_gateway(
                     proxmox_ids_start=proxmox_ids_start,
                     vnet_aliases=vnet_aliases,
