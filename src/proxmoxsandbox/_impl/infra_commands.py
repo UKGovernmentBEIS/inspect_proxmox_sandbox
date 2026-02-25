@@ -247,50 +247,23 @@ class InfraCommands(abc.ABC):
         gateway_ip: str,
         gateway_mac: str,
         allow_domains: Tuple[str, ...],
-    ) -> Tuple[int, IpamMapping]:
+    ) -> int:
         """Clone the gateway template and configure it for this eval instance.
 
         Steps:
-        1. Create IPAM mapping (MAC → gateway_ip) so the gateway VM gets a static IP.
-        2. Clone the gateway template (linked clone — fast, small).
-        3. Wire NICs: net0 → sandbox vnet (with the static MAC), net1 → external vnet.
-        4. Start VM and wait for QEMU guest agent.
+        1. Clone the gateway template (linked clone — fast, small).
+        2. Wire NICs: net0 → sandbox vnet (with the static MAC), net1 → external vnet.
+        3. Start VM and wait for QEMU guest agent.
+        4. Set static IP on the sandbox NIC via the agent (avoids Proxmox IPAM: the
+           subnet's gateway IP is already claimed by Proxmox as a topology entry with
+           no MAC, blocking any MAC-based DHCP reservation for the same address).
         5. Inject nftables ruleset and apply it.
         6. Inject dnsmasq allowlist config and restart dnsmasq.
-
-        Returns:
-            Tuple of (gateway VM ID, the IPAM mapping created for it).
-            The caller must include the IPAM mapping in the teardown list so that
-            if VM deletion fails, the IPAM entry can still be explicitly cleared
-            (an orphaned entry would block subnet/zone deletion).
         """
         # vnet_aliases[0] = (sandbox_vnet_id, alias)
         # vnet_aliases[1] = (ext_vnet_id, None)
         sandbox_vnet_id = vnet_aliases[0][0]
         external_vnet_id = vnet_aliases[1][0]
-
-        # IPAM mapping must be created before the VM boots so Proxmox dnsmasq
-        # serves the right IP to the gateway's MAC address.
-        gateway_ipam = IpamMapping(
-            vnet_id=sandbox_vnet_id,
-            zone_id=sdn_zone_id,
-            mac=gateway_mac,
-            ipv4=ip_address(gateway_ip),
-        )
-        # A stale entry at this IP can remain from a previous failed run whose
-        # cleanup didn't complete. It would block creation of a fresh mapping, so
-        # we delete any existing entry for this IP+vnet before proceeding.
-        # Safe: the entry is a static reservation, not a live lease — no running
-        # VM holds it at this point since we haven't started the gateway VM yet.
-        existing_ipam = await self.sdn_commands.read_all_ipam_mappings()
-        stale = [
-            e.to_ipam_mapping()
-            for e in existing_ipam
-            if e.ip == gateway_ip and e.vnet == sandbox_vnet_id
-        ]
-        if stale:
-            await self.sdn_commands.tear_down_sdn_ip_allocations(stale)
-        await self.sdn_commands.create_ipam_mapping(gateway_ipam)
 
         gateway_template_id = await self.built_in_vm.known_gateway()
         if gateway_template_id is None:
@@ -337,6 +310,44 @@ class InfraCommands(abc.ABC):
         await self.qemu_commands.start_and_await(vm_id=new_vm_id, is_sandbox=True)
 
         agent_commands = AgentCommands(self.async_proxmox, self.node)
+
+        # Set static IP on the sandbox NIC. The VM booted with DHCP; we override
+        # it here because Proxmox auto-claims the subnet's gateway IP as a topology
+        # entry (mac=None) in IPAM, making a MAC-based DHCP reservation impossible.
+        # We find the sandbox interface by its route, flush the DHCP address, then
+        # assign the static IP. The DHCP lease won't renew within the VM's lifetime.
+        prefix_len = ip_network(sandbox_cidr).prefixlen
+        set_ip_res = await agent_commands.exec_command(
+            vm_id=new_vm_id,
+            command=[
+                "bash",
+                "-c",
+                f"iface=$(ip -4 route | awk '$1==\"{sandbox_cidr}\" {{print $3}}');"
+                f" ip addr flush dev $iface;"
+                f" ip addr add {gateway_ip}/{prefix_len} dev $iface",
+            ],
+        )
+
+        @tenacity.retry(
+            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            stop=tenacity.stop_after_delay(30),
+            retry=tenacity.retry_if_result(lambda x: x is False),
+        )
+        async def wait_for_set_ip() -> bool:
+            status = await agent_commands.get_agent_exec_status(
+                vm_id=new_vm_id, pid=set_ip_res["pid"]
+            )
+            if status["exited"] == 1:
+                if status["exitcode"] != 0:
+                    raise ValueError(
+                        f"set static IP failed: "
+                        f"stdout={status.get('out-data', '')!r}, "
+                        f"stderr={status.get('err-data', '')!r}"
+                    )
+                return True
+            return False
+
+        await wait_for_set_ip()
 
         # Inject and apply nftables config
         nft_config = _nftables_config(sandbox_cidr)
@@ -403,7 +414,7 @@ class InfraCommands(abc.ABC):
 
         await wait_for_dnsmasq_restart()
 
-        return new_vm_id, gateway_ipam
+        return new_vm_id
 
     async def create_sdn_and_vms(
         self,
@@ -440,7 +451,6 @@ class InfraCommands(abc.ABC):
         )
 
         gateway_vm_id: int | None = None
-        gateway_ipam: IpamMapping | None = None
         if allow_domains and sdn_zone_id is not None:
             # sdn_config was reassigned to a SdnConfig by _prepare_sdn_for_gateway
             # above; assert helps mypy narrow the type.
@@ -451,7 +461,7 @@ class InfraCommands(abc.ABC):
             with trace_action(
                 self.logger, self.TRACE_NAME, "provision gateway VM"
             ):
-                gateway_vm_id, gateway_ipam = await self._provision_gateway(
+                gateway_vm_id = await self._provision_gateway(
                     proxmox_ids_start=proxmox_ids_start,
                     vnet_aliases=vnet_aliases,
                     sdn_zone_id=sdn_zone_id,
@@ -463,9 +473,7 @@ class InfraCommands(abc.ABC):
 
         known_builtins = await self.built_in_vm.known_builtins()
 
-        # Gateway IPAM is prepended so it is torn down before the zone is deleted,
-        # matching the behaviour of VM-level IPAM entries in create_ipam_mappings.
-        ipam_mappings: List[IpamMapping] = [gateway_ipam] if gateway_ipam else []
+        ipam_mappings: List[IpamMapping] = []
 
         for vm_config in vms_config:
             # We have to create the IPAM entries before booting the VMs
