@@ -76,18 +76,77 @@ class SdnConfig(BaseModel, frozen=True):
             inside the sandbox cannot bypass it.
 
             Wildcard subdomains are supported: "debian.org" covers both debian.org and
-            all *.debian.org subdomains. Leave empty (the default) for unrestricted
-            internet access.
+            all *.debian.org subdomains — no "*."-prefix needed. Leave empty (the
+            default) for unrestricted internet access.
 
             When allow_domains is non-empty:
             - snat on sandbox subnets is set to False (the gateway VM does NAT)
             - An extra internal VNet is created for the gateway VM's external interface
             - Sandbox VMs learn the gateway as their default router via DHCP
+            - The gateway IP in SubnetConfig is overridden to network-address+2; any
+              value you specify there will be silently replaced.
+
+            Constraints (validated at construction time):
+            - use_pve_ipam_dnsnmasq must be True
+            - exactly one vnet_config must be provided
+            - that vnet must have exactly one subnet
+            - the subnet's DHCP range must not include network-address+2
+
+            Requires Proxmox 9+. The gateway VM template is built once on first use
+            (one-time cost: ~5–10 minutes). Per-eval overhead is ~30–60 s for the
+            gateway clone startup before the sandbox VM boots.
+
+            DNS upstream: Google (8.8.8.8) is hardcoded inside the gateway VM.
+            Environments that block outbound port 53 to 8.8.8.8 will not be able to
+            resolve allowed domains.
     """
 
     vnet_configs: Tuple[VnetConfig, ...]
     use_pve_ipam_dnsnmasq: bool = True
     allow_domains: Tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_allow_domains_constraints(self) -> "SdnConfig":
+        """Fail fast on configurations that are statically incompatible with allow_domains.
+
+        Dynamic constraints (e.g. no free external CIDR) can only be checked at
+        provision time; these are the structural ones that can be caught now.
+        """
+        if not self.allow_domains:
+            return self
+        if not self.use_pve_ipam_dnsnmasq:
+            raise ValueError(
+                "allow_domains requires use_pve_ipam_dnsnmasq=True "
+                "(the gateway VM uses Proxmox IPAM for its static IP assignment)"
+            )
+        if len(self.vnet_configs) != 1:
+            raise ValueError(
+                f"allow_domains requires exactly one vnet_config, "
+                f"got {len(self.vnet_configs)}"
+            )
+        subnet_list = self.vnet_configs[0].subnets
+        if len(subnet_list) != 1:
+            raise ValueError(
+                f"allow_domains requires exactly one subnet per vnet, "
+                f"got {len(subnet_list)}"
+            )
+        # The gateway VM is assigned network-address+2.  Validate that the DHCP
+        # pool does not include that address, which would cause an IPAM conflict.
+        from ipaddress import ip_address, ip_network
+
+        subnet = subnet_list[0]
+        gateway_vm_ip = ip_network(str(subnet.cidr)).network_address + 2
+        for dhcp_range in subnet.dhcp_ranges:
+            start = ip_address(str(dhcp_range.start))
+            end = ip_address(str(dhcp_range.end))
+            if start <= ip_address(gateway_vm_ip) <= end:
+                raise ValueError(
+                    f"allow_domains: gateway VM will be assigned {gateway_vm_ip} "
+                    f"(subnet network address +2), but that address falls within "
+                    f"the DHCP range {dhcp_range.start}–{dhcp_range.end}. "
+                    "Adjust the DHCP range to exclude it (e.g. start at .10 or higher)."
+                )
+        return self
 
 
 SdnConfigType: TypeAlias = Union[SdnConfig, Literal["auto"], None]

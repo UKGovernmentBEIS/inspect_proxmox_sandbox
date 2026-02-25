@@ -55,6 +55,11 @@ GATEWAY_VM_TAG = "gateway"
 # sandbox subnet CIDR and domain list.
 # The template boots in a fail-closed state: nftables drops all forwarded traffic,
 # dnsmasq starts but resolves nothing until the allowlist is written.
+#
+# Security: openssh-server is intentionally NOT installed.  The gateway VM is
+# reachable from sandbox VMs on the same vnet, so minimising listening services
+# reduces the attack surface a compromised sandbox can reach.  Do not add SSH or
+# other management daemons to this image.
 GATEWAY_CLOUD_INIT = """\
 #cloud-config
 packages:
@@ -352,6 +357,11 @@ runcmd:
         It acts as the egress filter for sandbox VMs when allow_domains is set.
         The nftables ruleset and dnsmasq allowlist are injected at provision time;
         the template only provides the packages and a fail-closed default config.
+
+        Performance: template creation is a one-time cost (~5–10 minutes, dominated
+        by package downloads for dnsmasq + nftables).  Subsequent calls return
+        immediately once the template exists.  Per-eval cost (cloning + provisioning
+        the gateway) is ~30–60 s on top of the normal sandbox VM startup time.
         """
         if await self.known_gateway() is not None:
             return

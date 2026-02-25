@@ -61,12 +61,27 @@ def _nftables_config(sandbox_cidr: str) -> str:
 
     Three chains:
     - prerouting_nat: intercepts all DNS from the sandbox and redirects it to
-      the gateway's dnsmasq, so sandbox VMs cannot bypass the allowlist by
-      using an alternative DNS server.
+      the gateway's dnsmasq (via `redirect to :53`, which DNAT's to 127.0.0.1),
+      so sandbox VMs cannot bypass the allowlist by configuring an alternative
+      DNS server.  conntrack reverses this for replies.
     - postrouting_nat: masquerades forwarded sandbox traffic as the gateway's
       external IP, so return traffic is routed back correctly.
     - forward: default-drop; only allows traffic to IPs that dnsmasq has
       resolved from the allowlist (populated into the nftables set via nftset).
+
+    Known gap — IPv6:
+    All rules are IPv4-only.  IPv6 egress from the sandbox is not filtered here.
+    In practice, Proxmox SDN "simple" zones do not route IPv6, and sandbox
+    cloud-init configs set dhcp6=false, so IPv6 egress is unlikely to be
+    available.  If that changes, add equivalent ip6 rules and an ip6tables
+    forward-drop default.
+
+    Intentional omission — INPUT chain:
+    There are no INPUT chain rules blocking connections from the sandbox to the
+    gateway VM's own ports.  Sandbox VMs can reach port 53 (dnsmasq, by design)
+    and any other listening service.  The gateway cloud-init intentionally does
+    NOT install openssh-server to keep this surface minimal.  Do not add SSH or
+    other management services to the gateway VM image.
     """
     return f"""\
 #!/usr/sbin/nft -f
