@@ -210,12 +210,15 @@ class InfraCommands(abc.ABC):
         external_vnet = None
         for third_octet in try_third_octets:
             candidate = self.sdn_commands.simple_vnet_config(third_octet=third_octet)
+            candidate_cidr = ip_network(str(candidate.subnets[0].cidr))
+            if sandbox_network.overlaps(candidate_cidr):
+                continue
             try:
-                # check_cidrs validates both new vnets against existing Proxmox
-                # CIDRs AND against each other (find_self_cidr_overlaps).
-                await self.sdn_commands.check_cidrs(
-                    [modified_sandbox_vnet, candidate]
-                )
+                # Only check the candidate against existing Proxmox CIDRs, not
+                # modified_sandbox_vnet: the sandbox CIDR may appear in a stale
+                # leftover zone from a failed run (which create_sdn will overwrite),
+                # and including it would falsely poison every iteration.
+                await self.sdn_commands.check_cidrs([candidate])
                 external_vnet = candidate
                 break
             except ValueError:
