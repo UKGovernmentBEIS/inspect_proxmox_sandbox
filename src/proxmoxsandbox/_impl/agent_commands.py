@@ -1,3 +1,4 @@
+import asyncio
 import base64
 from logging import getLogger
 from typing import List
@@ -13,6 +14,16 @@ from proxmoxsandbox._impl.async_proxmox import (
     ProxmoxJsonDataType,
 )
 
+# On Windows, we found that the virtio-serial channel between QEMU and
+# the guest agent drops intermittently (~5-7% of calls).  The resulting
+# 500 errors surface with varied messages ("got timeout", "is not running",
+# "being used by another process", corrupt format strings, etc.) so we
+# simply retry on ANY 500 from a QGA endpoint.  A 500 typically indicates
+# the command was not delivered to the guest agent (channel timeout or
+# disconnect), so retrying is generally safe.
+_QGA_MAX_RETRIES = 3
+_QGA_RETRY_DELAY = 3  # seconds
+
 
 class AgentCommands:
     logger = getLogger(__name__)
@@ -26,9 +37,33 @@ class AgentCommands:
         self.async_proxmox = async_proxmox
         self.node = node
 
+    @staticmethod
+    def _is_transient_qga_error(exc: httpx.HTTPStatusError) -> bool:
+        """Check if an HTTP error is a transient QGA failure safe to retry."""
+        return exc.response.status_code == 500
+        return any(err in msg for err in _QGA_TRANSIENT_ERRORS)
+
+    async def _retry_on_qga_error(self, label: str, coro_fn):
+        """Retry a coroutine function on transient QGA errors."""
+        for attempt in range(1, _QGA_MAX_RETRIES + 1):
+            try:
+                return await coro_fn()
+            except httpx.HTTPStatusError as e:
+                if attempt < _QGA_MAX_RETRIES and self._is_transient_qga_error(e):
+                    self.logger.warning(
+                        f"{label} failed (attempt {attempt}/{_QGA_MAX_RETRIES}), "
+                        f"retrying in {_QGA_RETRY_DELAY}s: {e}"
+                    )
+                    await asyncio.sleep(_QGA_RETRY_DELAY)
+                else:
+                    raise
+
     async def get_agent_exec_status(self, vm_id: int, pid: int):
         path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec-status?pid={pid}"
-        return await self.async_proxmox.request("GET", path)
+        return await self._retry_on_qga_error(
+            f"exec-status vm={vm_id} pid={pid}",
+            lambda: self.async_proxmox.request("GET", path),
+        )
 
     async def write_file(self, vm_id: int, content: bytes, filepath: str):
         """Write a file to the VM using QEMU agent."""
@@ -49,7 +84,10 @@ class AgentCommands:
             self.TRACE_NAME,
             f"write_file {vm_id=} {filepath=} {len(content)=}",
         ):
-            return await self.async_proxmox.request("POST", path, json=data)
+            return await self._retry_on_qga_error(
+                f"write_file vm={vm_id} {filepath}",
+                lambda: self.async_proxmox.request("POST", path, json=data),
+            )
 
     async def exec_command(self, vm_id: int, command: List[str]):
         """Execute a command in the VM using QEMU agent."""
@@ -58,7 +96,10 @@ class AgentCommands:
         ):
             path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec"
             data: ProxmoxJsonDataType = {"command": command}
-            return await self.async_proxmox.request("POST", path, json=data)
+            return await self._retry_on_qga_error(
+                f"exec_command vm={vm_id}",
+                lambda: self.async_proxmox.request("POST", path, json=data),
+            )
 
     async def read_file_or_blank(
         self,
@@ -95,8 +136,11 @@ class AgentCommands:
             if max_size == SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
             else SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR
         )
-        return await self.async_proxmox.read_file(
-            self.node, vm_id, filepath, max_size, max_size_str
+        return await self._retry_on_qga_error(
+            f"read_file vm={vm_id} {filepath}",
+            lambda: self.async_proxmox.read_file(
+                self.node, vm_id, filepath, max_size, max_size_str
+            ),
         )
 
     async def create_snapshot(self, vm_id: int, snapshot_name: str) -> None:
