@@ -69,10 +69,25 @@ class SdnConfig(BaseModel, frozen=True):
         use_pve_ipam_dnsnmasq: Whether to use Proxmox VE's built-in IPAM and DNSmasq
             Set to False if you are using e.g. your own pfsense instance for IPAM
             (recommended)
+        allow_domains: Allowlist of domains that sandbox VMs may reach. All other
+            egress is blocked. When non-empty, a gateway VM is automatically provisioned
+            per eval sample; it enforces the allowlist using dnsmasq (DNS-level) +
+            nftables (IP-level). The gateway VM is outside the sandbox VM, so root
+            inside the sandbox cannot bypass it.
+
+            Wildcard subdomains are supported: "debian.org" covers both debian.org and
+            all *.debian.org subdomains. Leave empty (the default) for unrestricted
+            internet access.
+
+            When allow_domains is non-empty:
+            - snat on sandbox subnets is set to False (the gateway VM does NAT)
+            - An extra internal VNet is created for the gateway VM's external interface
+            - Sandbox VMs learn the gateway as their default router via DHCP
     """
 
     vnet_configs: Tuple[VnetConfig, ...]
     use_pve_ipam_dnsnmasq: bool = True
+    allow_domains: Tuple[str, ...] = ()
 
 
 SdnConfigType: TypeAlias = Union[SdnConfig, Literal["auto"], None]
