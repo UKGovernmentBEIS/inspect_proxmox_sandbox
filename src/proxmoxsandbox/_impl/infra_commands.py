@@ -224,10 +224,15 @@ class InfraCommands(abc.ABC):
         if external_vnet is None:
             raise ValueError("Could not find a suitable external VNet CIDR")
 
+        # allow_domains is intentionally cleared: this returned config is the
+        # internal 2-vnet form (sandbox + external) with the gateway already
+        # embedded. The caller captures allow_domains before calling this method
+        # and uses it directly; carrying it here would re-trigger the schema
+        # validator that enforces "exactly one vnet when allow_domains is set".
         return SdnConfig(
             vnet_configs=(modified_sandbox_vnet, external_vnet),
             use_pve_ipam_dnsnmasq=sdn_config.use_pve_ipam_dnsnmasq,
-            allow_domains=sdn_config.allow_domains,
+            allow_domains=(),
         )
 
     async def _provision_gateway(
