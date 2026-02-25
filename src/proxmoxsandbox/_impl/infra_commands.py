@@ -274,6 +274,19 @@ class InfraCommands(abc.ABC):
             mac=gateway_mac,
             ipv4=ip_address(gateway_ip),
         )
+        # A stale entry at this IP can remain from a previous failed run whose
+        # cleanup didn't complete. It would block creation of a fresh mapping, so
+        # we delete any existing entry for this IP+vnet before proceeding.
+        # Safe: the entry is a static reservation, not a live lease — no running
+        # VM holds it at this point since we haven't started the gateway VM yet.
+        existing_ipam = await self.sdn_commands.read_all_ipam_mappings()
+        stale = [
+            e.to_ipam_mapping()
+            for e in existing_ipam
+            if e.ip == gateway_ip and e.vnet == sandbox_vnet_id
+        ]
+        if stale:
+            await self.sdn_commands.tear_down_sdn_ip_allocations(stale)
         await self.sdn_commands.create_ipam_mapping(gateway_ipam)
 
         gateway_template_id = await self.built_in_vm.known_gateway()
