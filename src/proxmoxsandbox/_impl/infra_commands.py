@@ -1,16 +1,20 @@
 import abc
+import hashlib
 import os
 import re
 import sys
+from ipaddress import ip_address, ip_network
 from logging import getLogger
-from random import randint
+from random import randint, shuffle
 from typing import Collection, List, Sequence, Set, Tuple
 
+import tenacity
 from inspect_ai.util import trace_action
 from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
 
+from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
@@ -22,9 +26,99 @@ from proxmoxsandbox._impl.sdn_commands import (
 )
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
+    SdnConfig,
     SdnConfigType,
+    SubnetConfig,
     VmConfig,
+    VnetConfig,
 )
+
+
+def _gateway_mac(proxmox_ids_start: str) -> str:
+    """Derive a unique, deterministic MAC from the per-eval proxmox_ids_start prefix.
+
+    Uses the QEMU/KVM OUI (52:54:00) so Proxmox recognises it as a valid virtual NIC.
+    The 3-byte suffix is an MD5 hash of the prefix, giving per-eval uniqueness with
+    zero coordination overhead.
+    """
+    digest = hashlib.md5(proxmox_ids_start.encode(), usedforsecurity=False).digest()
+    return f"52:54:00:{digest[0]:02x}:{digest[1]:02x}:{digest[2]:02x}"
+
+
+def _gateway_ip_for_subnet(subnet_cidr: str) -> str:
+    """Return the .2 host in the subnet — the gateway VM's sandbox-facing IP.
+
+    .1 is the Proxmox SDN gateway entry (advertised by the zone's dnsmasq as the
+    subnet gateway before the gateway VM takes over).  We use .2 so both can
+    co-exist without conflict.
+    """
+    network = ip_network(subnet_cidr)
+    return str(network.network_address + 2)
+
+
+def _nftables_config(sandbox_cidr: str) -> str:
+    """Generate nftables ruleset for the gateway VM.
+
+    Three chains:
+    - prerouting_nat: intercepts all DNS from the sandbox and redirects it to
+      the gateway's dnsmasq, so sandbox VMs cannot bypass the allowlist by
+      using an alternative DNS server.
+    - postrouting_nat: masquerades forwarded sandbox traffic as the gateway's
+      external IP, so return traffic is routed back correctly.
+    - forward: default-drop; only allows traffic to IPs that dnsmasq has
+      resolved from the allowlist (populated into the nftables set via nftset).
+    """
+    return f"""\
+#!/usr/sbin/nft -f
+flush ruleset
+table inet gateway {{
+    set allowed_ips {{
+        type ipv4_addr
+        flags interval
+    }}
+
+    chain prerouting_nat {{
+        type nat hook prerouting priority dstnat;
+        ip saddr {sandbox_cidr} udp dport 53 redirect to :53
+        ip saddr {sandbox_cidr} tcp dport 53 redirect to :53
+    }}
+
+    chain postrouting_nat {{
+        type nat hook postrouting priority srcnat;
+        ip saddr {sandbox_cidr} masquerade
+    }}
+
+    chain forward {{
+        type filter hook forward priority filter; policy drop;
+        ct state established,related accept
+        ip saddr {sandbox_cidr} ip daddr @allowed_ips accept
+    }}
+}}
+"""
+
+
+def _dnsmasq_allowlist_config(gateway_ip: str, allow_domains: Tuple[str, ...]) -> str:
+    """Generate the per-eval dnsmasq allowlist config for the gateway VM.
+
+    Each allowed domain gets:
+    - server=/<domain>/8.8.8.8  — forward DNS queries to Google
+    - nftset=/<domain>/4#inet#gateway#allowed_ips  — add resolved IPs to nftables set
+
+    dnsmasq's /domain/ syntax matches the apex domain AND all subdomains, so
+    "debian.org" covers both debian.org and mirrors.debian.org.
+
+    Without a global server= directive (removed from base.conf), any domain NOT
+    listed here gets SERVFAIL — dnsmasq has no upstream to ask.
+    """
+    lines = [
+        "# Per-eval allowlist — generated at provision time.",
+        f"listen-address=127.0.0.1,{gateway_ip}",
+        "",
+    ]
+    for domain in allow_domains:
+        lines.append(f"server=/{domain}/8.8.8.8")
+        lines.append(f"nftset=/{domain}/4#inet#gateway#allowed_ips")
+    return "\n".join(lines) + "\n"
 
 
 class InfraCommands(abc.ABC):
@@ -47,16 +141,279 @@ class InfraCommands(abc.ABC):
         self.built_in_vm = BuiltInVM(async_proxmox, node)
         self.node = node
 
+    async def _prepare_sdn_for_gateway(self, sdn_config: SdnConfig) -> SdnConfig:
+        """Transform a SdnConfig to route sandbox egress through a gateway VM.
+
+        Modifies the first (and only) vnet:
+        - gateway IP changed to network .2 (the gateway VM's sandbox-facing IP)
+        - snat set to False (gateway VM does NAT, not Proxmox)
+        - alias set to "sandbox" if unset (needed so gateway's NIC can reference it)
+
+        Adds an external vnet (snat=True) for the gateway VM's internet-facing
+        interface, with a non-overlapping CIDR picked automatically.
+
+        Raises:
+            ValueError: if sdn_config has more than one vnet, if use_pve_ipam_dnsnmasq
+                is False, or if no suitable external CIDR can be found.
+        """
+        if not sdn_config.use_pve_ipam_dnsnmasq:
+            raise ValueError(
+                "allow_domains requires use_pve_ipam_dnsnmasq=True "
+                "(the gateway VM uses Proxmox IPAM for its static IP assignment)"
+            )
+        if len(sdn_config.vnet_configs) != 1:
+            raise ValueError(
+                f"allow_domains requires exactly one vnet_config, "
+                f"got {len(sdn_config.vnet_configs)}"
+            )
+        sandbox_vnet = sdn_config.vnet_configs[0]
+        if len(sandbox_vnet.subnets) != 1:
+            raise ValueError(
+                f"allow_domains requires exactly one subnet per vnet, "
+                f"got {len(sandbox_vnet.subnets)}"
+            )
+
+        sandbox_subnet = sandbox_vnet.subnets[0]
+        sandbox_network = ip_network(str(sandbox_subnet.cidr))
+        gateway_ip = ip_address(sandbox_network.network_address + 2)
+
+        modified_subnet = SubnetConfig(
+            cidr=sandbox_subnet.cidr,
+            gateway=gateway_ip,
+            snat=False,
+            dhcp_ranges=sandbox_subnet.dhcp_ranges,
+        )
+        modified_sandbox_vnet = VnetConfig(
+            alias=sandbox_vnet.alias if sandbox_vnet.alias is not None else "sandbox",
+            subnets=(modified_subnet,),
+        )
+
+        # Pick an external VNet CIDR that doesn't overlap with the sandbox CIDR
+        # or any existing Proxmox CIDRs.  Shuffle to reduce collision risk.
+        try_third_octets = list(range(2, 253))
+        shuffle(try_third_octets)
+        external_vnet = None
+        for third_octet in try_third_octets:
+            candidate = self.sdn_commands.simple_vnet_config(third_octet=third_octet)
+            try:
+                # check_cidrs validates both new vnets against existing Proxmox
+                # CIDRs AND against each other (find_self_cidr_overlaps).
+                await self.sdn_commands.check_cidrs(
+                    [modified_sandbox_vnet, candidate]
+                )
+                external_vnet = candidate
+                break
+            except ValueError:
+                continue
+
+        if external_vnet is None:
+            raise ValueError("Could not find a suitable external VNet CIDR")
+
+        return SdnConfig(
+            vnet_configs=(modified_sandbox_vnet, external_vnet),
+            use_pve_ipam_dnsnmasq=sdn_config.use_pve_ipam_dnsnmasq,
+            allow_domains=sdn_config.allow_domains,
+        )
+
+    async def _provision_gateway(
+        self,
+        proxmox_ids_start: str,
+        vnet_aliases: VnetAliases,
+        sdn_zone_id: str,
+        sandbox_cidr: str,
+        gateway_ip: str,
+        gateway_mac: str,
+        allow_domains: Tuple[str, ...],
+    ) -> int:
+        """Clone the gateway template and configure it for this eval instance.
+
+        Steps:
+        1. Create IPAM mapping (MAC → gateway_ip) so the gateway VM gets a static IP.
+        2. Clone the gateway template (linked clone — fast, small).
+        3. Wire NICs: net0 → sandbox vnet (with the static MAC), net1 → external vnet.
+        4. Start VM and wait for QEMU guest agent.
+        5. Inject nftables ruleset and apply it.
+        6. Inject dnsmasq allowlist config and restart dnsmasq.
+
+        Returns:
+            The new VM ID of the gateway clone.
+        """
+        # vnet_aliases[0] = (sandbox_vnet_id, alias)
+        # vnet_aliases[1] = (ext_vnet_id, None)
+        sandbox_vnet_id = vnet_aliases[0][0]
+        external_vnet_id = vnet_aliases[1][0]
+
+        # IPAM mapping must be created before the VM boots so Proxmox dnsmasq
+        # serves the right IP to the gateway's MAC address.
+        gateway_ipam = IpamMapping(
+            vnet_id=sandbox_vnet_id,
+            zone_id=sdn_zone_id,
+            mac=gateway_mac,
+            ipv4=ip_address(gateway_ip),
+        )
+        await self.sdn_commands.create_ipam_mapping(gateway_ipam)
+
+        gateway_template_id = await self.built_in_vm.known_gateway()
+        if gateway_template_id is None:
+            raise ValueError(
+                "Gateway VM template not found — call ensure_gateway_exists() first"
+            )
+
+        new_vm_id = await self.qemu_commands.find_next_available_vm_id()
+
+        async def create_clone() -> None:
+            await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{gateway_template_id}/clone",
+                json={
+                    "newid": new_vm_id,
+                    "full": 0,
+                    "name": f"inspect-gw-{proxmox_ids_start}",
+                },
+            )
+            await self.qemu_commands.register_created_vm(new_vm_id)
+
+        with trace_action(
+            self.logger, self.TRACE_NAME, f"clone gateway VM {new_vm_id=}"
+        ):
+            await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
+
+        async def configure_gw() -> None:
+            # Replace net0 (was static boot VNet from template) with sandbox VNet,
+            # and add net1 for the external (internet-facing) VNet.
+            # Tags: "inspect" only — "gateway" is reserved for the template.
+            await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{new_vm_id}/config",
+                json={
+                    "net0": f"virtio,bridge={sandbox_vnet_id}"
+                    f",macaddr={gateway_mac.upper()}",
+                    "net1": f"virtio,bridge={external_vnet_id}",
+                    "tags": "inspect",
+                },
+            )
+
+        await self.task_wrapper.do_action_and_wait_for_tasks(configure_gw)
+
+        await self.qemu_commands.start_and_await(vm_id=new_vm_id, is_sandbox=True)
+
+        agent_commands = AgentCommands(self.async_proxmox, self.node)
+
+        # Inject and apply nftables config
+        nft_config = _nftables_config(sandbox_cidr)
+        await agent_commands.write_file(
+            vm_id=new_vm_id,
+            content=nft_config.encode("utf-8"),
+            filepath="/etc/nftables.conf",
+        )
+        nft_res = await agent_commands.exec_command(
+            vm_id=new_vm_id,
+            command=["nft", "-f", "/etc/nftables.conf"],
+        )
+
+        @tenacity.retry(
+            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            stop=tenacity.stop_after_delay(30),
+            retry=tenacity.retry_if_result(lambda x: x is False),
+        )
+        async def wait_for_nft() -> bool:
+            status = await agent_commands.get_agent_exec_status(
+                vm_id=new_vm_id, pid=nft_res["pid"]
+            )
+            if status["exited"] == 1:
+                if status["exitcode"] != 0:
+                    raise ValueError(
+                        f"nft -f failed: stdout={status.get('out-data', '')!r}, "
+                        f"stderr={status.get('err-data', '')!r}"
+                    )
+                return True
+            return False
+
+        await wait_for_nft()
+
+        # Inject dnsmasq allowlist and restart dnsmasq
+        dnsmasq_config = _dnsmasq_allowlist_config(gateway_ip, allow_domains)
+        await agent_commands.write_file(
+            vm_id=new_vm_id,
+            content=dnsmasq_config.encode("utf-8"),
+            filepath="/etc/dnsmasq.d/allowlist.conf",
+        )
+        dnsmasq_res = await agent_commands.exec_command(
+            vm_id=new_vm_id,
+            command=["systemctl", "restart", "dnsmasq"],
+        )
+
+        @tenacity.retry(
+            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            stop=tenacity.stop_after_delay(30),
+            retry=tenacity.retry_if_result(lambda x: x is False),
+        )
+        async def wait_for_dnsmasq_restart() -> bool:
+            status = await agent_commands.get_agent_exec_status(
+                vm_id=new_vm_id, pid=dnsmasq_res["pid"]
+            )
+            if status["exited"] == 1:
+                if status["exitcode"] != 0:
+                    raise ValueError(
+                        f"dnsmasq restart failed: "
+                        f"stdout={status.get('out-data', '')!r}, "
+                        f"stderr={status.get('err-data', '')!r}"
+                    )
+                return True
+            return False
+
+        await wait_for_dnsmasq_restart()
+
+        return new_vm_id
+
     async def create_sdn_and_vms(
         self,
         proxmox_ids_start: str,
         sdn_config: SdnConfigType,
         vms_config: Tuple[VmConfig, ...],
-    ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
+    ) -> Tuple[
+        Tuple[Tuple[int, VmConfig], ...],
+        str | None,
+        Tuple[IpamMapping, ...],
+        int | None,
+    ]:
+        allow_domains: Tuple[str, ...] = ()
+        if isinstance(sdn_config, SdnConfig):
+            allow_domains = sdn_config.allow_domains
+
+        if allow_domains:
+            # Resolve "auto" before transforming, since _prepare_sdn_for_gateway
+            # needs a concrete SdnConfig to read and modify.
+            if sdn_config == "auto":
+                sdn_config = await self.sdn_commands.generate_sdn_config()
+            assert isinstance(sdn_config, SdnConfig)
+            sdn_config = await self._prepare_sdn_for_gateway(sdn_config)
+
         vm_configs_with_ids = []
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config
         )
+
+        gateway_vm_id: int | None = None
+        if allow_domains and sdn_zone_id is not None:
+            # sdn_config was reassigned to a SdnConfig by _prepare_sdn_for_gateway
+            # above; assert helps mypy narrow the type.
+            assert isinstance(sdn_config, SdnConfig)
+            sandbox_cidr = str(sdn_config.vnet_configs[0].subnets[0].cidr)
+            gateway_ip = _gateway_ip_for_subnet(sandbox_cidr)
+            gateway_mac = _gateway_mac(proxmox_ids_start)
+            with trace_action(
+                self.logger, self.TRACE_NAME, "provision gateway VM"
+            ):
+                gateway_vm_id = await self._provision_gateway(
+                    proxmox_ids_start=proxmox_ids_start,
+                    vnet_aliases=vnet_aliases,
+                    sdn_zone_id=sdn_zone_id,
+                    sandbox_cidr=sandbox_cidr,
+                    gateway_ip=gateway_ip,
+                    gateway_mac=gateway_mac,
+                    allow_domains=allow_domains,
+                )
 
         known_builtins = await self.built_in_vm.known_builtins()
 
@@ -85,7 +442,12 @@ class InfraCommands(abc.ABC):
                 vm_configs_with_id[0], vm_configs_with_id[1].is_sandbox
             )
 
-        return tuple(vm_configs_with_ids), sdn_zone_id, tuple(ipam_mappings)
+        return (
+            tuple(vm_configs_with_ids),
+            sdn_zone_id,
+            tuple(ipam_mappings),
+            gateway_vm_id,
+        )
 
     async def delete_sdn_and_vms(
         self,

@@ -31,6 +31,7 @@ from proxmoxsandbox._impl.sdn_commands import IpamMapping
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
+    SdnConfig,
     SdnConfigType,
 )
 
@@ -150,6 +151,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 built_in_names.add(vm_config.vm_source_config.built_in)
         for built_in_name in built_in_names:
             await built_in_vm.ensure_exists(built_in_name)
+        if isinstance(config.sdn_config, SdnConfig) and config.sdn_config.allow_domains:
+            await built_in_vm.ensure_gateway_exists()
 
     @classmethod
     @override
@@ -205,6 +208,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 vm_configs_with_ids,
                 sdn_zone_id,
                 ipam_mappings,
+                gateway_vm_id,
             ) = await infra_commands.create_sdn_and_vms(
                 proxmox_ids_start,
                 sdn_config=config.sdn_config,
@@ -216,6 +220,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         vm_ids = tuple(
             vm_configs_with_id[0] for vm_configs_with_id in vm_configs_with_ids
         )
+        # Gateway VM (if provisioned) must be included in all_vm_ids so it gets
+        # torn down during sample_cleanup, but it is NOT added to the sandboxes
+        # dict — it's infrastructure, not an eval target.
+        if gateway_vm_id is not None:
+            vm_ids = vm_ids + (gateway_vm_id,)
 
         found_default = False
 

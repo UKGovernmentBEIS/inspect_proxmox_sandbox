@@ -42,10 +42,10 @@ DEBIAN_13_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-g
 KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.3/kali-linux-2025.3-cloud-genericcloud-amd64.tar.xz"
 KALI_DISK_RENAMED = "kali-2025.3-genericcloud-amd64.raw"
 
-# TODO(CAST): confirm whether Alpine Linux is preferred over Debian here.
-# Alpine (~50 MB, ~10 s boot) vs Debian-minimal (~200 MB, ~20 s boot).
-# Functionally equivalent; choice affects familiarity/debuggability.
-# See ticket for context: the gateway VM runs only dnsmasq + nftables.
+# Debian 13: consistent with the existing built-in VMs in this repo and the broader
+# org (Ubuntu/Debian are the only distros used for VM workloads; Alpine appears only
+# in Dockerfiles). Same base image as the debian13 built-in — reuses any already-
+# downloaded source file.
 GATEWAY_VM_URL = DEBIAN_13_URL
 GATEWAY_VM_TAG = "gateway"
 
@@ -78,10 +78,9 @@ write_files:
   - path: /etc/dnsmasq.d/base.conf
     permissions: "0644"
     content: |
-      # Upstream DNS — provisioner will add interface/listen-address at provision time.
+      # No global upstream — only domains in allowlist.conf are resolved.
+      # Per-domain server= and nftset= entries are injected at provision time.
       no-resolv
-      server=8.8.8.8
-      server=8.8.4.4
   - path: /etc/dnsmasq.d/allowlist.conf
     permissions: "0644"
     content: |
