@@ -224,7 +224,7 @@ class InfraCommands(abc.ABC):
         gateway_ip: str,
         gateway_mac: str,
         allow_domains: Tuple[str, ...],
-    ) -> int:
+    ) -> Tuple[int, IpamMapping]:
         """Clone the gateway template and configure it for this eval instance.
 
         Steps:
@@ -236,7 +236,10 @@ class InfraCommands(abc.ABC):
         6. Inject dnsmasq allowlist config and restart dnsmasq.
 
         Returns:
-            The new VM ID of the gateway clone.
+            Tuple of (gateway VM ID, the IPAM mapping created for it).
+            The caller must include the IPAM mapping in the teardown list so that
+            if VM deletion fails, the IPAM entry can still be explicitly cleared
+            (an orphaned entry would block subnet/zone deletion).
         """
         # vnet_aliases[0] = (sandbox_vnet_id, alias)
         # vnet_aliases[1] = (ext_vnet_id, None)
@@ -364,7 +367,7 @@ class InfraCommands(abc.ABC):
 
         await wait_for_dnsmasq_restart()
 
-        return new_vm_id
+        return new_vm_id, gateway_ipam
 
     async def create_sdn_and_vms(
         self,
@@ -382,8 +385,14 @@ class InfraCommands(abc.ABC):
             allow_domains = sdn_config.allow_domains
 
         if allow_domains:
-            # Resolve "auto" before transforming, since _prepare_sdn_for_gateway
-            # needs a concrete SdnConfig to read and modify.
+            # FIXME: the branch below is dead code.  `allow_domains` is only
+            # populated when `isinstance(sdn_config, SdnConfig)` (line above),
+            # so `sdn_config == "auto"` is always False here.  The original
+            # intent was probably to support allow_domains on auto-generated
+            # configs (where the user wants filtering but doesn't care about
+            # specific CIDRs).  That would require either a separate top-level
+            # allow_domains field on ProxmoxSandboxEnvironmentConfig, or a
+            # different code path.  Left for future work.
             if sdn_config == "auto":
                 sdn_config = await self.sdn_commands.generate_sdn_config()
             assert isinstance(sdn_config, SdnConfig)
@@ -395,6 +404,7 @@ class InfraCommands(abc.ABC):
         )
 
         gateway_vm_id: int | None = None
+        gateway_ipam: IpamMapping | None = None
         if allow_domains and sdn_zone_id is not None:
             # sdn_config was reassigned to a SdnConfig by _prepare_sdn_for_gateway
             # above; assert helps mypy narrow the type.
@@ -405,7 +415,7 @@ class InfraCommands(abc.ABC):
             with trace_action(
                 self.logger, self.TRACE_NAME, "provision gateway VM"
             ):
-                gateway_vm_id = await self._provision_gateway(
+                gateway_vm_id, gateway_ipam = await self._provision_gateway(
                     proxmox_ids_start=proxmox_ids_start,
                     vnet_aliases=vnet_aliases,
                     sdn_zone_id=sdn_zone_id,
@@ -417,7 +427,9 @@ class InfraCommands(abc.ABC):
 
         known_builtins = await self.built_in_vm.known_builtins()
 
-        ipam_mappings = []
+        # Gateway IPAM is prepended so it is torn down before the zone is deleted,
+        # matching the behaviour of VM-level IPAM entries in create_ipam_mappings.
+        ipam_mappings: List[IpamMapping] = [gateway_ipam] if gateway_ipam else []
 
         for vm_config in vms_config:
             # We have to create the IPAM entries before booting the VMs
