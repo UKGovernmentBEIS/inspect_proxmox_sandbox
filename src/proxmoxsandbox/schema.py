@@ -105,7 +105,7 @@ class SdnConfig(BaseModel, frozen=True):
             - Filtering is IP-level, not URL-level.  All TCP/UDP ports to an
               allowed domain's IPs are permitted, not just HTTP/HTTPS.
             - Only apex domain IPs are pre-seeded in the nftables filter at
-              provision time.  Subdomains (e.g. deb.debian.org when "debian.org"
+              provision time.  Subdomains (e.g. ftp.gnu.org when "gnu.org"
               is allowed) have their IPs resolved by dnsmasq at query time, but
               those IPs are NOT added to the filter — traffic will be dropped.
               This affects apt-get, pip, and similar tools that use subdomains.

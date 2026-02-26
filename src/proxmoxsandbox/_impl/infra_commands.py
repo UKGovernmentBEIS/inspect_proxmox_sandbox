@@ -126,7 +126,7 @@ def _dnsmasq_allowlist_config(gateway_ip: str, allow_domains: Tuple[str, ...]) -
 
     Each allowed domain gets server=/<domain>/8.8.8.8 so dnsmasq forwards
     those queries upstream.  dnsmasq's /domain/ syntax matches the apex and
-    all subdomains, so "debian.org" covers mirrors.debian.org too.
+    all subdomains, so "gnu.org" covers ftp.gnu.org too.
 
     Without a global server= directive, any unlisted domain gets SERVFAIL.
 
@@ -164,7 +164,7 @@ def _pre_resolve_script(allow_domains: Tuple[str, ...]) -> str:
     the system resolver if python3-dnspython is not installed (old gateway template).
 
     Limitation: only apex domains are pre-resolved.  Subdomains of allowed domains
-    (e.g. deb.debian.org when "debian.org" is allowed) are resolved at query time by
+    (e.g. ftp.gnu.org when "gnu.org" is allowed) are resolved at query time by
     dnsmasq but their IPs are NOT added to allowed_ips here — they will be dropped
     by the FORWARD chain.  The fix is to enable dnsmasq's nftset= support when the
     installed package supports it (--enable-nftset), which would add IPs dynamically.

@@ -397,9 +397,18 @@ class SdnCommands(abc.ABC):
                     await self.async_proxmox.request(
                         "DELETE", f"/cluster/sdn/vnets/{vnet}"
                     )
-                await self.async_proxmox.request(
-                    "DELETE", f"/cluster/sdn/zones/{sdn_zone_id}"
-                )
+                try:
+                    await self.async_proxmox.request(
+                        "DELETE", f"/cluster/sdn/zones/{sdn_zone_id}"
+                    )
+                except Exception as e:
+                    # Zone may have already been deleted (e.g. via the Proxmox UI),
+                    # leaving orphaned IPAM entries that still show up in our zone
+                    # scan.  Treat as already-gone.
+                    self.logger.warning(
+                        f"Could not delete SDN zone {sdn_zone_id!r} "
+                        f"(may already be gone): {e}"
+                    )
 
         await self.do_update_all_sdn()
 
