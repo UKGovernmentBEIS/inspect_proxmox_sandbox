@@ -48,9 +48,14 @@ def _gateway_mac(proxmox_ids_start: str) -> str:
 def _gateway_ip_for_subnet(subnet_cidr: str) -> str:
     """Return the .2 host in the subnet — the gateway VM's sandbox-facing IP.
 
-    .1 is the Proxmox SDN gateway entry (advertised by the zone's dnsmasq as the
-    subnet gateway before the gateway VM takes over).  We use .2 so both can
-    co-exist without conflict.
+    .1 is permanently reserved by Proxmox SDN as the bridge device's IP for
+    that subnet; it cannot be reassigned.  We use .2 to avoid a conflict with it.
+
+    _prepare_sdn_for_gateway sets the SDN subnet's gateway field to .2 so that
+    Proxmox's dnsmasq advertises .2 as the DHCP router to sandbox VMs.  A side
+    effect is that the Proxmox SDN bridge device also claims .2, creating an ARP
+    conflict with the gateway VM's sandbox-facing NIC.  That conflict is resolved
+    in create_sdn_and_vms by injecting a permanent ARP entry on each sandbox VM.
     """
     network = ip_network(subnet_cidr)
     return str(network.network_address + 2)
@@ -66,8 +71,11 @@ def _nftables_config(sandbox_cidr: str) -> str:
       DNS server.  conntrack reverses this for replies.
     - postrouting_nat: masquerades forwarded sandbox traffic as the gateway's
       external IP, so return traffic is routed back correctly.
-    - forward: default-drop; only allows traffic to IPs that dnsmasq has
-      resolved from the allowlist (populated into the nftables set via nftset).
+    - forward: default-drop; only allows traffic to IPs in the allowed_ips set,
+      which is seeded at provision time by _pre_resolve_script (resolving the
+      allowlist domains and adding their IPs via 'nft add element').  dnsmasq's
+      nftset= directive is intentionally not used — Debian 13's package may not
+      be compiled with --enable-nftset.
 
     Known gap — IPv6:
     All rules are IPv4-only.  IPv6 egress from the sandbox is not filtered here.
@@ -105,8 +113,9 @@ table inet gateway {{
 
     chain forward {{
         type filter hook forward priority filter; policy drop;
-        ct state established,related accept
-        ip saddr {sandbox_cidr} ip daddr @allowed_ips accept
+        ct state established,related counter accept
+        ip saddr {sandbox_cidr} ip daddr @allowed_ips counter accept
+        counter drop
     }}
 }}
 """
@@ -121,8 +130,12 @@ def _dnsmasq_allowlist_config(gateway_ip: str, allow_domains: Tuple[str, ...]) -
 
     Without a global server= directive, any unlisted domain gets SERVFAIL.
 
-    listen-address is set to the gateway's sandbox-facing IP only (not
-    127.0.0.1) to avoid conflicting with systemd-resolved on the loopback.
+    listen-address is set to the gateway's sandbox-facing IP only.
+    bind-interfaces is required alongside listen-address: without it, dnsmasq
+    binds to 0.0.0.0:53 regardless of listen-address (listen-address only
+    affects filtering, not binding).  bind-interfaces makes dnsmasq bind to
+    exactly the specified IP, so the restart doesn't race with the boot-time
+    dnsmasq instance releasing 0.0.0.0:53.
 
     nftset= is intentionally omitted: Debian 13's dnsmasq package may not be
     compiled with --enable-nftset.  The nftables allowed_ips set is populated
@@ -130,6 +143,7 @@ def _dnsmasq_allowlist_config(gateway_ip: str, allow_domains: Tuple[str, ...]) -
     """
     lines = [
         "# Per-eval allowlist — generated at provision time.",
+        "bind-interfaces",
         f"listen-address={gateway_ip}",
         "",
     ]
@@ -143,24 +157,50 @@ def _pre_resolve_script(allow_domains: Tuple[str, ...]) -> str:
 
     Run once at provision time so traffic to those IPs is forwarded even before
     the first DNS query (and without relying on dnsmasq nftset support).
+
+    Queries 8.8.8.8 directly (via python3-dnspython) to match dnsmasq's upstream,
+    avoiding IP mismatch when the gateway's system resolver uses a different DNS
+    (e.g., a corporate nameserver with different geoDNS targets).  Falls back to
+    the system resolver if python3-dnspython is not installed (old gateway template).
+
+    Limitation: only apex domains are pre-resolved.  Subdomains of allowed domains
+    (e.g. deb.debian.org when "debian.org" is allowed) are resolved at query time by
+    dnsmasq but their IPs are NOT added to allowed_ips here — they will be dropped
+    by the FORWARD chain.  The fix is to enable dnsmasq's nftset= support when the
+    installed package supports it (--enable-nftset), which would add IPs dynamically.
     """
     domains_repr = repr(list(allow_domains))
-    return (
-        "\n".join(
-            [
-                "import socket, subprocess",
-                f"domains = {domains_repr}",
-                "ips = list({{r[4][0] for d in domains"
-                " for r in socket.getaddrinfo(d, None, socket.AF_INET)}})",
-                "if ips:",
-                "    nft_in = 'add element inet gateway allowed_ips { '"
-                " + ', '.join(ips) + ' }'",
-                "    subprocess.run(['nft', '-f', '-'], input=nft_in,"
-                " text=True, check=True)",
-            ]
-        )
-        + "\n"
-    )
+    # {{ and }} in this f-string produce literal { and } in the emitted Python script.
+    return f"""\
+import subprocess
+try:
+    import dns.resolver as _dns
+    _dns_available = True
+except ImportError:
+    # python3-dnspython not installed (old gateway template).
+    # Falls back to system resolver, which may return different IPs than dnsmasq.
+    import socket
+    _dns_available = False
+domains = {domains_repr}
+ips = []
+if _dns_available:
+    resolver = _dns.Resolver()
+    resolver.nameservers = ['8.8.8.8']
+    for d in domains:
+        try:
+            ips.extend(str(r) for r in resolver.resolve(d, 'A'))
+        except Exception:
+            pass
+else:
+    for d in domains:
+        try:
+            ips.extend(r[4][0] for r in socket.getaddrinfo(d, None, socket.AF_INET))
+        except Exception:
+            pass
+if ips:
+    nft_in = 'add element inet gateway allowed_ips {{ ' + ', '.join(ips) + ' }}'
+    subprocess.run(['nft', '-f', '-'], input=nft_in, text=True, check=True)
+"""
 
 
 class InfraCommands(abc.ABC):
@@ -221,6 +261,13 @@ class InfraCommands(abc.ABC):
 
         modified_subnet = SubnetConfig(
             cidr=sandbox_subnet.cidr,
+            # Proxmox's gateway field controls BOTH the SDN bridge device's IP AND
+            # the DHCP option-3 (router) advertised to VMs — they cannot be set
+            # independently.  Setting it to .2 makes sandbox VMs route to the gateway
+            # VM, but also causes the Proxmox bridge to claim .2, creating an ARP
+            # conflict with the gateway VM's sandbox-facing NIC.  That conflict is
+            # resolved in create_sdn_and_vms by injecting a permanent ARP entry on
+            # each sandbox VM pointing .2 → the gateway VM's MAC.
             gateway=gateway_ip,
             snat=False,
             dhcp_ranges=sandbox_subnet.dhcp_ranges,
@@ -281,11 +328,15 @@ class InfraCommands(abc.ABC):
         1. Clone the gateway template (linked clone — fast, small).
         2. Wire NICs: net0 → sandbox vnet (with the static MAC), net1 → external vnet.
         3. Start VM and wait for QEMU guest agent.
-        4. Set static IP on the sandbox NIC via the agent (avoids Proxmox IPAM: the
-           subnet's gateway IP is already claimed by Proxmox as a topology entry with
-           no MAC, blocking any MAC-based DHCP reservation for the same address).
+        4. Write a systemd-networkd .network file to assign a static IP (.2) to the
+           sandbox NIC.  A DHCP reservation is impossible here because Proxmox claims
+           the subnet's gateway IP as a MAC-less topology entry in IPAM.  Using
+           networkd config (rather than 'ip addr add') ensures the address is
+           persistent — networkd would otherwise flush a manually-added address when
+           it re-applies its own DHCP config.
         5. Inject nftables ruleset and apply it.
         6. Inject dnsmasq allowlist config and restart dnsmasq.
+        7. Pre-resolve allowed domains into the nftables allowed_ips set.
         """
         # vnet_aliases[0] = (sandbox_vnet_id, alias)
         # vnet_aliases[1] = (ext_vnet_id, None)
@@ -338,20 +389,44 @@ class InfraCommands(abc.ABC):
 
         agent_commands = AgentCommands(self.async_proxmox, self.node)
 
-        # Set static IP on the sandbox NIC. The VM booted with DHCP; we override
-        # it here because Proxmox auto-claims the subnet's gateway IP as a topology
-        # entry (mac=None) in IPAM, making a MAC-based DHCP reservation impossible.
-        # We find the sandbox interface by its route, flush the DHCP address, then
-        # assign the static IP. The DHCP lease won't renew within the VM's lifetime.
+        # Configure a static IP on the sandbox-facing NIC via systemd-networkd.
+        # Writing a .network file (matched by MAC, 00- prefix beats cloud-init's
+        # 10-cloud-init-*.network) makes networkd the source of truth so the
+        # address survives DHCP renewals and link state changes.
+        #
+        # Why not 'ip addr flush; ip addr add'? networkd manages the interface
+        # with DHCP; a manually-added address is transient — networkd flushes
+        # it when it re-applies its DHCP config, sometimes within seconds. By
+        # the time sandbox VMs boot and ARP for .2, the Proxmox SDN bridge
+        # (which also holds .2 as its own IP, because we set gateway=.2 in the
+        # subnet config) wins the ARP race and all sandbox traffic hits the
+        # bridge instead of the gateway VM's FORWARD chain.
         prefix_len = ip_network(sandbox_cidr).prefixlen
+        network_file = (
+            "[Match]\n"
+            f"MACAddress={gateway_mac}\n"
+            "\n"
+            "[Network]\n"
+            "DHCP=no\n"
+            f"Address={gateway_ip}/{prefix_len}\n"
+        )
+        await agent_commands.write_file(
+            vm_id=new_vm_id,
+            content=network_file.encode("utf-8"),
+            filepath="/etc/systemd/network/00-sandbox-static.network",
+        )
         set_ip_res = await agent_commands.exec_command(
             vm_id=new_vm_id,
             command=[
                 "bash",
                 "-c",
-                f"iface=$(ip -4 route | awk '$1==\"{sandbox_cidr}\" {{print $3}}');"
-                f" ip addr flush dev $iface;"
-                f" ip addr add {gateway_ip}/{prefix_len} dev $iface",
+                f"networkctl reload && "
+                f"for i in $(seq 1 15); do "
+                f"  ip -4 addr show | grep -qF '{gateway_ip}'"
+                f"    && {{ echo IP_OK; exit 0; }}; "
+                f"  sleep 1; "
+                f"done; "
+                f"echo IP_MISSING; exit 1",
             ],
         )
 
@@ -367,7 +442,7 @@ class InfraCommands(abc.ABC):
             if status["exited"] == 1:
                 if status["exitcode"] != 0:
                     raise ValueError(
-                        f"set static IP failed: "
+                        f"Failed to configure static IP {gateway_ip}: "
                         f"stdout={status.get('out-data', '')!r}, "
                         f"stderr={status.get('err-data', '')!r}"
                     )
@@ -557,6 +632,66 @@ class InfraCommands(abc.ABC):
             await self.qemu_commands.await_vm(
                 vm_configs_with_id[0], vm_configs_with_id[1].is_sandbox
             )
+
+        # Inject a permanent ARP entry for the gateway VM on every sandbox VM.
+        #
+        # Root cause of the ARP conflict: setting gateway=.2 in the SDN subnet
+        # config causes Proxmox to assign .2 to the SDN bridge on the Proxmox
+        # host (needed so dnsmasq advertises .2 as the DHCP router option).
+        # The bridge therefore ALSO responds to ARP for .2, racing with the
+        # gateway VM's ens18.  If the bridge wins, sandbox traffic hits the
+        # bridge instead of the gateway VM's FORWARD chain — all packets are
+        # silently dropped (snat=False, no route to the internet from the bridge
+        # without NAT).
+        #
+        # Fix: inject a `nud permanent` ARP entry pointing .2 → gateway VM MAC
+        # on each sandbox VM after it boots.  Permanent entries take unconditional
+        # precedence over dynamic ARP replies, eliminating the race entirely.
+        if gateway_vm_id is not None:
+            assert isinstance(sdn_config, SdnConfig)
+            gw_sandbox_cidr = str(sdn_config.vnet_configs[0].subnets[0].cidr)
+            gw_ip = _gateway_ip_for_subnet(gw_sandbox_cidr)
+            gw_mac = _gateway_mac(proxmox_ids_start)
+            agent_commands = AgentCommands(self.async_proxmox, self.node)
+            for vm_id, vm_config in vm_configs_with_ids:
+                if not vm_config.is_sandbox:
+                    continue
+                inject_res = await agent_commands.exec_command(
+                    vm_id=vm_id,
+                    command=[
+                        "bash",
+                        "-c",
+                        f"iface=$(ip -4 route"
+                        f" | awk '$1==\"{gw_sandbox_cidr}\" {{print $3}}');"
+                        f" ip neigh replace {gw_ip} lladdr {gw_mac}"
+                        f" dev $iface nud permanent",
+                    ],
+                )
+
+                @tenacity.retry(
+                    wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+                    stop=tenacity.stop_after_delay(30),
+                    retry=tenacity.retry_if_result(lambda x: x is False),
+                )
+                async def wait_for_arp_inject() -> bool:
+                    status = await agent_commands.get_agent_exec_status(
+                        vm_id=vm_id, pid=inject_res["pid"]
+                    )
+                    if status["exited"] == 1:
+                        if status["exitcode"] != 0:
+                            raise ValueError(
+                                f"ARP injection on sandbox VM {vm_id} failed: "
+                                f"stdout={status.get('out-data', '')!r}, "
+                                f"stderr={status.get('err-data', '')!r}"
+                            )
+                        self.logger.info(
+                            f"Injected permanent ARP {gw_ip} → {gw_mac} "
+                            f"on sandbox VM {vm_id}"
+                        )
+                        return True
+                    return False
+
+                await wait_for_arp_inject()
 
         return (
             tuple(vm_configs_with_ids),

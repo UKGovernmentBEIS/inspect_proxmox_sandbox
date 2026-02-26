@@ -67,6 +67,7 @@ packages:
   - dnsmasq
   - nftables
   - iproute2
+  - python3-dnspython
 
 write_files:
   - path: /etc/nftables.conf

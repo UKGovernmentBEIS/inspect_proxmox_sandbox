@@ -1,5 +1,6 @@
 """Data models and schemas for the Proxmox sandbox configuration."""
 
+from ipaddress import ip_address, ip_network
 from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
@@ -99,6 +100,20 @@ class SdnConfig(BaseModel, frozen=True):
             DNS upstream: Google (8.8.8.8) is hardcoded inside the gateway VM.
             Environments that block outbound port 53 to 8.8.8.8 will not be able to
             resolve allowed domains.
+
+            Known limitations:
+            - Filtering is IP-level, not URL-level.  All TCP/UDP ports to an
+              allowed domain's IPs are permitted, not just HTTP/HTTPS.
+            - Only apex domain IPs are pre-seeded in the nftables filter at
+              provision time.  Subdomains (e.g. deb.debian.org when "debian.org"
+              is allowed) have their IPs resolved by dnsmasq at query time, but
+              those IPs are NOT added to the filter — traffic will be dropped.
+              This affects apt-get, pip, and similar tools that use subdomains.
+              A future improvement is to enable dnsmasq's nftset= support.
+            - IPv6 egress is not filtered.  Proxmox SDN simple zones do not
+              route IPv6 and sandbox cloud-init sets dhcp6=false, so IPv6 egress
+              is generally unavailable.  If your Proxmox has IPv6 on the bridge,
+              IPv6 traffic will bypass the filter.
     """
 
     vnet_configs: Tuple[VnetConfig, ...]
@@ -132,8 +147,6 @@ class SdnConfig(BaseModel, frozen=True):
             )
         # The gateway VM is assigned network-address+2.  Validate that the DHCP
         # pool does not include that address, which would cause an IPAM conflict.
-        from ipaddress import ip_address, ip_network
-
         subnet = subnet_list[0]
         gateway_vm_ip = ip_network(str(subnet.cidr)).network_address + 2
         for dhcp_range in subnet.dhcp_ranges:
