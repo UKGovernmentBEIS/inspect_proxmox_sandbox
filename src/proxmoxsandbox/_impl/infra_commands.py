@@ -1,5 +1,6 @@
 import abc
 import hashlib
+import importlib.resources
 import os
 import re
 import sys
@@ -38,8 +39,8 @@ def _gateway_mac(proxmox_ids_start: str) -> str:
     """Derive a unique, deterministic MAC from the per-eval proxmox_ids_start prefix.
 
     Uses the QEMU/KVM OUI (52:54:00) so Proxmox recognises it as a valid virtual NIC.
-    The 3-byte suffix is an MD5 hash of the prefix, giving per-eval uniqueness with
-    zero coordination overhead.
+    The 3-byte suffix is an MD5 hash of the prefix, giving per-eval uniqueness
+    without shared state or synchronisation.
     """
     digest = hashlib.md5(proxmox_ids_start.encode(), usedforsecurity=False).digest()
     return f"52:54:00:{digest[0]:02x}:{digest[1]:02x}:{digest[2]:02x}"
@@ -74,8 +75,10 @@ def _nftables_config(sandbox_cidr: str) -> str:
     - forward: default-drop; only allows traffic to IPs in the allowed_ips set,
       which is seeded at provision time by _pre_resolve_script (resolving the
       allowlist domains and adding their IPs via 'nft add element').  dnsmasq's
-      nftset= directive is intentionally not used — Debian 13's package may not
-      be compiled with --enable-nftset.
+      nftset= directive is intentionally not used.  Although Debian 13's
+      dnsmasq (≥2.87) does support nftset, it only populates the nftables set on DNS
+      query — not at boot.  Pre-resolving at provision time ensures IPs are seeded
+      before the first connection attempt, which is simpler and more predictable.
 
     Known gap — IPv6:
     All rules are IPv4-only.  IPv6 egress from the sandbox is not filtered here.
@@ -137,9 +140,10 @@ def _dnsmasq_allowlist_config(gateway_ip: str, allow_domains: Tuple[str, ...]) -
     exactly the specified IP, so the restart doesn't race with the boot-time
     dnsmasq instance releasing 0.0.0.0:53.
 
-    nftset= is intentionally omitted: Debian 13's dnsmasq package may not be
-    compiled with --enable-nftset.  The nftables allowed_ips set is populated
-    at provision time by _pre_resolve_script instead.
+    nftset= is intentionally omitted.  Although Debian 13's dnsmasq supports it
+    (--enable-nftset has been compiled in since 2.87), nftset only populates
+    allowed_ips on DNS query rather than at boot.  Pre-resolving at provision
+    time (_pre_resolve_script) seeds IPs before the first connection attempt.
     """
     lines = [
         "# Per-eval allowlist — generated at provision time.",
@@ -156,7 +160,7 @@ def _pre_resolve_script(allow_domains: Tuple[str, ...]) -> str:
     """Return a Python script that resolves allowed domains and seeds the nftables set.
 
     Run once at provision time so traffic to those IPs is forwarded even before
-    the first DNS query (and without relying on dnsmasq nftset support).
+    the first DNS query.
 
     Queries 8.8.8.8 directly (via python3-dnspython) to match dnsmasq's upstream,
     avoiding IP mismatch when the gateway's system resolver uses a different DNS
@@ -166,41 +170,15 @@ def _pre_resolve_script(allow_domains: Tuple[str, ...]) -> str:
     Limitation: only apex domains are pre-resolved.  Subdomains of allowed domains
     (e.g. ftp.gnu.org when "gnu.org" is allowed) are resolved at query time by
     dnsmasq but their IPs are NOT added to allowed_ips here — they will be dropped
-    by the FORWARD chain.  The fix is to enable dnsmasq's nftset= support when the
-    installed package supports it (--enable-nftset), which would add IPs dynamically.
+    by the FORWARD chain.  Explicit subdomain listing is required.
     """
     domains_repr = repr(list(allow_domains))
-    # {{ and }} in this f-string produce literal { and } in the emitted Python script.
-    return f"""\
-import subprocess
-try:
-    import dns.resolver as _dns
-    _dns_available = True
-except ImportError:
-    # python3-dnspython not installed (old gateway template).
-    # Falls back to system resolver, which may return different IPs than dnsmasq.
-    import socket
-    _dns_available = False
-domains = {domains_repr}
-ips = []
-if _dns_available:
-    resolver = _dns.Resolver()
-    resolver.nameservers = ['8.8.8.8']
-    for d in domains:
-        try:
-            ips.extend(str(r) for r in resolver.resolve(d, 'A'))
-        except Exception:
-            pass
-else:
-    for d in domains:
-        try:
-            ips.extend(r[4][0] for r in socket.getaddrinfo(d, None, socket.AF_INET))
-        except Exception:
-            pass
-if ips:
-    nft_in = 'add element inet gateway allowed_ips {{ ' + ', '.join(ips) + ' }}'
-    subprocess.run(['nft', '-f', '-'], input=nft_in, text=True, check=True)
-"""
+    template = (
+        importlib.resources.files("proxmoxsandbox._impl._resources")
+        .joinpath("pre_resolve.py.template")
+        .read_text(encoding="utf-8")
+    )
+    return template.replace("{domains_repr}", domains_repr)
 
 
 class InfraCommands(abc.ABC):
@@ -240,8 +218,11 @@ class InfraCommands(abc.ABC):
         """
         if not sdn_config.use_pve_ipam_dnsnmasq:
             raise ValueError(
-                "allow_domains requires use_pve_ipam_dnsnmasq=True "
-                "(the gateway VM uses Proxmox IPAM for its static IP assignment)"
+                "allow_domains requires use_pve_ipam_dnsnmasq=True. "
+                "Proxmox IPAM is still used to reserve sandbox VM IPs and "
+                "assign the gateway VM its address via DHCP. The gateway VM "
+                "runs its own separate dnsmasq instance for DNS filtering only — "
+                "it does not replace Proxmox's dnsmasq for DHCP."
             )
         if len(sdn_config.vnet_configs) != 1:
             raise ValueError(
@@ -278,28 +259,14 @@ class InfraCommands(abc.ABC):
         )
 
         # Pick an external VNet CIDR that doesn't overlap with the sandbox CIDR
-        # or any existing Proxmox CIDRs.  Shuffle to reduce collision risk.
-        try_third_octets = list(range(2, 253))
-        shuffle(try_third_octets)
-        external_vnet = None
-        for third_octet in try_third_octets:
-            candidate = self.sdn_commands.simple_vnet_config(third_octet=third_octet)
-            candidate_cidr = ip_network(str(candidate.subnets[0].cidr))
-            if sandbox_network.overlaps(candidate_cidr):
-                continue
-            try:
-                # Only check the candidate against existing Proxmox CIDRs, not
-                # modified_sandbox_vnet: the sandbox CIDR may appear in a stale
-                # leftover zone from a failed run (which create_sdn will overwrite),
-                # and including it would falsely poison every iteration.
-                await self.sdn_commands.check_cidrs([candidate])
-                external_vnet = candidate
-                break
-            except ValueError:
-                continue
-
-        if external_vnet is None:
-            raise ValueError("Could not find a suitable external VNet CIDR")
+        # or any existing Proxmox CIDRs.
+        # Only exclude the sandbox_network — not modified_sandbox_vnet — because the
+        # sandbox CIDR may appear in a stale leftover Proxmox zone from a failed run
+        # (which create_sdn will overwrite), and including it would falsely poison
+        # every iteration inside find_non_overlapping_vnet_config.
+        external_vnet = await self.sdn_commands.find_non_overlapping_vnet_config(
+            exclude_networks=[sandbox_network],
+        )
 
         # allow_domains is intentionally cleared: this returned config is the
         # internal 2-vnet form (sandbox + external) with the gateway already
@@ -338,8 +305,6 @@ class InfraCommands(abc.ABC):
         6. Inject dnsmasq allowlist config and restart dnsmasq.
         7. Pre-resolve allowed domains into the nftables allowed_ips set.
         """
-        # vnet_aliases[0] = (sandbox_vnet_id, alias)
-        # vnet_aliases[1] = (ext_vnet_id, None)
         sandbox_vnet_id = vnet_aliases[0][0]
         external_vnet_id = vnet_aliases[1][0]
 
@@ -402,14 +367,14 @@ class InfraCommands(abc.ABC):
         # subnet config) wins the ARP race and all sandbox traffic hits the
         # bridge instead of the gateway VM's FORWARD chain.
         prefix_len = ip_network(sandbox_cidr).prefixlen
-        network_file = (
-            "[Match]\n"
-            f"MACAddress={gateway_mac}\n"
-            "\n"
-            "[Network]\n"
-            "DHCP=no\n"
-            f"Address={gateway_ip}/{prefix_len}\n"
-        )
+        network_file = f"""\
+[Match]
+MACAddress={gateway_mac}
+
+[Network]
+DHCP=no
+Address={gateway_ip}/{prefix_len}
+"""
         await agent_commands.write_file(
             vm_id=new_vm_id,
             content=network_file.encode("utf-8"),
@@ -517,8 +482,9 @@ class InfraCommands(abc.ABC):
         await wait_for_dnsmasq_restart()
 
         # Seed the nftables allowed_ips set by resolving the allowed domains now,
-        # rather than waiting for the first DNS query (which requires dnsmasq nftset
-        # support that Debian 13's package may not have compiled in).
+        # before the first DNS query.  nftset= would do this dynamically, but
+        # pre-resolving at provision time is simpler and doesn't require dnsmasq
+        # to stay running before traffic is attempted.
         pre_resolve = _pre_resolve_script(allow_domains)
         await agent_commands.write_file(
             vm_id=new_vm_id,
@@ -569,16 +535,9 @@ class InfraCommands(abc.ABC):
             allow_domains = sdn_config.allow_domains
 
         if allow_domains:
-            # FIXME: the branch below is dead code.  `allow_domains` is only
-            # populated when `isinstance(sdn_config, SdnConfig)` (line above),
-            # so `sdn_config == "auto"` is always False here.  The original
-            # intent was probably to support allow_domains on auto-generated
-            # configs (where the user wants filtering but doesn't care about
-            # specific CIDRs).  That would require either a separate top-level
-            # allow_domains field on ProxmoxSandboxEnvironmentConfig, or a
-            # different code path.  Left for future work.
-            if sdn_config == "auto":
-                sdn_config = await self.sdn_commands.generate_sdn_config()
+            # allow_domains requires an explicit SdnConfig (not "auto").  Supporting
+            # allow_domains with auto-generated CIDRs would require a separate
+            # allow_domains field on ProxmoxSandboxEnvironmentConfig; left for future work.
             assert isinstance(sdn_config, SdnConfig)
             sdn_config = await self._prepare_sdn_for_gateway(sdn_config)
 

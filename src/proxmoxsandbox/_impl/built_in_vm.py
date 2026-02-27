@@ -1,4 +1,5 @@
 import abc
+import importlib.resources
 import os
 import re
 import subprocess
@@ -60,50 +61,11 @@ GATEWAY_VM_TAG = "gateway"
 # reachable from sandbox VMs on the same vnet, so minimising listening services
 # reduces the attack surface a compromised sandbox can reach.  Do not add SSH or
 # other management daemons to this image.
-GATEWAY_CLOUD_INIT = """\
-#cloud-config
-packages:
-  - qemu-guest-agent
-  - dnsmasq
-  - nftables
-  - iproute2
-  - python3-dnspython
-
-write_files:
-  - path: /etc/nftables.conf
-    permissions: "0644"
-    content: |
-      #!/usr/sbin/nft -f
-      flush ruleset
-      # Fail-closed default: no forwarding until provisioner injects the allowlist.
-      table inet gateway {
-        chain forward {
-          type filter hook forward priority filter; policy drop;
-        }
-      }
-  - path: /etc/dnsmasq.d/base.conf
-    permissions: "0644"
-    content: |
-      # No global upstream — only domains in allowlist.conf are resolved.
-      # Per-domain server= and nftset= entries are injected at provision time.
-      no-resolv
-  - path: /etc/dnsmasq.d/allowlist.conf
-    permissions: "0644"
-    content: |
-      # Placeholder — replaced at provision time with per-eval domain allowlist.
-  - path: /etc/sysctl.d/99-gateway.conf
-    permissions: "0644"
-    content: |
-      net.ipv4.ip_forward = 1
-
-runcmd:
-  - [ systemctl, enable, qemu-guest-agent ]
-  - [ systemctl, start, qemu-guest-agent ]
-  - [ sysctl, -p, /etc/sysctl.d/99-gateway.conf ]
-  - [ systemctl, enable, nftables ]
-  - [ systemctl, enable, dnsmasq ]
-  - [ systemctl, mask, systemd-networkd-wait-online.service ]
-"""
+GATEWAY_CLOUD_INIT = (
+    importlib.resources.files("proxmoxsandbox._impl._resources")
+    .joinpath("gateway-cloud-init.yaml")
+    .read_text(encoding="utf-8")
+)
 
 STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
 

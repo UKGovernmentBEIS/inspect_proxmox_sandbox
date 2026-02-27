@@ -38,7 +38,7 @@ class SubnetConfig(BaseModel, frozen=True):
     """
 
     cidr: IPvAnyNetwork
-    gateway: IPvAnyAddress
+    gateway: Optional[IPvAnyAddress] = None
     snat: bool
     dhcp_ranges: Tuple[DhcpRange, ...]
 
@@ -76,16 +76,16 @@ class SdnConfig(BaseModel, frozen=True):
             nftables (IP-level). The gateway VM is outside the sandbox VM, so root
             inside the sandbox cannot bypass it.
 
-            Wildcard subdomains are supported: "debian.org" covers both debian.org and
-            all *.debian.org subdomains — no "*."-prefix needed. Leave empty (the
+            Subdomains must be listed explicitly: "gnu.org" does NOT cover
+            "ftp.gnu.org" — list each subdomain you need. Leave empty (the
             default) for unrestricted internet access.
 
             When allow_domains is non-empty:
             - snat on sandbox subnets is set to False (the gateway VM does NAT)
             - An extra internal VNet is created for the gateway VM's external interface
             - Sandbox VMs learn the gateway as their default router via DHCP
-            - The gateway IP in SubnetConfig is overridden to network-address+2; any
-              value you specify there will be silently replaced.
+            - The gateway IP in SubnetConfig must not be set (leave it as its default).
+              Setting it explicitly will raise a ValueError at construction time.
 
             Constraints (validated at construction time):
             - use_pve_ipam_dnsnmasq must be True
@@ -159,6 +159,13 @@ class SdnConfig(BaseModel, frozen=True):
                     f"the DHCP range {dhcp_range.start}–{dhcp_range.end}. "
                     "Adjust the DHCP range to exclude it (e.g. start at .10 or higher)."
                 )
+        if subnet.gateway is not None and ip_address(str(subnet.gateway)) != ip_address(gateway_vm_ip):
+            raise ValueError(
+                f"allow_domains: do not set the gateway in SubnetConfig manually. "
+                f"It will be automatically set to {gateway_vm_ip} (network-address+2). "
+                f"You specified {subnet.gateway}; either remove the gateway field or "
+                f"set it to {gateway_vm_ip}."
+            )
         return self
 
 
@@ -255,6 +262,9 @@ class VmConfig(BaseModel, frozen=True):
             This is applied to all virtual network interfaces.
         os_type: The OS type. If unset, defaults to "l26". Only for OVA. See
             https://pve.proxmox.com/wiki/Manual:_qm.conf for more details
+        firewall: if True, enables the Proxmox VM-level firewall on all NICs.
+            Proxmox firewall rules must be configured separately (e.g. via the UI or
+            Proxmox API). Defaults to False.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -273,6 +283,7 @@ class VmConfig(BaseModel, frozen=True):
     nics: Optional[Tuple[VmNicConfig, ...]] = None
     is_sandbox: bool = True
     uefi_boot: bool = False
+    firewall: bool = False
     disk_controller: Optional[Literal["scsi", "ide"]] = None
     nic_controller: Optional[Literal["virtio", "e1000"]] = None
     os_type: Optional[

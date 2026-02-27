@@ -8,16 +8,6 @@ Covers:
 3. Subdomain explicit listing — adding the subdomain explicitly does work.
 4. Non-HTTP ports to allowed IPs — all ports are permitted (IP-level filter).
 
-Pre-requisites:
-    A running Proxmox instance configured as described in README.md.
-    Environment variables set (see README.md "Requirements" section):
-        PROXMOX_HOST, PROXMOX_PORT, PROXMOX_USER, PROXMOX_REALM,
-        PROXMOX_PASSWORD, PROXMOX_NODE, PROXMOX_VERIFY_TLS
-
-Run with:
-    set -a; source .env; set +a
-    uv run pytest tests/proxmoxsandboxtest/test_allow_domains_manual.py -v -s
-
 Note: each test uses a distinct /24 subnet (10.77.10–13.0/24) so tests do not
 conflict with each other or with stale zones from interrupted previous runs.
 If CIDR conflicts are still reported, run `inspect sandbox cleanup proxmox` first.

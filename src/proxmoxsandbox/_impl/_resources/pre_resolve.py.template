@@ -1,0 +1,28 @@
+import subprocess
+try:
+    import dns.resolver as _dns
+    _dns_available = True
+except ImportError:
+    # python3-dnspython not installed (old gateway template).
+    # Falls back to system resolver, which may return different IPs than dnsmasq.
+    import socket
+    _dns_available = False
+domains = {domains_repr}
+ips = []
+if _dns_available:
+    resolver = _dns.Resolver()
+    resolver.nameservers = ['8.8.8.8']
+    for d in domains:
+        try:
+            ips.extend(str(r) for r in resolver.resolve(d, 'A'))
+        except Exception:
+            pass
+else:
+    for d in domains:
+        try:
+            ips.extend(r[4][0] for r in socket.getaddrinfo(d, None, socket.AF_INET))
+        except Exception:
+            pass
+if ips:
+    nft_in = 'add element inet gateway allowed_ips { ' + ', '.join(ips) + ' }'
+    subprocess.run(['nft', '-f', '-'], input=nft_in, text=True, check=True)

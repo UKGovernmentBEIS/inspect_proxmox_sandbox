@@ -1,7 +1,7 @@
 import abc
 import re
 from contextvars import ContextVar
-from ipaddress import ip_address, ip_network
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from logging import getLogger
 from random import shuffle
 from typing import Collection, List, Optional, Sequence, Set, Tuple, TypeAlias
@@ -153,6 +153,46 @@ class SdnCommands(abc.ABC):
             alias=alias,
         )
 
+    async def find_non_overlapping_vnet_config(
+        self,
+        exclude_networks: Optional[List[IPv4Network | IPv6Network]] = None,
+        alias: Optional[str] = None,
+    ) -> VnetConfig:
+        """Find a free 192.168.x.0/24 CIDR that doesn't conflict with existing ones.
+
+        Shuffles the third-octet space (2–252) to spread allocations randomly,
+        skips any candidate that overlaps with `exclude_networks`, and rejects
+        candidates that clash with CIDRs already registered in Proxmox.
+
+        Args:
+            exclude_networks: additional networks the result must not overlap with
+                (e.g. the sandbox CIDR when picking an external VNet CIDR).
+            alias: optional alias to assign to the returned VnetConfig.
+
+        Returns:
+            A VnetConfig whose CIDR doesn't overlap with `exclude_networks` or
+            any existing Proxmox simple-zone CIDR.
+
+        Raises:
+            ValueError: if no suitable CIDR can be found after exhausting all
+                third-octet candidates.
+        """
+        exclude = exclude_networks or []
+        try_third_octets = list(range(2, 253))
+        # Deliberately randomize the IP address range to avoid brittle evals.
+        shuffle(try_third_octets)
+        for third_octet in try_third_octets:
+            candidate = self.simple_vnet_config(third_octet=third_octet, alias=alias)
+            candidate_cidr = ip_network(str(candidate.subnets[0].cidr))
+            if any(candidate_cidr.overlaps(net) for net in exclude):
+                continue
+            try:
+                await self.check_cidrs([candidate])
+                return candidate
+            except ValueError:
+                continue
+        raise ValueError("Could not find a suitable IP range for the SDN")
+
     async def generate_sdn_config(
         self, aliases: Tuple[Optional[str], ...] = ()
     ) -> SdnConfig:
@@ -161,24 +201,8 @@ class SdnCommands(abc.ABC):
 
         vnet_configs: List[VnetConfig] = []
         for alias in aliases:
-            try_third_octets = list(range(2, 253))
-            # Deliberately randomize the IP address range you get if you don't specify
-            # one. This is to avoid brittle evals.
-            shuffle(try_third_octets)
-            ok_vnet_config = None
-            for third_octet in try_third_octets:
-                try_vnet_config = self.simple_vnet_config(
-                    third_octet=third_octet, alias=alias
-                )
-                try:
-                    await self.check_cidrs(vnet_configs=[try_vnet_config])
-                    ok_vnet_config = try_vnet_config
-                    vnet_configs.append(ok_vnet_config)
-                    break
-                except ValueError:
-                    continue
-            if ok_vnet_config is None:
-                raise ValueError("Could not find a suitable IP range for the SDN")
+            vnet_config = await self.find_non_overlapping_vnet_config(alias=alias)
+            vnet_configs.append(vnet_config)
             # There is obviously a race condition here. Another eval could sneak in and
             # create a clashing IP range.
             # We could use a 10.*/24 range instead, which would give us many more ranges
@@ -280,15 +304,19 @@ class SdnCommands(abc.ABC):
                 )
 
                 for subnet in vnet_config.subnets:
+                    subnet_json: dict = {
+                        "subnet": str(subnet.cidr),
+                        "type": "subnet",
+                        "vnet": vnet_id,
+                        "snat": subnet.snat,
+                    }
+                    if subnet.gateway is not None:
+                        subnet_json["gateway"] = str(subnet.gateway)
                     await self.async_proxmox.request(
                         "POST",
                         f"/cluster/sdn/vnets/{vnet_id}/subnets",
                         json={
-                            "subnet": str(subnet.cidr),
-                            "type": "subnet",
-                            "vnet": vnet_id,
-                            "gateway": str(subnet.gateway),
-                            "snat": subnet.snat,
+                            **subnet_json,
                             "dhcp-range": list(
                                 dhcp_range._to_proxmox_format()
                                 for dhcp_range in subnet.dhcp_ranges
