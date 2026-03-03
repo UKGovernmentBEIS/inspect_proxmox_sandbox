@@ -7,6 +7,7 @@ from logging import getLogger
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Generator, List, Tuple, Type, Union
 
+import httpx
 import tenacity
 from inspect_ai.util import (
     ExecResult,
@@ -44,6 +45,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     logger = getLogger(__name__)
 
     TRACE_NAME = "proxmox_sandbox_environment"
+
+    # 40KB chunks — safe limit for QEMU guest agent API, accounting for
+    # base64 encoding overhead. Based on the Proxmox <=8.3 limit of 60KB.
+    CHUNK_SIZE = 40 * 1024
 
     proxmox_pool: Type[ProxmoxPoolABC] = QueueBasedProxmoxPool
 
@@ -793,14 +798,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # Writes contents to file, handling large files by splitting them into chunks
         # and recombining using cat (Linux) or copy /b (Windows).
 
-        CHUNK_SIZE = (
-            40 * 1024
-        )  # 40KB chunks to be safe, to take base64 encoding into account
-        # note this 40KB limit was based on the Proxmox <=8.3 limit of
-        # 60Kb, but this was increased in Proxmox 8.4, so could
-        # potentially be increased here. Would need to check the
-        # version number to ensure backward compatibility.
-
         is_windows = self._is_windows()
 
         # Create parent directory
@@ -815,13 +812,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
 
         # If content is small enough, write directly
-        if len(contents) <= CHUNK_SIZE:
+        if len(contents) <= self.CHUNK_SIZE:
             await self._write_file_only(file, contents)
             return
 
         # For large contents, split into chunks
         chunks = [
-            contents[i : i + CHUNK_SIZE] for i in range(0, len(contents), CHUNK_SIZE)
+            contents[i : i + self.CHUNK_SIZE]
+            for i in range(0, len(contents), self.CHUNK_SIZE)
         ]
 
         # Calculate padding width based on number of chunks
@@ -874,19 +872,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 await self._write_file_only(combine_script_path, combine_script)
                 await self.exec(cmd=["sh", combine_script_path])
 
-            # Debug: verify the reassembled file exists and has the expected size
-            expected_size = len(contents)
-            verify_result = await self.exec(
-                cmd=["sh", "-c", f"ls -la {file} && wc -c < {file} && md5sum {file}"]
-            )
-            self.logger.info(
-                f"[sandbox] write_file chunked verification vm={self.vm_id} {file} "
-                f"(expected {expected_size} bytes): "
-                f"stdout={verify_result.stdout.strip()!r} "
-                f"stderr={verify_result.stderr.strip()!r} "
-                f"returncode={verify_result.returncode}"
-            )
-
         finally:
             if is_windows:
                 await self.exec(cmd=["cmd.exe", "/c", f'rmdir /s /q "{temp_dir}"'])
@@ -933,11 +918,16 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     )
                     raise ex
             else:
+                # Non-"Agent error" failures (e.g. HTTP 597 Broken pipe)
+                # indicate the QEMU guest agent connection dropped, likely
+                # because the file is too large for a single transfer.
+                # Fall back to chunked reading.
                 self.logger.warning(
                     f"[sandbox] read_file vm={self.vm_id} {file} "
-                    f"non-Agent error: {type(ex).__name__}: {ex}"
+                    f"connection error, falling back to chunked read: "
+                    f"{type(ex).__name__}: {ex}"
                 )
-                raise ex
+                return await self._read_file_chunked(file, text)
         if (
             getattr(read_get_response, "truncated", False)
             or len(read_get_response["content"])
@@ -950,6 +940,159 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             return bytes_data.decode("utf-8")
         else:
             return bytes_data
+
+    async def _read_file_chunked(
+        self, file: str, text: bool = True
+    ) -> Union[str, bytes]:
+        """Read a large file by splitting it into chunks on the VM.
+
+        Activated as a fallback when the direct read_file fails due to the
+        QEMU guest agent connection dropping for large files.
+        """
+        assert self.vm_id is not None
+        is_windows = self._is_windows()
+
+        # Get file size
+        if is_windows:
+            size_result = await self.exec(
+                cmd=["powershell", "-Command", f"(Get-Item '{file}').Length"],
+                timeout=30,
+            )
+        else:
+            size_result = await self.exec(
+                cmd=["sh", "-c", f"wc -c < {shlex.quote(file)}"],
+                timeout=30,
+            )
+
+        if not size_result.success:
+            stderr = size_result.stderr.strip()
+            if "No such file or directory" in stderr or "cannot find" in stderr.lower():
+                raise FileNotFoundError(
+                    errno.ENOENT, "No such file or directory.", file
+                )
+            raise RuntimeError(
+                f"Failed to get file size for {file}: "
+                f"returncode={size_result.returncode} stderr={stderr}"
+            )
+
+        file_size = int(size_result.stdout.strip())
+        max_size = min(SandboxEnvironmentLimits.MAX_READ_FILE_SIZE, 16777216)
+        if file_size > max_size:
+            raise OutputLimitExceededError("Output size exceeds 16 MiB limit.", file)
+
+        self.logger.info(
+            f"[sandbox] read_file_chunked START vm={self.vm_id} {file} "
+            f"({file_size} bytes)"
+        )
+
+        num_chunks = (file_size + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
+        padding_width = len(str(num_chunks - 1))
+
+        if is_windows:
+            temp_dir = f"C:\\Windows\\Temp\\{__name__}_read_file_{time.time_ns()}_split"
+        else:
+            temp_dir = f"/tmp/{__name__}_read_file_{time.time_ns()}_split"
+
+        try:
+            # Create temp directory
+            if is_windows:
+                await self.exec(
+                    cmd=[
+                        "cmd.exe",
+                        "/c",
+                        f'if not exist "{temp_dir}" mkdir "{temp_dir}"',
+                    ]
+                )
+            else:
+                await self.exec(cmd=["mkdir", "-p", "--", temp_dir])
+
+            # Split file into chunks on the VM
+            if is_windows:
+                ps_script = (
+                    f"$bytes = [System.IO.File]::ReadAllBytes('{file}');\n"
+                    f"$chunkSize = {self.CHUNK_SIZE};\n"
+                    f"$i = 0;\n"
+                    f"$offset = 0;\n"
+                    f"while ($offset -lt $bytes.Length) {{\n"
+                    f"  $len = [Math]::Min($chunkSize, $bytes.Length - $offset);\n"
+                    f"  $chunk = New-Object byte[] $len;\n"
+                    f"  [Array]::Copy($bytes, $offset, $chunk, 0, $len);\n"
+                    f"  $name = 'chunk_' + $i.ToString().PadLeft({padding_width}, '0');\n"
+                    f"  [System.IO.File]::WriteAllBytes('{temp_dir}\\' + $name, $chunk);\n"
+                    f"  $offset += $chunkSize;\n"
+                    f"  $i++;\n"
+                    f"}}\n"
+                )
+                split_result = await self.exec(
+                    cmd=["powershell", "-Command", ps_script],
+                    timeout=120,
+                )
+            else:
+                split_script = (
+                    f"CHUNK_SIZE={self.CHUNK_SIZE}\n"
+                    f"FILE={shlex.quote(file)}\n"
+                    f"TEMP_DIR={shlex.quote(temp_dir)}\n"
+                    f"FILE_SIZE=$(wc -c < \"$FILE\")\n"
+                    f"i=0\n"
+                    f"offset=0\n"
+                    f"while [ $offset -lt $FILE_SIZE ]; do\n"
+                    f'  CHUNK_NAME=$(printf "chunk_%0{padding_width}d" $i)\n'
+                    f'  dd if="$FILE" of="$TEMP_DIR/$CHUNK_NAME"'
+                    f" bs=$CHUNK_SIZE skip=$i count=1 2>/dev/null\n"
+                    f"  i=$((i + 1))\n"
+                    f"  offset=$((offset + CHUNK_SIZE))\n"
+                    f"done\n"
+                )
+                split_script_path = f"{temp_dir}/split.sh"
+                await self._write_file_only(split_script_path, split_script)
+                split_result = await self.exec(
+                    cmd=["sh", split_script_path],
+                    timeout=120,
+                )
+
+            if not split_result.success:
+                raise RuntimeError(
+                    f"Failed to split file {file} into chunks: "
+                    f"returncode={split_result.returncode} "
+                    f"stderr={split_result.stderr.strip()}"
+                )
+
+            # Read each chunk individually
+            all_bytes = []
+            for i in range(num_chunks):
+                if is_windows:
+                    chunk_path = f"{temp_dir}\\chunk_{i:0{padding_width}d}"
+                else:
+                    chunk_path = f"{temp_dir}/chunk_{i:0{padding_width}d}"
+
+                chunk_response = await self.agent_commands.read_file(
+                    vm_id=self.vm_id,
+                    filepath=chunk_path,
+                    max_size=self.CHUNK_SIZE + 4096,
+                )
+                chunk_bytes = chunk_response["content"].encode("iso-8859-1")
+                all_bytes.append(chunk_bytes)
+
+            # Reassemble locally
+            bytes_data = b"".join(all_bytes)
+
+            self.logger.info(
+                f"[sandbox] read_file_chunked OK vm={self.vm_id} {file} "
+                f"reassembled {len(bytes_data)} bytes from {num_chunks} chunks"
+            )
+
+            if text:
+                return bytes_data.decode("utf-8")
+            else:
+                return bytes_data
+
+        finally:
+            if is_windows:
+                await self.exec(
+                    cmd=["cmd.exe", "/c", f'rmdir /s /q "{temp_dir}"']
+                )
+            else:
+                await self.exec(cmd=["rm", "-rf", temp_dir])
 
     @override
     async def connection(self) -> SandboxConnection:
