@@ -874,6 +874,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 await self._write_file_only(combine_script_path, combine_script)
                 await self.exec(cmd=["sh", combine_script_path])
 
+            # Debug: verify the reassembled file exists and has the expected size
+            expected_size = len(contents)
+            verify_result = await self.exec(
+                cmd=["sh", "-c", f"ls -la {file} && wc -c < {file} && md5sum {file}"]
+            )
+            self.logger.info(
+                f"[sandbox] write_file chunked verification vm={self.vm_id} {file} "
+                f"(expected {expected_size} bytes): "
+                f"stdout={verify_result.stdout.strip()!r} "
+                f"stderr={verify_result.stderr.strip()!r} "
+                f"returncode={verify_result.returncode}"
+            )
+
         finally:
             if is_windows:
                 await self.exec(cmd=["cmd.exe", "/c", f'rmdir /s /q "{temp_dir}"'])
