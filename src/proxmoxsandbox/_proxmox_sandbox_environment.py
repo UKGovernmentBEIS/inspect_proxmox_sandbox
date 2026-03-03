@@ -889,6 +889,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         """
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
+        self.logger.info(f"[sandbox] read_file START vm={self.vm_id} {file}")
         # Note, per https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vm_id}/agent/file-read
         # read from proxmox API is limited to 16777216 bytes
         try:
@@ -904,14 +905,25 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 #   Linux:   "No such file or directory"
                 #   Windows: "The system cannot find the path specified"
                 if "No such file or directory" in ex_str or "cannot find the path" in ex_str.lower():
+                    self.logger.info(
+                        f"[sandbox] read_file vm={self.vm_id} {file} -> FileNotFoundError"
+                    )
                     raise FileNotFoundError(
                         errno.ENOENT, "No such file or directory.", file
                     )
                 elif "Is a directory" in ex_str:
                     raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
                 else:
+                    self.logger.warning(
+                        f"[sandbox] read_file vm={self.vm_id} {file} "
+                        f"unhandled Agent error: {ex}"
+                    )
                     raise ex
             else:
+                self.logger.warning(
+                    f"[sandbox] read_file vm={self.vm_id} {file} "
+                    f"non-Agent error: {type(ex).__name__}: {ex}"
+                )
                 raise ex
         if (
             getattr(read_get_response, "truncated", False)
