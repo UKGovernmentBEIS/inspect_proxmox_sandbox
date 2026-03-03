@@ -773,11 +773,15 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
         except Exception as ex:
             if "Agent error" in str(ex):
-                if "No such file or directory" in str(ex):
+                ex_str = str(ex)
+                # QEMU guest agent returns platform-specific error messages:
+                #   Linux:   "No such file or directory"
+                #   Windows: "The system cannot find the path specified"
+                if "No such file or directory" in ex_str or "cannot find the path" in ex_str.lower():
                     raise FileNotFoundError(
                         errno.ENOENT, "No such file or directory.", file
                     )
-                elif "Is a directory" in str(ex):
+                elif "Is a directory" in ex_str:
                     raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
                 else:
                     raise ex
@@ -895,11 +899,15 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
         except Exception as ex:
             if "Agent error" in str(ex):
-                if "No such file or directory" in str(ex):
+                ex_str = str(ex)
+                # QEMU guest agent returns platform-specific error messages:
+                #   Linux:   "No such file or directory"
+                #   Windows: "The system cannot find the path specified"
+                if "No such file or directory" in ex_str or "cannot find the path" in ex_str.lower():
                     raise FileNotFoundError(
                         errno.ENOENT, "No such file or directory.", file
                     )
-                elif "Is a directory" in str(ex):
+                elif "Is a directory" in ex_str:
                     raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
                 else:
                     raise ex
