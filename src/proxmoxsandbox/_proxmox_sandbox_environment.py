@@ -45,10 +45,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
     TRACE_NAME = "proxmox_sandbox_environment"
 
-    # 40KB chunks — safe limit for QEMU guest agent API, accounting for
-    # base64 encoding overhead. Based on the Proxmox <=8.3 limit of 60KB.
-    CHUNK_SIZE = 40 * 1024
-
     proxmox_pool: Type[ProxmoxPoolABC] = QueueBasedProxmoxPool
 
     # Instance variables
@@ -764,6 +760,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             raise ValueError("Return code file is empty")
         return int(returncode_string_stripped)
 
+    # Platform-specific "file not found" messages from the QEMU guest agent.
+    _FILE_NOT_FOUND_ERRORS = [
+        "No such file or directory",  # Linux
+        "cannot find the path",  # Windows
+    ]
+
     async def _write_file_only(self, file: str, contents: str | bytes) -> None:
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
@@ -778,13 +780,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         except Exception as ex:
             if "Agent error" in str(ex):
                 ex_str = str(ex)
-                # QEMU guest agent returns platform-specific error messages:
-                #   Linux:   "No such file or directory"
-                #   Windows: "The system cannot find the path specified"
-                if "No such file or directory" in ex_str or "cannot find the path" in ex_str.lower():
-                    raise FileNotFoundError(
-                        errno.ENOENT, "No such file or directory.", file
-                    )
+                matched = next(
+                    (err for err in self._FILE_NOT_FOUND_ERRORS if err in ex_str), None
+                )
+                if matched:
+                    raise FileNotFoundError(errno.ENOENT, matched, file)
                 elif "Is a directory" in ex_str:
                     raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
                 else:
@@ -810,15 +810,22 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())]
             )
 
+        CHUNK_SIZE = (
+            40 * 1024
+        )  # 40KB chunks to be safe, to take base64 encoding into account
+        # note this 40KB limit was based on the Proxmox <=8.3 limit of
+        # 60Kb, but this was increased in Proxmox 8.4, so could
+        # potentially be increased here. Would need to check the
+        # version number to ensure backward compatibility.
+
         # If content is small enough, write directly
-        if len(contents) <= self.CHUNK_SIZE:
+        if len(contents) <= CHUNK_SIZE:
             await self._write_file_only(file, contents)
             return
 
         # For large contents, split into chunks
         chunks = [
-            contents[i : i + self.CHUNK_SIZE]
-            for i in range(0, len(contents), self.CHUNK_SIZE)
+            contents[i : i + CHUNK_SIZE] for i in range(0, len(contents), CHUNK_SIZE)
         ]
 
         # Calculate padding width based on number of chunks
@@ -897,13 +904,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         except Exception as ex:
             if "Agent error" in str(ex):
                 ex_str = str(ex)
-                # QEMU guest agent returns platform-specific error messages:
-                #   Linux:   "No such file or directory"
-                #   Windows: "The system cannot find the path specified"
-                if "No such file or directory" in ex_str or "cannot find the path" in ex_str.lower():
-                    raise FileNotFoundError(
-                        errno.ENOENT, "No such file or directory.", file
-                    )
+                matched = next(
+                    (err for err in self._FILE_NOT_FOUND_ERRORS if err in ex_str), None
+                )
+                if matched:
+                    raise FileNotFoundError(errno.ENOENT, matched, file)
                 elif "Is a directory" in ex_str:
                     raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
                 else:

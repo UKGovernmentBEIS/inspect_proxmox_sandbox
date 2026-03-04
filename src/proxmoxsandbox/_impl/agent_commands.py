@@ -26,12 +26,9 @@ _QGA_RETRY_DELAY = 3  # seconds
 
 # Permanent errors from the QEMU guest agent that should NOT be retried.
 # These indicate the command was delivered but the operation itself failed.
-# Platform-specific variants:
-#   Linux:   "No such file or directory"
-#   Windows: "The system cannot find the path specified"
 _QGA_PERMANENT_ERRORS = [
-    "No such file or directory",
-    "cannot find the path",
+    "No such file or directory",  # Linux
+    "cannot find the path",  # Windows
 ]
 
 
@@ -61,8 +58,7 @@ class AgentCommands:
             try:
                 return await coro_fn()
             except httpx.HTTPStatusError as e:
-                is_transient = self._is_transient_qga_error(e)
-                if attempt < _QGA_MAX_RETRIES and is_transient:
+                if attempt < _QGA_MAX_RETRIES and self._is_transient_qga_error(e):
                     self.logger.warning(
                         f"{label} failed (attempt {attempt}/{_QGA_MAX_RETRIES}), "
                         f"retrying in {_QGA_RETRY_DELAY}s: {e}"
