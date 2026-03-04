@@ -1,6 +1,5 @@
 import base64
 import errno
-import hashlib
 import re
 import shlex
 import time
@@ -8,7 +7,6 @@ from logging import getLogger
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Generator, List, Tuple, Type, Union
 
-import httpx
 import tenacity
 from inspect_ai.util import (
     ExecResult,
@@ -93,7 +91,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.instance = instance
         self.pool_id = pool_id
         self.os_type = os_type
-        self._written_file_md5: dict[str, str] = {}
 
     # originally from k8s sandbox
     def _pipe_user_input(self, stdin: str | bytes) -> str:
@@ -813,17 +810,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())]
             )
 
-        # Record md5 of local content before transfer for later verification
-        content_bytes = (
-            contents if isinstance(contents, bytes) else contents.encode("utf-8")
-        )
-        local_md5 = hashlib.md5(content_bytes).hexdigest()
-        self._written_file_md5[file] = local_md5
-        self.logger.info(
-            f"[sandbox] write_file vm={self.vm_id} {file} "
-            f"local_md5={local_md5} ({len(content_bytes)} bytes)"
-        )
-
         # If content is small enough, write directly
         if len(contents) <= self.CHUNK_SIZE:
             await self._write_file_only(file, contents)
@@ -931,16 +917,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     )
                     raise ex
             else:
-                # Non-"Agent error" failures (e.g. HTTP 597 Broken pipe)
-                # indicate the QEMU guest agent connection dropped, likely
-                # because the file is too large for a single transfer.
-                # Verify the file exists via md5sum instead of reading it back.
-                self.logger.warning(
-                    f"[sandbox] read_file vm={self.vm_id} {file} "
-                    f"connection error, falling back to md5sum verification: "
-                    f"{type(ex).__name__}: {ex}"
-                )
-                return await self._verify_file_via_md5(file, text)
+                raise ex
         if (
             getattr(read_get_response, "truncated", False)
             or len(read_get_response["content"])
@@ -953,76 +930,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             return bytes_data.decode("utf-8")
         else:
             return bytes_data
-
-    async def _verify_file_via_md5(
-        self, file: str, text: bool = True
-    ) -> Union[str, bytes]:
-        """Verify a large file exists and is correct via md5sum, without reading it.
-
-        The QEMU guest agent file-read API cannot handle large files (~15MB+)
-        in a single transfer — the connection breaks with HTTP 597 Broken pipe.
-        Instead of reading the file back, we verify it via md5sum on the VM.
-
-        TODO: implement proper chunked read_file (symmetric to chunked
-        write_file) so this method returns actual file contents. Currently
-        returns a small placeholder since the only caller that hits this path
-        (_is_file_readable in inspect_ai) discards the return value.
-        """
-        assert self.vm_id is not None
-        is_windows = self._is_windows()
-
-        if is_windows:
-            md5_result = await self.exec(
-                cmd=["powershell", "-Command",
-                     f"(Get-FileHash -Algorithm MD5 '{file}').Hash.ToLower()"],
-                timeout=30,
-            )
-        else:
-            md5_result = await self.exec(
-                cmd=["sh", "-c", f"md5sum {shlex.quote(file)} | cut -d' ' -f1"],
-                timeout=30,
-            )
-
-        if not md5_result.success:
-            stderr = md5_result.stderr.strip()
-            if "No such file or directory" in stderr or "cannot find" in stderr.lower():
-                raise FileNotFoundError(
-                    errno.ENOENT, "No such file or directory.", file
-                )
-            raise RuntimeError(
-                f"Failed to verify file {file}: "
-                f"returncode={md5_result.returncode} stderr={stderr}"
-            )
-
-        remote_md5 = md5_result.stdout.strip()
-        local_md5 = self._written_file_md5.get(file)
-
-        if local_md5 and local_md5 == remote_md5:
-            self.logger.info(
-                f"[sandbox] read_file md5 verification vm={self.vm_id} {file} "
-                f"OK — local_md5={local_md5} remote_md5={remote_md5}"
-            )
-        elif local_md5:
-            self.logger.error(
-                f"[sandbox] read_file md5 verification vm={self.vm_id} {file} "
-                f"MISMATCH — local_md5={local_md5} remote_md5={remote_md5}"
-            )
-            raise RuntimeError(
-                f"File verification failed for {file}: "
-                f"local md5 {local_md5} != remote md5 {remote_md5}"
-            )
-        else:
-            self.logger.info(
-                f"[sandbox] read_file md5 verification vm={self.vm_id} {file} "
-                f"remote_md5={remote_md5} (no local md5 to compare)"
-            )
-
-        # Return a small placeholder — the caller (_is_file_readable) only
-        # checks that read_file doesn't throw, it discards the content.
-        if text:
-            return f"md5:{remote_md5}"
-        else:
-            return f"md5:{remote_md5}".encode("utf-8")
 
     @override
     async def connection(self) -> SandboxConnection:
