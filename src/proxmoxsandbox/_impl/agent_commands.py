@@ -62,11 +62,6 @@ class AgentCommands:
                 return await coro_fn()
             except httpx.HTTPStatusError as e:
                 is_transient = self._is_transient_qga_error(e)
-                self.logger.info(
-                    f"{label} HTTP {e.response.status_code} "
-                    f"(attempt {attempt}/{_QGA_MAX_RETRIES}, "
-                    f"transient={is_transient}): {e}"
-                )
                 if attempt < _QGA_MAX_RETRIES and is_transient:
                     self.logger.warning(
                         f"{label} failed (attempt {attempt}/{_QGA_MAX_RETRIES}), "
@@ -97,49 +92,27 @@ class AgentCommands:
             # but encode=False doesn't work, nor does encode="false"
             "encode": 0,
         }
-        self.logger.info(
-            f"write_file START vm={vm_id} {filepath} ({len(content)} bytes)"
-        )
         with trace_action(
             self.logger,
             self.TRACE_NAME,
             f"write_file {vm_id=} {filepath=} {len(content)=}",
         ):
-            try:
-                result = await self._retry_on_qga_error(
-                    f"write_file vm={vm_id} {filepath}",
-                    lambda: self.async_proxmox.request("POST", path, json=data),
-                )
-                self.logger.info(f"write_file OK vm={vm_id} {filepath}")
-                return result
-            except Exception as e:
-                self.logger.info(
-                    f"write_file FAILED vm={vm_id} {filepath}: "
-                    f"{type(e).__name__}: {e}"
-                )
-                raise
+            return await self._retry_on_qga_error(
+                f"write_file vm={vm_id} {filepath}",
+                lambda: self.async_proxmox.request("POST", path, json=data),
+            )
 
     async def exec_command(self, vm_id: int, command: List[str]):
         """Execute a command in the VM using QEMU agent."""
-        self.logger.info(f"exec_command START vm={vm_id} {command}")
         with trace_action(
             self.logger, self.TRACE_NAME, f"exec_command {vm_id=} {command=}"
         ):
             path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec"
             data: ProxmoxJsonDataType = {"command": command}
-            try:
-                result = await self._retry_on_qga_error(
-                    f"exec_command vm={vm_id}",
-                    lambda: self.async_proxmox.request("POST", path, json=data),
-                )
-                self.logger.info(f"exec_command OK vm={vm_id} {command}")
-                return result
-            except Exception as e:
-                self.logger.info(
-                    f"exec_command FAILED vm={vm_id} {command}: "
-                    f"{type(e).__name__}: {e}"
-                )
-                raise
+            return await self._retry_on_qga_error(
+                f"exec_command vm={vm_id}",
+                lambda: self.async_proxmox.request("POST", path, json=data),
+            )
 
     async def read_file_or_blank(
         self,
@@ -176,22 +149,12 @@ class AgentCommands:
             if max_size == SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
             else SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR
         )
-        self.logger.info(f"read_file START vm={vm_id} {filepath}")
-        try:
-            result = await self._retry_on_qga_error(
-                f"read_file vm={vm_id} {filepath}",
-                lambda: self.async_proxmox.read_file(
-                    self.node, vm_id, filepath, max_size, max_size_str
-                ),
-            )
-            self.logger.info(f"read_file OK vm={vm_id} {filepath}")
-            return result
-        except Exception as e:
-            self.logger.info(
-                f"read_file FAILED vm={vm_id} {filepath}: "
-                f"{type(e).__name__}: {e}"
-            )
-            raise
+        return await self._retry_on_qga_error(
+            f"read_file vm={vm_id} {filepath}",
+            lambda: self.async_proxmox.read_file(
+                self.node, vm_id, filepath, max_size, max_size_str
+            ),
+        )
 
     async def create_snapshot(self, vm_id: int, snapshot_name: str) -> None:
         path = f"/nodes/{self.node}/qemu/{vm_id}/snapshot"
