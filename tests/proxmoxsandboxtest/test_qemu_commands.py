@@ -161,7 +161,7 @@ async def test_existing_alias_from_built_in(
     assert "tea999" in new_vm["net0"]
 
     await qemu_commands.destroy_vm(new_vm_id)
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id)
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
 async def test_multiple_nic(
@@ -205,7 +205,7 @@ async def test_multiple_nic(
     assert vnet_aliases[0][1] == "vnetA"
 
     await qemu_commands.destroy_vm(new_vm_id)
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id)
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
 async def test_empty_nic_from_built_in(

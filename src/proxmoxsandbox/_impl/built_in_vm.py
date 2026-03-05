@@ -82,15 +82,12 @@ class BuiltInVM(abc.ABC):
         Raises:
             ValueError: If the Proxmox version is below the required version
         """
-        version_info = await self.async_proxmox.request(
-            "GET", f"/nodes/{self.node}/version"
-        )
-        version_string = version_info.get("version", "")
+        release_string = self.async_proxmox.get_discovered_proxmox_version().release
 
         # Parse version string (e.g., "8.2.2" or "9.0")
-        match = re.match(r"(\d+)\.(\d+)", version_string)
+        match = re.match(r"(\d+)\.(\d+)", release_string)
         if not match:
-            raise ValueError(f"Could not parse Proxmox version: {version_string}")
+            raise ValueError(f"Could not parse Proxmox version: {release_string}")
 
         major = int(match.group(1))
         minor = int(match.group(2))
@@ -99,7 +96,7 @@ class BuiltInVM(abc.ABC):
             major == required_major and minor < required_minor
         ):
             raise ValueError(
-                f"Proxmox version {version_string} does not meet minimum requirement "
+                f"Proxmox version {release_string} does not meet minimum requirement "
                 f"{required_major}.{required_minor}"
             )
 
@@ -411,13 +408,13 @@ runcmd:
                 download_path = os.path.join(self.cache_dir, download_filename)
                 with open(download_path, "wb") as f:
                     c = pycurl.Curl()
-                    c.setopt(c.URL, source_image_source_url)
-                    c.setopt(c.WRITEDATA, f)
-                    c.setopt(c.FOLLOWLOCATION, True)
-                    c.setopt(c.FAILONERROR, True)
+                    c.setopt(c.URL, source_image_source_url)  # type: ignore[attr-defined]
+                    c.setopt(c.WRITEDATA, f)  # type: ignore[attr-defined]
+                    c.setopt(c.FOLLOWLOCATION, True)  # type: ignore[attr-defined]
+                    c.setopt(c.FAILONERROR, True)  # type: ignore[attr-defined]
                     try:
                         c.perform()
-                        status_code = c.getinfo(c.RESPONSE_CODE)
+                        status_code = c.getinfo(c.RESPONSE_CODE)  # type: ignore[attr-defined]
                         if status_code >= 400:
                             raise ValueError(
                                 f"Download failed with status code: {status_code}"
