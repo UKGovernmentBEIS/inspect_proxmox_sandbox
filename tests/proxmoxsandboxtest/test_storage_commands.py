@@ -6,7 +6,7 @@ from typing import BinaryIO, cast
 import pycdlib
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.storage_commands import StorageCommands
+from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, StorageCommands
 
 
 async def test_upload_size_check_different(
@@ -118,7 +118,7 @@ async def test_upload_no_size_check(
 async def delete_existing_iso(storage_commands, async_proxmox_api, test_iso_name):
     await async_proxmox_api.request(
         method="DELETE",
-        path=f"/nodes/{storage_commands.node}/storage/{storage_commands.storage}/content/local:iso/{test_iso_name}",
+        path=f"/nodes/{storage_commands.node}/storage/{LOCAL_STORAGE}/content/local:iso/{test_iso_name}",
         raise_errors=True,  # this does *not* error if the file does not exist; rather this is a sanity check that the connection, auth etc. is working  # noqa: E501
     )
 
