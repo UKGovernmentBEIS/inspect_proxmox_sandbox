@@ -797,6 +797,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # Writes contents to file, handling large files by splitting them into chunks
         # and recombining using cat (Linux) or copy /b (Windows).
 
+        CHUNK_SIZE = (
+            40 * 1024
+        )  # 40KB chunks to be safe, to take base64 encoding into account
+        # note this 40KB limit was based on the Proxmox <=8.3 limit of
+        # 60Kb, but this was increased in Proxmox 8.4, so could
+        # potentially be increased here. Would need to check the
+        # version number to ensure backward compatibility.
+
         is_windows = self._is_windows()
 
         # Create parent directory
@@ -809,14 +817,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             await self.exec(
                 cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())]
             )
-
-        CHUNK_SIZE = (
-            40 * 1024
-        )  # 40KB chunks to be safe, to take base64 encoding into account
-        # note this 40KB limit was based on the Proxmox <=8.3 limit of
-        # 60Kb, but this was increased in Proxmox 8.4, so could
-        # potentially be increased here. Would need to check the
-        # version number to ensure backward compatibility.
 
         # If content is small enough, write directly
         if len(contents) <= CHUNK_SIZE:
