@@ -222,8 +222,8 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
         node: The name of the Proxmox node, usually 'proxmox'
         verify_tls: Whether to verify the Proxmox server's TLS certificate.
             1 = verify, 0 = do not verify
-        vm_storage_location: The Proxmox storage location for VM disks (e.g.
-            "local-lvm"). Defaults to the PROXMOX_STORAGE_LOCATION environment variable,
+        image_storage: The Proxmox storage pool for VM disk images (e.g.
+            "local-lvm"). Defaults to the PROXMOX_IMAGE_STORAGE environment variable,
             or "local-lvm" if not set, which is the default if you installed Proxmox
             normally.
         sdn_config: Software-defined networking configuration
@@ -248,8 +248,8 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
         default_factory=lambda: getenv("PROXMOX_VERIFY_TLS", "1") == "1"
     )
 
-    vm_storage_location: str = Field(
-        default_factory=lambda: getenv("PROXMOX_STORAGE_LOCATION", "local-lvm")
+    image_storage: str = Field(
+        default_factory=lambda: getenv("PROXMOX_IMAGE_STORAGE", "local-lvm")
     )
 
     sdn_config: SdnConfigType = "auto"

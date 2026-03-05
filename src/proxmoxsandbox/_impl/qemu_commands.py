@@ -15,7 +15,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     ProxmoxJsonDataType,
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
-from proxmoxsandbox._impl.storage_commands import StorageCommands
+from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, StorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
 
@@ -28,7 +28,6 @@ class QemuCommands(abc.ABC):
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
     image_storage: str
-    vm_storage_location: str
     storage_commands: StorageCommands
     node: str
 
@@ -43,14 +42,13 @@ class QemuCommands(abc.ABC):
         self,
         async_proxmox: AsyncProxmoxAPI,
         node: str,
-        vm_storage_location: str,
+        image_storage: str,
     ):
         self.async_proxmox = async_proxmox
         self.task_wrapper = TaskWrapper(async_proxmox)
-        self.image_storage = "local"
-        self.storage_commands = StorageCommands(async_proxmox, node, self.image_storage)
+        self.storage_commands = StorageCommands(async_proxmox, node)
         self.node = node
-        self.vm_storage_location = vm_storage_location
+        self.image_storage = image_storage
 
     async def await_vm(
         self,
@@ -255,7 +253,7 @@ class QemuCommands(abc.ABC):
                     # and may be brittle
                     for i, vmdk in enumerate(vmdks):
                         json_for_create[f"{disk_prefix}{i}"] = (
-                            f"{self.vm_storage_location}:0,import-from={self.image_storage}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
+                            f"{self.image_storage}:0,import-from={LOCAL_STORAGE}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
                         )
 
                     new_vm_template_id = await self.find_next_available_vm_id()
@@ -513,7 +511,7 @@ class QemuCommands(abc.ABC):
             json_for_create["name"] = vm_config.name
         if vm_config.uefi_boot:
             json_for_create["efidisk0"] = (
-                f"{self.vm_storage_location}:0,"
+                f"{self.image_storage}:0,"
                 "efitype=4m,pre-enrolled-keys=0"
             )
             json_for_create["bios"] = "ovmf"

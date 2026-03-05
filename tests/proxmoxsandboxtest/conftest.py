@@ -45,27 +45,27 @@ async def sdn_commands(async_proxmox_api: AsyncProxmoxAPI) -> SdnCommands:
 
 
 @pytest.fixture
-async def vm_storage_location(
+async def image_storage(
     sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
 ) -> str:
-    return sandbox_env_config.vm_storage_location
+    return sandbox_env_config.image_storage
 
 
 @pytest.fixture
 async def qemu_commands(
-    async_proxmox_api: AsyncProxmoxAPI, node: str, vm_storage_location: str
+    async_proxmox_api: AsyncProxmoxAPI, node: str, image_storage: str
 ) -> QemuCommands:
     return QemuCommands(
-        async_proxmox_api, node=node, vm_storage_location=vm_storage_location
+        async_proxmox_api, node=node, image_storage=image_storage
     )
 
 
 @pytest.fixture
 async def built_in_vm(
-    async_proxmox_api: AsyncProxmoxAPI, node: str, vm_storage_location: str
+    async_proxmox_api: AsyncProxmoxAPI, node: str, image_storage: str
 ) -> BuiltInVM:
     return BuiltInVM(
-        async_proxmox_api, node=node, vm_storage_location=vm_storage_location
+        async_proxmox_api, node=node, image_storage=image_storage
     )
 
 
@@ -73,7 +73,7 @@ async def built_in_vm(
 async def storage_commands(
     async_proxmox_api: AsyncProxmoxAPI, node: str
 ) -> StorageCommands:
-    return StorageCommands(async_proxmox_api, node=node, storage="local")
+    return StorageCommands(async_proxmox_api, node=node)
 
 
 @pytest.fixture(scope="function")

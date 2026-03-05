@@ -20,7 +20,7 @@ from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
-from proxmoxsandbox._impl.storage_commands import StorageCommands
+from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, StorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     DhcpRange,
@@ -53,25 +53,23 @@ class BuiltInVM(abc.ABC):
     sdn_commands: SdnCommands
     task_wrapper: TaskWrapper
     storage_commands: StorageCommands
-    storage: str
     node: str
 
     def __init__(
         self,
         async_proxmox: AsyncProxmoxAPI,
         node: str,
-        vm_storage_location: str,
+        image_storage: str,
     ):
         self.async_proxmox = async_proxmox
         self.task_wrapper = TaskWrapper(async_proxmox)
         self.qemu_commands = QemuCommands(
-            async_proxmox, node, vm_storage_location=vm_storage_location
+            async_proxmox, node, image_storage=image_storage
         )
         self.sdn_commands = SdnCommands(async_proxmox)
-        self.storage = "local"
-        self.storage_commands = StorageCommands(async_proxmox, node, self.storage)
+        self.storage_commands = StorageCommands(async_proxmox, node)
         self.node = node
-        self.vm_storage_location = vm_storage_location
+        self.image_storage = image_storage
         self.cache_dir = platformdirs.user_cache_path(
             appname="inspect_proxmox_sandbox", ensure_exists=True
         )
@@ -250,7 +248,7 @@ runcmd:
             await self.async_proxmox.request(
                 "POST",
                 f"/nodes/{self.node}/qemu/{vm_id}/config",
-                json={"ide2": f"{self.storage}:iso/{filename},media=cdrom"},
+                json={"ide2": f"{LOCAL_STORAGE}:iso/{filename},media=cdrom"},
             )
 
         await attach_to_vm()
@@ -272,7 +270,7 @@ runcmd:
                         if content["volid"].endswith(storage_name):
                             await self.async_proxmox.request(
                                 "DELETE",
-                                f"/nodes/{self.node}/storage/{self.storage}/content/{content['volid']}",
+                                f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
                             )
 
             existing_vms = await self.known_builtins()
@@ -311,7 +309,7 @@ runcmd:
     async def read_all_content(self):
         existing_content = await self.async_proxmox.request(
             "GET",
-            f"/nodes/{self.node}/storage/{self.storage}/content",
+            f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content",
         )
 
         return existing_content
@@ -471,7 +469,7 @@ runcmd:
             ):
                 await self.async_proxmox.request(
                     "POST",
-                    f"/nodes/{self.node}/storage/{self.storage}/download-url",
+                    f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/download-url",
                     json={
                         "content": "import",
                         "filename": source_image_name,
@@ -513,8 +511,8 @@ runcmd:
                         "memory": 8192,
                         "cores": 2,
                         "ostype": "l26",
-                        "scsi0": f"{self.vm_storage_location}:0,"
-                        + f"import-from={self.storage}:{import_source},"
+                        "scsi0": f"{self.image_storage}:0,"
+                        + f"import-from={LOCAL_STORAGE}:{import_source},"
                         + "format=qcow2,cache=writeback",
                         "scsihw": "virtio-scsi-single",
                         "net0": f"virtio,bridge={STATIC_VNET_ID}",

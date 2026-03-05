@@ -43,16 +43,16 @@ class InfraCommands(abc.ABC):
         self,
         async_proxmox: AsyncProxmoxAPI,
         node: str,
-        vm_storage_location: str,
+        image_storage: str,
     ):
         self.async_proxmox = async_proxmox
         self.task_wrapper = TaskWrapper(async_proxmox)
         self.sdn_commands = SdnCommands(async_proxmox)
         self.qemu_commands = QemuCommands(
-            async_proxmox, node, vm_storage_location=vm_storage_location
+            async_proxmox, node, image_storage=image_storage
         )
         self.built_in_vm = BuiltInVM(
-            async_proxmox, node, vm_storage_location=vm_storage_location
+            async_proxmox, node, image_storage=image_storage
         )
         self.node = node
 
