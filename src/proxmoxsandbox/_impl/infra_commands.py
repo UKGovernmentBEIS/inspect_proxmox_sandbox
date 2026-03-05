@@ -39,12 +39,21 @@ class InfraCommands(abc.ABC):
     built_in_vm: BuiltInVM
     node: str
 
-    def __init__(self, async_proxmox: AsyncProxmoxAPI, node: str):
+    def __init__(
+        self,
+        async_proxmox: AsyncProxmoxAPI,
+        node: str,
+        vm_storage_location: str,
+    ):
         self.async_proxmox = async_proxmox
         self.task_wrapper = TaskWrapper(async_proxmox)
         self.sdn_commands = SdnCommands(async_proxmox)
-        self.qemu_commands = QemuCommands(async_proxmox, node)
-        self.built_in_vm = BuiltInVM(async_proxmox, node)
+        self.qemu_commands = QemuCommands(
+            async_proxmox, node, vm_storage_location=vm_storage_location
+        )
+        self.built_in_vm = BuiltInVM(
+            async_proxmox, node, vm_storage_location=vm_storage_location
+        )
         self.node = node
 
     async def create_sdn_and_vms(

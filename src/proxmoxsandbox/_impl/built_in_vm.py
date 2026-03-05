@@ -56,14 +56,22 @@ class BuiltInVM(abc.ABC):
     storage: str
     node: str
 
-    def __init__(self, async_proxmox: AsyncProxmoxAPI, node: str):
+    def __init__(
+        self,
+        async_proxmox: AsyncProxmoxAPI,
+        node: str,
+        vm_storage_location: str,
+    ):
         self.async_proxmox = async_proxmox
         self.task_wrapper = TaskWrapper(async_proxmox)
-        self.qemu_commands = QemuCommands(async_proxmox, node)
+        self.qemu_commands = QemuCommands(
+            async_proxmox, node, vm_storage_location=vm_storage_location
+        )
         self.sdn_commands = SdnCommands(async_proxmox)
         self.storage = "local"
         self.storage_commands = StorageCommands(async_proxmox, node, self.storage)
         self.node = node
+        self.vm_storage_location = vm_storage_location
         self.cache_dir = platformdirs.user_cache_path(
             appname="inspect_proxmox_sandbox", ensure_exists=True
         )
@@ -505,7 +513,7 @@ runcmd:
                         "memory": 8192,
                         "cores": 2,
                         "ostype": "l26",
-                        "scsi0": "local-lvm:0,"
+                        "scsi0": f"{self.vm_storage_location}:0,"
                         + f"import-from={self.storage}:{import_source},"
                         + "format=qcow2,cache=writeback",
                         "scsihw": "virtio-scsi-single",

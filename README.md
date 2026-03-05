@@ -33,6 +33,7 @@ PROXMOX_REALM=[authentication realm, usually 'pam' unless you have configured cu
 PROXMOX_PASSWORD=[password]
 PROXMOX_NODE=[node name, usually 'proxmox']
 PROXMOX_VERIFY_TLS=[1 = verify, 0 = do not verify]
+PROXMOX_STORAGE_LOCATION=[storage location for VM disks, usually 'local-lvm']
 ```
 
 Your Proxmox instance must allow additional storage types in `local` from the default.
@@ -70,6 +71,7 @@ sandbox=SandboxEnvironmentSpec(
         password=[password]
         node=[node name, usually 'proxmox']
         verify_tls=[True: verify, False: do not verify]
+        vm_storage_location=[storage location for VM disks, default 'local-lvm']
         # End config from environment
 
         vms_config=(

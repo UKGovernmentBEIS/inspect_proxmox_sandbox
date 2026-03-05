@@ -63,11 +63,24 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         vm_id: int,
         all_vm_ids: Tuple[int, ...],
         sdn_zone_id: str | None,
+        vm_storage_location: str,
     ):
-        self.infra_commands = InfraCommands(async_proxmox=proxmox, node=node)
+        self.infra_commands = InfraCommands(
+            async_proxmox=proxmox,
+            node=node,
+            vm_storage_location=vm_storage_location,
+        )
         self.agent_commands = AgentCommands(async_proxmox=proxmox, node=node)
-        self.qemu_commands = QemuCommands(async_proxmox=proxmox, node=node)
-        self.built_in_vm = BuiltInVM(async_proxmox=proxmox, node=node)
+        self.qemu_commands = QemuCommands(
+            async_proxmox=proxmox,
+            node=node,
+            vm_storage_location=vm_storage_location,
+        )
+        self.built_in_vm = BuiltInVM(
+            async_proxmox=proxmox,
+            node=node,
+            vm_storage_location=vm_storage_location,
+        )
         self.task_wrapper = TaskWrapper(async_proxmox=proxmox)
         self.all_ipam_mappings = ipam_mappings
         self.sdn_config = sdn_config
@@ -143,7 +156,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     async def ensure_vms(
         async_proxmox_api: AsyncProxmoxAPI, config: ProxmoxSandboxEnvironmentConfig
     ) -> None:
-        built_in_vm = BuiltInVM(async_proxmox=async_proxmox_api, node=config.node)
+        built_in_vm = BuiltInVM(
+            async_proxmox=async_proxmox_api,
+            node=config.node,
+            vm_storage_location=config.vm_storage_location,
+        )
         built_in_names = set()
         for vm_config in config.vms_config:
             if vm_config.vm_source_config.built_in is not None:
@@ -189,7 +206,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         async_proxmox_api = cls._create_async_proxmox_api(config)
 
         infra_commands = InfraCommands(
-            async_proxmox=async_proxmox_api, node=config.node
+            async_proxmox=async_proxmox_api,
+            node=config.node,
+            vm_storage_location=config.vm_storage_location,
         )
 
         task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
@@ -228,6 +247,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 vm_id=vm_config_and_id[0],
                 all_vm_ids=vm_ids,
                 sdn_zone_id=sdn_zone_id,
+                vm_storage_location=config.vm_storage_location,
             )
             if not found_default and vm_config_and_id[1].is_sandbox:
                 sandboxes["default"] = vm_sandbox_environment
@@ -312,7 +332,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         if cleanup:
             infra_commands = InfraCommands(
-                async_proxmox=cls._create_async_proxmox_api(config), node=config.node
+                async_proxmox=cls._create_async_proxmox_api(config),
+                node=config.node,
+                vm_storage_location=config.vm_storage_location,
             )
             await infra_commands.task_cleanup()
         else:
@@ -328,7 +350,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             config = ProxmoxSandboxEnvironmentConfig()
             async_proxmox_api = cls._create_async_proxmox_api(config)
             infra_commands = InfraCommands(
-                async_proxmox=async_proxmox_api, node=config.node
+                async_proxmox=async_proxmox_api,
+                node=config.node,
+                vm_storage_location=config.vm_storage_location,
             )
             await infra_commands.cleanup_no_id()
         else:
