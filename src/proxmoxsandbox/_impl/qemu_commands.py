@@ -27,9 +27,8 @@ class QemuCommands(abc.ABC):
 
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
-    # TODO disambiguate that "this.storage" is for images rather than VM disks
-    # which continue to live in vm_storage_location (default: local-lvm)
-    storage: str
+    image_storage: str
+    vm_storage_location: str
     storage_commands: StorageCommands
     node: str
 
@@ -48,8 +47,8 @@ class QemuCommands(abc.ABC):
     ):
         self.async_proxmox = async_proxmox
         self.task_wrapper = TaskWrapper(async_proxmox)
-        self.storage = "local"
-        self.storage_commands = StorageCommands(async_proxmox, node, self.storage)
+        self.image_storage = "local"
+        self.storage_commands = StorageCommands(async_proxmox, node, self.image_storage)
         self.node = node
         self.vm_storage_location = vm_storage_location
 
@@ -256,7 +255,7 @@ class QemuCommands(abc.ABC):
                     # and may be brittle
                     for i, vmdk in enumerate(vmdks):
                         json_for_create[f"{disk_prefix}{i}"] = (
-                            f"{self.vm_storage_location}:0,import-from={self.storage}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
+                            f"{self.vm_storage_location}:0,import-from={self.image_storage}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
                         )
 
                     new_vm_template_id = await self.find_next_available_vm_id()
