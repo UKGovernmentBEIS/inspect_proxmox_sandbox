@@ -24,13 +24,6 @@ from proxmoxsandbox._impl.async_proxmox import (
 _QGA_MAX_RETRIES = 3
 _QGA_RETRY_DELAY = 3  # seconds
 
-# Permanent errors from the QEMU guest agent that should NOT be retried.
-# These indicate the command was delivered but the operation itself failed.
-_QGA_PERMANENT_ERRORS = [
-    "No such file or directory",  # Linux
-    "cannot find the path",  # Windows
-]
-
 
 class AgentCommands:
     logger = getLogger(__name__)
@@ -47,10 +40,7 @@ class AgentCommands:
     @staticmethod
     def _is_transient_qga_error(exc: httpx.HTTPStatusError) -> bool:
         """Check if an HTTP error is a transient QGA failure safe to retry."""
-        if exc.response.status_code != 500:
-            return False
-        msg = str(exc).lower()
-        return not any(err.lower() in msg for err in _QGA_PERMANENT_ERRORS)
+        return exc.response.status_code == 500
 
     async def _retry_on_qga_error(self, label: str, coro_fn):
         """Retry a coroutine function on transient QGA errors."""
