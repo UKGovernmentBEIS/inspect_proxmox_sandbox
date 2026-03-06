@@ -760,6 +760,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             raise ValueError("Return code file is empty")
         return int(returncode_string_stripped)
 
+    # Platform-specific "file not found" messages from the QEMU guest agent.
+    _FILE_NOT_FOUND_ERRORS = [
+        "No such file or directory",  # Linux
+        "cannot find the path",  # Windows
+    ]
+
     async def _write_file_only(self, file: str, contents: str | bytes) -> None:
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
@@ -773,11 +779,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
         except Exception as ex:
             if "Agent error" in str(ex):
-                if "No such file or directory" in str(ex):
-                    raise FileNotFoundError(
-                        errno.ENOENT, "No such file or directory.", file
-                    )
-                elif "Is a directory" in str(ex):
+                ex_str = str(ex)
+                matched = next(
+                    (err for err in self._FILE_NOT_FOUND_ERRORS if err in ex_str), None
+                )
+                if matched:
+                    raise FileNotFoundError(errno.ENOENT, matched, file)
+                elif "Is a directory" in ex_str:
                     raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
                 else:
                     raise ex
@@ -895,11 +903,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
         except Exception as ex:
             if "Agent error" in str(ex):
-                if "No such file or directory" in str(ex):
-                    raise FileNotFoundError(
-                        errno.ENOENT, "No such file or directory.", file
-                    )
-                elif "Is a directory" in str(ex):
+                ex_str = str(ex)
+                matched = next(
+                    (err for err in self._FILE_NOT_FOUND_ERRORS if err in ex_str), None
+                )
+                if matched:
+                    raise FileNotFoundError(errno.ENOENT, matched, file)
+                elif "Is a directory" in ex_str:
                     raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
                 else:
                     raise ex

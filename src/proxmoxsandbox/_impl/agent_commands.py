@@ -41,7 +41,6 @@ class AgentCommands:
     def _is_transient_qga_error(exc: httpx.HTTPStatusError) -> bool:
         """Check if an HTTP error is a transient QGA failure safe to retry."""
         return exc.response.status_code == 500
-        return any(err in msg for err in _QGA_TRANSIENT_ERRORS)
 
     async def _retry_on_qga_error(self, label: str, coro_fn):
         """Retry a coroutine function on transient QGA errors."""
