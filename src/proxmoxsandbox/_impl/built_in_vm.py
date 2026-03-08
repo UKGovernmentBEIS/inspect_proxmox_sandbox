@@ -205,6 +205,7 @@ runcmd:
         name: e*
       dhcp4: true
       dhcp6: false
+      accept-ra: false
 """,
     ) -> None:
         """
@@ -386,6 +387,7 @@ runcmd:
         name: e*
       dhcp4: true
       dhcp6: false
+      accept-ra: false
 """,
             )
 

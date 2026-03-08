@@ -80,12 +80,14 @@ def _nftables_config(sandbox_cidr: str) -> str:
       query — not at boot.  Pre-resolving at provision time ensures IPs are seeded
       before the first connection attempt, which is simpler and more predictable.
 
-    Known gap — IPv6:
-    All rules are IPv4-only.  IPv6 egress from the sandbox is not filtered here.
-    In practice, Proxmox SDN "simple" zones do not route IPv6, and sandbox
-    cloud-init configs set dhcp6=false, so IPv6 egress is unlikely to be
-    available.  If that changes, add equivalent ip6 rules and an ip6tables
-    forward-drop default.
+    IPv6:
+    table inet covers both IPv4 and IPv6; policy drop on the forward chain
+    therefore drops IPv6 forwarded through the gateway.  The primary IPv6 risk
+    is direct routing: a sandbox VM that receives a Router Advertisement can
+    get a global IPv6 address and route traffic to the internet without touching
+    the gateway.  This is blocked at the sandbox VM level via accept-ra: false
+    in the cloud-init network config (dhcp6: false alone only disables DHCPv6,
+    not SLAAC).
 
     Intentional omission — INPUT chain:
     There are no INPUT chain rules blocking connections from the sandbox to the
@@ -117,6 +119,7 @@ table inet gateway {{
     chain forward {{
         type filter hook forward priority filter; policy drop;
         ct state established,related counter accept
+        ip saddr {sandbox_cidr} ip dport 853 drop
         ip saddr {sandbox_cidr} ip daddr @allowed_ips counter accept
         counter drop
     }}

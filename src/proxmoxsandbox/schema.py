@@ -110,10 +110,17 @@ class SdnConfig(BaseModel, frozen=True):
               those IPs are NOT added to the filter — traffic will be dropped.
               This affects apt-get, pip, and similar tools that use subdomains.
               A future improvement is to enable dnsmasq's nftset= support.
-            - IPv6 egress is not filtered.  Proxmox SDN simple zones do not
-              route IPv6 and sandbox cloud-init sets dhcp6=false, so IPv6 egress
-              is generally unavailable.  If your Proxmox has IPv6 on the bridge,
-              IPv6 traffic will bypass the filter.
+            - IPv6 is blocked at two layers: sandbox VMs provisioned from
+              built-in templates have accept-ra: false in their cloud-init
+              network config (preventing SLAAC address assignment); custom VM
+              sources (OVA, existing_vm_template_tag) must configure this
+              independently.  The gateway's nftables inet forward chain drops
+              any IPv6 that routes through it.  Note: dhcp6: false alone only
+              disables DHCPv6; accept-ra is needed to block SLAAC.
+            - DNS-over-TLS (port 853) is dropped at the gateway.
+              DNS-over-HTTPS (port 443) is not intercepted but is blocked by
+              the IP-level filter unless a DoH provider happens to share an IP
+              with an explicitly allowed domain (unlikely in practice).
     """
 
     vnet_configs: Tuple[VnetConfig, ...]
