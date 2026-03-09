@@ -15,7 +15,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     ProxmoxJsonDataType,
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
-from proxmoxsandbox._impl.storage_commands import StorageCommands
+from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
 
@@ -27,10 +27,8 @@ class QemuCommands(abc.ABC):
 
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
-    # TODO disambiguate that "this.storage" is for images rather than VM disks
-    # which continue to live in local-lvm
-    storage: str
-    storage_commands: StorageCommands
+    image_storage: str
+    storage_commands: LocalStorageCommands
     node: str
 
     _running_proxmox_vms: ContextVar[Set[int]] = ContextVar(
@@ -40,12 +38,17 @@ class QemuCommands(abc.ABC):
         "proxmox_vms_cleanup_executed", default=False
     )
 
-    def __init__(self, async_proxmox: AsyncProxmoxAPI, node: str):
+    def __init__(
+        self,
+        async_proxmox: AsyncProxmoxAPI,
+        node: str,
+        image_storage: str,
+    ):
         self.async_proxmox = async_proxmox
         self.task_wrapper = TaskWrapper(async_proxmox)
-        self.storage = "local"
-        self.storage_commands = StorageCommands(async_proxmox, node, self.storage)
+        self.storage_commands = LocalStorageCommands(async_proxmox, node)
         self.node = node
+        self.image_storage = image_storage
 
     async def await_vm(
         self,
@@ -250,7 +253,7 @@ class QemuCommands(abc.ABC):
                     # and may be brittle
                     for i, vmdk in enumerate(vmdks):
                         json_for_create[f"{disk_prefix}{i}"] = (
-                            f"local-lvm:0,import-from={self.storage}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
+                            f"{self.image_storage}:0,import-from={LOCAL_STORAGE}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
                         )
 
                     new_vm_template_id = await self.find_next_available_vm_id()
@@ -507,7 +510,10 @@ class QemuCommands(abc.ABC):
         if vm_config.name is not None:
             json_for_create["name"] = vm_config.name
         if vm_config.uefi_boot:
-            json_for_create["efidisk0"] = "local-lvm:0,efitype=4m,pre-enrolled-keys=0"
+            json_for_create["efidisk0"] = (
+                f"{self.image_storage}:0,"
+                "efitype=4m,pre-enrolled-keys=0"
+            )
             json_for_create["bios"] = "ovmf"
 
     async def ping_qemu_agent(self, vm_id: int):
