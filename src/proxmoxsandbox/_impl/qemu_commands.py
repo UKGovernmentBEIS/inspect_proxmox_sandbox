@@ -15,7 +15,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     ProxmoxJsonDataType,
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
-from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, StorageCommands
+from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
 
@@ -28,7 +28,7 @@ class QemuCommands(abc.ABC):
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
     image_storage: str
-    storage_commands: StorageCommands
+    storage_commands: LocalStorageCommands
     node: str
 
     _running_proxmox_vms: ContextVar[Set[int]] = ContextVar(
@@ -46,7 +46,7 @@ class QemuCommands(abc.ABC):
     ):
         self.async_proxmox = async_proxmox
         self.task_wrapper = TaskWrapper(async_proxmox)
-        self.storage_commands = StorageCommands(async_proxmox, node)
+        self.storage_commands = LocalStorageCommands(async_proxmox, node)
         self.node = node
         self.image_storage = image_storage
 

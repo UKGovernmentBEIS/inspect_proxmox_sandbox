@@ -10,7 +10,7 @@ LOCAL_STORAGE = "local"
 """Proxmox's built-in directory storage at /var/lib/vz, always available."""
 
 
-class StorageCommands(abc.ABC):
+class LocalStorageCommands(abc.ABC):
     logger = getLogger(__name__)
 
     TRACE_NAME = "proxmox_storage_commands"

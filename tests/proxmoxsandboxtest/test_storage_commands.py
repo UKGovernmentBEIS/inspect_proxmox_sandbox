@@ -6,11 +6,11 @@ from typing import BinaryIO, cast
 import pycdlib
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, StorageCommands
+from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 
 
 async def test_upload_size_check_different(
-    storage_commands: StorageCommands, async_proxmox_api: AsyncProxmoxAPI
+    storage_commands: LocalStorageCommands, async_proxmox_api: AsyncProxmoxAPI
 ) -> None:
     test_iso_name = "test_upload_size_check_different.iso"
 
@@ -47,7 +47,7 @@ async def test_upload_size_check_different(
 
 
 async def test_upload_size_check_same(
-    storage_commands: StorageCommands, async_proxmox_api: AsyncProxmoxAPI
+    storage_commands: LocalStorageCommands, async_proxmox_api: AsyncProxmoxAPI
 ) -> None:
     test_iso_name = "test_upload_size_check_same.iso"
 
@@ -85,7 +85,7 @@ async def test_upload_size_check_same(
 
 
 async def test_upload_no_size_check(
-    storage_commands: StorageCommands, async_proxmox_api: AsyncProxmoxAPI
+    storage_commands: LocalStorageCommands, async_proxmox_api: AsyncProxmoxAPI
 ) -> None:
     test_iso_name = "test_upload_no_size_check.iso"
 
@@ -145,7 +145,7 @@ async def create_temp_iso(content: str) -> Path:
 
 
 async def find_uploaded_iso(
-    storage_commands: StorageCommands, test_iso_name: str
+    storage_commands: LocalStorageCommands, test_iso_name: str
 ) -> dict:
     content_including_upload = await storage_commands.list_storage()
 

@@ -20,7 +20,7 @@ from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
-from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, StorageCommands
+from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     DhcpRange,
@@ -52,7 +52,7 @@ class BuiltInVM(abc.ABC):
     qemu_commands: QemuCommands
     sdn_commands: SdnCommands
     task_wrapper: TaskWrapper
-    storage_commands: StorageCommands
+    storage_commands: LocalStorageCommands
     node: str
 
     def __init__(
@@ -67,7 +67,7 @@ class BuiltInVM(abc.ABC):
             async_proxmox, node, image_storage=image_storage
         )
         self.sdn_commands = SdnCommands(async_proxmox)
-        self.storage_commands = StorageCommands(async_proxmox, node)
+        self.storage_commands = LocalStorageCommands(async_proxmox, node)
         self.node = node
         self.image_storage = image_storage
         self.cache_dir = platformdirs.user_cache_path(
