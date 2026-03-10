@@ -1,5 +1,6 @@
 """Data models and schemas for the Proxmox sandbox configuration."""
 
+from ipaddress import ip_address, ip_network
 from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
@@ -37,7 +38,7 @@ class SubnetConfig(BaseModel, frozen=True):
     """
 
     cidr: IPvAnyNetwork
-    gateway: IPvAnyAddress
+    gateway: Optional[IPvAnyAddress] = None
     snat: bool
     dhcp_ranges: Tuple[DhcpRange, ...]
 
@@ -69,10 +70,110 @@ class SdnConfig(BaseModel, frozen=True):
         use_pve_ipam_dnsnmasq: Whether to use Proxmox VE's built-in IPAM and DNSmasq
             Set to False if you are using e.g. your own pfsense instance for IPAM
             (recommended)
+        allow_domains: Allowlist of domains that sandbox VMs may reach. All other
+            egress is blocked. When non-empty, a gateway VM is automatically provisioned
+            per eval sample; it enforces the allowlist using dnsmasq (DNS-level) +
+            nftables (IP-level). The gateway VM is outside the sandbox VM, so root
+            inside the sandbox cannot bypass it.
+
+            Subdomains must be listed explicitly: "gnu.org" does NOT cover
+            "ftp.gnu.org" — list each subdomain you need. Leave empty (the
+            default) for unrestricted internet access.
+
+            When allow_domains is non-empty:
+            - snat on sandbox subnets is set to False (the gateway VM does NAT)
+            - An extra internal VNet is created for the gateway VM's external interface
+            - Sandbox VMs learn the gateway as their default router via DHCP
+            - The gateway IP in SubnetConfig must not be set (leave it as its default).
+              Setting it explicitly will raise a ValueError at construction time.
+
+            Constraints (validated at construction time):
+            - use_pve_ipam_dnsnmasq must be True
+            - exactly one vnet_config must be provided
+            - that vnet must have exactly one subnet
+            - the subnet's DHCP range must not include network-address+2
+
+            Requires Proxmox 9+. The gateway VM template is built once on first use
+            (one-time cost: ~5–10 minutes). Per-eval overhead is ~30–60 s for the
+            gateway clone startup before the sandbox VM boots.
+
+            DNS upstream: Google (8.8.8.8) is hardcoded inside the gateway VM.
+            Environments that block outbound port 53 to 8.8.8.8 will not be able to
+            resolve allowed domains.
+
+            Known limitations:
+            - Filtering is IP-level, not URL-level.  All TCP/UDP ports to an
+              allowed domain's IPs are permitted, not just HTTP/HTTPS.
+            - Only apex domain IPs are pre-seeded in the nftables filter at
+              provision time.  Subdomains (e.g. ftp.gnu.org when "gnu.org"
+              is allowed) have their IPs resolved by dnsmasq at query time, but
+              those IPs are NOT added to the filter — traffic will be dropped.
+              This affects apt-get, pip, and similar tools that use subdomains.
+              A future improvement is to enable dnsmasq's nftset= support.
+            - IPv6 is blocked at two layers: sandbox VMs provisioned from
+              built-in templates have accept-ra: false in their cloud-init
+              network config (preventing SLAAC address assignment); custom VM
+              sources (OVA, existing_vm_template_tag) must configure this
+              independently.  The gateway's nftables inet forward chain drops
+              any IPv6 that routes through it.  Note: dhcp6: false alone only
+              disables DHCPv6; accept-ra is needed to block SLAAC.
+            - DNS-over-TLS (port 853) is dropped at the gateway.
+              DNS-over-HTTPS (port 443) is not intercepted but is blocked by
+              the IP-level filter unless a DoH provider happens to share an IP
+              with an explicitly allowed domain (unlikely in practice).
     """
 
     vnet_configs: Tuple[VnetConfig, ...]
     use_pve_ipam_dnsnmasq: bool = True
+    allow_domains: Tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_allow_domains_constraints(self) -> "SdnConfig":
+        """Fail fast on configs statically incompatible with allow_domains.
+
+        Dynamic constraints (e.g. no free external CIDR) can only be checked at
+        provision time; these are the structural ones that can be caught now.
+        """
+        if not self.allow_domains:
+            return self
+        if not self.use_pve_ipam_dnsnmasq:
+            raise ValueError(
+                "allow_domains requires use_pve_ipam_dnsnmasq=True "
+                "(the gateway VM uses Proxmox IPAM for its static IP assignment)"
+            )
+        if len(self.vnet_configs) != 1:
+            raise ValueError(
+                f"allow_domains requires exactly one vnet_config, "
+                f"got {len(self.vnet_configs)}"
+            )
+        subnet_list = self.vnet_configs[0].subnets
+        if len(subnet_list) != 1:
+            raise ValueError(
+                f"allow_domains requires exactly one subnet per vnet, "
+                f"got {len(subnet_list)}"
+            )
+        # The gateway VM is assigned network-address+2.  Validate that the DHCP
+        # pool does not include that address, which would cause an IPAM conflict.
+        subnet = subnet_list[0]
+        gateway_vm_ip = ip_network(str(subnet.cidr)).network_address + 2
+        for dhcp_range in subnet.dhcp_ranges:
+            start = ip_address(str(dhcp_range.start))
+            end = ip_address(str(dhcp_range.end))
+            if start <= ip_address(gateway_vm_ip) <= end:
+                raise ValueError(
+                    f"allow_domains: gateway VM will be assigned {gateway_vm_ip} "
+                    f"(subnet network address +2), but that address falls within "
+                    f"the DHCP range {dhcp_range.start}–{dhcp_range.end}. "
+                    "Adjust the DHCP range to exclude it (e.g. start at .10 or higher)."
+                )
+        if subnet.gateway is not None and ip_address(str(subnet.gateway)) != ip_address(gateway_vm_ip):
+            raise ValueError(
+                f"allow_domains: do not set the gateway in SubnetConfig manually. "
+                f"It will be automatically set to {gateway_vm_ip} (network-address+2). "
+                f"You specified {subnet.gateway}; either remove the gateway field or "
+                f"set it to {gateway_vm_ip}."
+            )
+        return self
 
 
 SdnConfigType: TypeAlias = Union[SdnConfig, Literal["auto"], None]
@@ -168,6 +269,9 @@ class VmConfig(BaseModel, frozen=True):
             This is applied to all virtual network interfaces.
         os_type: The OS type. If unset, defaults to "l26". Only for OVA. See
             https://pve.proxmox.com/wiki/Manual:_qm.conf for more details
+        firewall: if True, enables the Proxmox VM-level firewall on all NICs.
+            Proxmox firewall rules must be configured separately (e.g. via the UI or
+            Proxmox API). Defaults to False.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -186,6 +290,7 @@ class VmConfig(BaseModel, frozen=True):
     nics: Optional[Tuple[VmNicConfig, ...]] = None
     is_sandbox: bool = True
     uefi_boot: bool = False
+    firewall: bool = False
     disk_controller: Optional[Literal["scsi", "ide"]] = None
     nic_controller: Optional[Literal["virtio", "e1000"]] = None
     os_type: Optional[

@@ -1,4 +1,5 @@
 import abc
+import importlib.resources
 import os
 import re
 import subprocess
@@ -41,6 +42,30 @@ UBUNTU_VMDK_FILENAME = "ubuntu-noble-24.04-cloudimg.vmdk"
 DEBIAN_13_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
 KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.3/kali-linux-2025.3-cloud-genericcloud-amd64.tar.xz"
 KALI_DISK_RENAMED = "kali-2025.3-genericcloud-amd64.raw"
+
+# Debian 13: consistent with the existing built-in VMs in this repo and the broader
+# org (Ubuntu/Debian are the only distros used for VM workloads; Alpine appears only
+# in Dockerfiles). Same base image as the debian13 built-in — reuses any already-
+# downloaded source file.
+GATEWAY_VM_URL = DEBIAN_13_URL
+GATEWAY_VM_TAG = "gateway"
+
+# Minimal cloud-init for the gateway VM template.
+# Does NOT contain the nftables ruleset or dnsmasq allowlist — those are injected at
+# provision time (via write_file + exec_command) because they depend on the per-eval
+# sandbox subnet CIDR and domain list.
+# The template boots in a fail-closed state: nftables drops all forwarded traffic,
+# dnsmasq starts but resolves nothing until the allowlist is written.
+#
+# Security: openssh-server is intentionally NOT installed.  The gateway VM is
+# reachable from sandbox VMs on the same vnet, so minimising listening services
+# reduces the attack surface a compromised sandbox can reach.  Do not add SSH or
+# other management daemons to this image.
+GATEWAY_CLOUD_INIT = (
+    importlib.resources.files("proxmoxsandbox._impl._resources")
+    .joinpath("gateway-cloud-init.yaml")
+    .read_text(encoding="utf-8")
+)
 
 STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
 
@@ -186,6 +211,7 @@ runcmd:
         name: e*
       dhcp4: true
       dhcp6: false
+      accept-ra: false
 """,
     ) -> None:
         """
@@ -278,6 +304,181 @@ runcmd:
                 await self.qemu_commands.destroy_vm(vm_id=existing_vms[existing_vm])
 
         await self.task_wrapper.do_action_and_wait_for_tasks(inner_clear_builtins)
+
+    async def known_gateway(self) -> int | None:
+        """Return the VM ID of the gateway template, or None if it does not exist."""
+        existing_vms = await self.qemu_commands.list_vms()
+        for existing_vm in existing_vms:
+            if (
+                "tags" in existing_vm
+                and "template" in existing_vm
+                and existing_vm["template"] == 1
+                and "inspect" in existing_vm["tags"].split(";")
+                and GATEWAY_VM_TAG in existing_vm["tags"].split(";")
+            ):
+                return existing_vm["vmid"]
+        return None
+
+    async def ensure_gateway_exists(self) -> None:
+        """
+        Ensure the gateway VM template exists, creating it if necessary.
+
+        The gateway VM is a minimal Debian VM with dnsmasq + nftables installed.
+        It acts as the egress filter for sandbox VMs when allow_domains is set.
+        The nftables ruleset and dnsmasq allowlist are injected at provision time;
+        the template only provides the packages and a fail-closed default config.
+
+        Performance: template creation is a one-time cost (~5–10 minutes, dominated
+        by package downloads for dnsmasq + nftables).  Subsequent calls return
+        immediately once the template exists.  Per-eval cost (cloning + provisioning
+        the gateway) is ~30–60 s on top of the normal sandbox VM startup time.
+        """
+        if await self.known_gateway() is not None:
+            return
+
+        await self.ensure_version(9)
+
+        source_image_name = Path(urlparse(GATEWAY_VM_URL).path).name
+        await self.ensure_source_uploaded(
+            GATEWAY_VM_TAG, source_image_name, GATEWAY_VM_URL
+        )
+
+        await self.ensure_static_sdn_exists()
+
+        next_available_vm_id = await self.qemu_commands.find_next_available_vm_id()
+        await self._startup_gateway_vm(next_available_vm_id, source_image_name)
+
+    async def _startup_gateway_vm(
+        self, next_available_vm_id: int, source_image_name: str
+    ) -> None:
+        with trace_action(
+            self.logger,
+            TRACE_NAME,
+            f"create gateway VM template {next_available_vm_id=}",
+        ):
+
+            async def do_create() -> None:
+                await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu",
+                    json={
+                        "vmid": next_available_vm_id,
+                        "name": "inspect-gateway",
+                        "node": self.node,
+                        "cpu": "host",
+                        "memory": 256,
+                        "cores": 1,
+                        "ostype": "l26",
+                        "scsi0": "local-lvm:0,"
+                        + f"import-from={self.storage}:import/{source_image_name},"
+                        + "format=qcow2,cache=writeback",
+                        "scsihw": "virtio-scsi-single",
+                        "net0": f"virtio,bridge={STATIC_VNET_ID}",
+                        "serial0": "socket",
+                        "start": False,
+                        "agent": "enabled=1",
+                    },
+                )
+
+            await self.task_wrapper.do_action_and_wait_for_tasks(do_create)
+
+            await self.create_and_upload_cloudinit_iso(
+                vm_id=next_available_vm_id,
+                user_data=GATEWAY_CLOUD_INIT,
+                network_config="""network:
+  version: 2
+  ethernets:
+    default:
+      match:
+        name: e*
+      dhcp4: true
+      dhcp6: false
+      accept-ra: false
+""",
+            )
+
+            async def update_tags() -> None:
+                await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
+                    json={"tags": f"inspect,{GATEWAY_VM_TAG}"},
+                )
+
+            await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
+
+            await self.qemu_commands.start_and_await(
+                vm_id=next_available_vm_id, is_sandbox=True
+            )
+
+            agent_commands = AgentCommands(self.async_proxmox, self.node)
+            res = await agent_commands.exec_command(
+                vm_id=next_available_vm_id,
+                command=["cloud-init", "status", "--wait"],
+            )
+
+            @tenacity.retry(
+                wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+                stop=tenacity.stop_after_delay(VM_TIMEOUT),
+                retry=tenacity.retry_if_result(lambda x: x is False),
+            )
+            async def wait_for_cloud_init() -> bool:
+                exec_status = await agent_commands.get_agent_exec_status(
+                    vm_id=next_available_vm_id, pid=res["pid"]
+                )
+                if exec_status["exited"] == 1:
+                    if exec_status["out-data"].strip() == "status: done":
+                        return True
+                    else:
+                        raise ValueError(
+                            f"cloud-init failed: {exec_status['out-data']}"
+                        )
+                else:
+                    return False
+
+            await wait_for_cloud_init()
+
+            await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{next_available_vm_id}/status/shutdown",
+            )
+
+            await self.qemu_commands.await_vm(
+                vm_id=next_available_vm_id,
+                is_sandbox=True,
+                status_for_wait="stopped",
+            )
+
+            await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
+            )
+
+            @tenacity.retry(
+                wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+                stop=tenacity.stop_after_delay(VM_TIMEOUT),
+                retry=tenacity.retry_if_result(lambda x: x is False),
+            )
+            async def is_template() -> bool:
+                current_config = await self.async_proxmox.request(
+                    "GET",
+                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
+                )
+                return current_config["template"] == 1
+
+            await is_template()
+
+            @tenacity.retry(
+                wait=tenacity.wait_exponential(min=1, exp_base=1.3),
+                stop=tenacity.stop_after_delay(30),
+            )
+            async def remove_cdrom() -> None:
+                await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
+                    json={"ide2": "none,media=cdrom"},
+                )
+
+            await remove_cdrom()
 
     async def known_builtins(self) -> Dict[str, int]:
         existing_vms = await self.qemu_commands.list_vms()

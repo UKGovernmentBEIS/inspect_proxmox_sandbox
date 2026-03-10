@@ -241,6 +241,39 @@ sandbox = SandboxEnvironmentSpec(
 
 Static IP address assignment is *not* supported with this feature.
 
+### Egress filtering with allow_domains
+
+Set `allow_domains` on `SdnConfig` to restrict sandbox internet access to specific domains.
+A gateway VM (cloned per eval sample) enforces the allowlist via dnsmasq + nftables.
+Because the gateway is outside the sandbox, root inside the sandbox cannot bypass it.
+
+```python
+sdn_config=SdnConfig(
+    vnet_configs=(
+        VnetConfig(
+            alias="sandbox-net",
+            subnets=(
+                SubnetConfig(
+                    cidr=ip_network("10.10.0.0/24"),
+                    gateway=ip_address("10.10.0.1"),  # overridden internally
+                    snat=True,                        # overridden internally
+                    dhcp_ranges=(DhcpRange(start=ip_address("10.10.0.10"),
+                                          end=ip_address("10.10.0.100")),),
+                ),
+            ),
+        ),
+    ),
+    use_pve_ipam_dnsnmasq=True,
+    allow_domains=("pypi.org", "files.pythonhosted.org"),
+)
+```
+
+`"debian.org"` covers the apex and all subdomains — no `*.` prefix needed.  See the
+`allow_domains` docstring in `schema.py` for full constraints and caveats.
+
+**Costs:** the gateway template (`inspect-gw`) is built once (~5–10 min).  Per-eval
+overhead is ~30–60 s for the gateway clone to boot.
+
 ## Using OVA files
 
 Proxmox supports OVA import but not OVA export. It is possible to extract the disk images of VMs 
@@ -297,17 +330,22 @@ SDN zones have the pattern `[3 letters from eval task name][random 3 digits][z]`
 
 Some resources will persist after the eval is complete:
 
-- the built-in VM feature creates a template VM `inspect-ubuntu24.04`
+- the built-in VM feature creates template VMs: `inspect-ubuntu24.04`, `inspect-debian13`, `inspect-kali2025.3`
+- the `allow_domains` feature creates a gateway VM template `inspect-gw` on first use
 - the built-in VM feature creates a SDN zone called `inspvmz`
 - uploaded OVAs are left in place
 - cloud-init ISOs are left in place
 
 Environment cleanup is partially implemented. There is no way to tag all the resources
-created by a particular eval. Therefore the cleanup process for `inspect sandbox cleanup proxmox` 
+created by a particular eval. Therefore the cleanup process for `inspect sandbox cleanup proxmox`
 will delete:
 
-- all VMs tagged `inspect` 
+- all VMs tagged `inspect`
 - any SDN zones created with names matching the pattern above.
+
+If an eval is interrupted (e.g. Ctrl+C), per-sample cleanup is skipped and VMs are left
+running. This includes any gateway VM clones created for `allow_domains` evals. Run
+`inspect sandbox cleanup proxmox` to collect them.
 
 ## Versioning
 
