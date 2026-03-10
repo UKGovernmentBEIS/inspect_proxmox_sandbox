@@ -7,8 +7,12 @@ Covers:
    ftp.gnu.org because subdomain IPs are not pre-seeded.
 3. Subdomain explicit listing — adding the subdomain explicitly does work.
 4. Non-HTTP ports to allowed IPs — all ports are permitted (IP-level filter).
+5. IPv6 SLAAC blocked — built-in VM templates have accept-ra: false; no global
+   IPv6 address is assigned, so IPv6 cannot be used to bypass the gateway.
+6. DNS-over-TLS (port 853) blocked — the gateway nftables forward chain drops
+   port 853 traffic even to allowed-domain IPs, closing the DoT bypass path.
 
-Note: each test uses a distinct /24 subnet (10.77.10–13.0/24) so tests do not
+Note: each test uses a distinct /24 subnet (10.77.10–15.0/24) so tests do not
 conflict with each other or with stale zones from interrupted previous runs.
 If CIDR conflicts are still reported, run `inspect sandbox cleanup proxmox` first.
 """
@@ -53,7 +57,6 @@ def _base_config(
                     subnets=(
                         SubnetConfig(
                             cidr=ip_network(f"{base}.0/24"),
-                            gateway=ip_address(f"{base}.1"),
                             snat=True,
                             dhcp_ranges=(
                                 DhcpRange(
@@ -224,6 +227,125 @@ async def test_all_ports_open_to_allowed_ips() -> None:
         assert "OPEN" not in nc_blocked.stdout, (
             f"TCP port 443 to google.com (blocked) should not be reachable: "
             f"{nc_blocked=}"
+        )
+    finally:
+        if envs_dict:
+            await ProxmoxSandboxEnvironment.sample_cleanup(
+                task_name=task_name,
+                config=config,
+                environments=envs_dict,
+                interrupted=False,
+            )
+
+
+async def test_ipv6_slaac_blocked() -> None:
+    """Built-in VM templates cannot acquire a global IPv6 address via SLAAC.
+
+    cloud-init sets accept-ra: false on all built-in VM network configs (both
+    sandbox and gateway).  dhcp6: false alone only disables DHCPv6; accept-ra
+    is also needed to block SLAAC (stateless address autoconfiguration via
+    Router Advertisements).
+
+    This test verifies the protection holds end-to-end:
+    1. No global-scope IPv6 address is assigned (SLAAC is blocked).
+    2. IPv6 curl to an allowed domain fails (no IPv6 egress path).
+
+    Note: a link-local address (fe80::) is normal and expected — it does not
+    provide internet reachability.  Only global-scope addresses are a concern.
+
+    Custom VM sources (OVA, existing_vm_template_tag) must configure
+    accept-ra: false independently; that is documented as a known limitation
+    in schema.py and is not tested here.
+    """
+    envs_dict: Dict[str, SandboxEnvironment] = {}
+    config = _base_config(allow_domains=("cloudflare.com",), third_octet=14)
+    task_name = "tipv6slaac"
+    try:
+        _, envs_dict = await setup_sandbox(task_name, config)
+        sandbox = envs_dict["default"]
+
+        # Check for global-scope IPv6 addresses — should be none.
+        addr_result = await sandbox.exec(
+            ["ip", "-6", "addr", "show", "scope", "global"],
+            timeout=10,
+        )
+        assert addr_result.stdout.strip() == "", (
+            "Sandbox VM should have no global-scope IPv6 address (SLAAC blocked "
+            f"by accept-ra: false), but got: {addr_result.stdout.strip()!r}"
+        )
+
+        # Belt-and-braces: IPv6 curl to an allowed domain should also fail.
+        # cloudflare.com has AAAA records; without a global IPv6 address the
+        # connect will fail before even reaching the gateway.
+        curl6_result = await sandbox.exec(
+            ["curl", "--fail", "--max-time", "5", "--ipv6", "http://cloudflare.com"],
+            timeout=10,
+        )
+        assert not curl6_result.success, (
+            "IPv6 curl to cloudflare.com should fail (no global IPv6 address), "
+            f"but succeeded: {curl6_result=}"
+        )
+    finally:
+        if envs_dict:
+            await ProxmoxSandboxEnvironment.sample_cleanup(
+                task_name=task_name,
+                config=config,
+                environments=envs_dict,
+                interrupted=False,
+            )
+
+
+async def test_dns_over_tls_port_853_blocked() -> None:
+    """Gateway nftables drops port 853 even to allowed-domain IPs.
+
+    The forward chain rule `ip saddr {sandbox_cidr} ip dport 853 drop` runs
+    before the `@allowed_ips accept` rule, so port 853 is blocked regardless
+    of whether the destination IP is in the allowed set.  This closes the
+    DNS-over-TLS bypass path (a sandbox could otherwise send encrypted DNS
+    queries directly to a DoT resolver, bypassing the dnsmasq allowlist).
+
+    Cloudflare (1.1.1.1) is both an allowed domain AND a DoT resolver.
+    This test exploits that: port 443 to cloudflare.com succeeds (proving
+    the IP is in the allowed set), but port 853 to the same IP fails
+    (proving the port-853 drop rule fires before the IP accept rule).
+    """
+    envs_dict: Dict[str, SandboxEnvironment] = {}
+    config = _base_config(allow_domains=("cloudflare.com",), third_octet=15)
+    task_name = "tdot853"
+    try:
+        _, envs_dict = await setup_sandbox(task_name, config)
+        sandbox = envs_dict["default"]
+
+        # Resolve cloudflare.com to an IP so we can hit the same IP on two ports.
+        # We use the gateway's dnsmasq directly to get the pre-seeded IP.
+        resolve_result = await sandbox.exec(
+            ["bash", "-c", "dig +short cloudflare.com @10.77.15.2 | head -1"],
+            timeout=15,
+        )
+        cloudflare_ip = resolve_result.stdout.strip()
+        assert cloudflare_ip, (
+            f"Could not resolve cloudflare.com via gateway dnsmasq: {resolve_result=}"
+        )
+        print(f"\n[DoT test] cloudflare.com resolved to: {cloudflare_ip!r}")
+
+        # Port 443 to the same IP — should be OPEN (IP is in the allowed set).
+        nc_443 = await sandbox.exec(
+            ["bash", "-c", f"nc -zw5 {cloudflare_ip} 443 && echo OPEN || echo CLOSED"],
+            timeout=15,
+        )
+        assert "OPEN" in nc_443.stdout, (
+            f"Port 443 to cloudflare IP {cloudflare_ip} should be reachable "
+            f"(IP is in allowed set): {nc_443=}"
+        )
+
+        # Port 853 to the same IP — should be CLOSED (drop rule fires first).
+        nc_853 = await sandbox.exec(
+            ["bash", "-c", f"nc -zw5 {cloudflare_ip} 853 && echo OPEN || echo CLOSED"],
+            timeout=15,
+        )
+        assert "OPEN" not in nc_853.stdout, (
+            f"Port 853 to cloudflare IP {cloudflare_ip} should be blocked "
+            f"by the ip dport 853 drop rule, but got: {nc_853=}"
         )
     finally:
         if envs_dict:
