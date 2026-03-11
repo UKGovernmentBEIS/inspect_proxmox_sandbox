@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from logging import getLogger
@@ -13,16 +12,9 @@ from inspect_ai.util import (
     OutputLimitExceededError,
     trace_action,
 )
-from pydantic import BaseModel
 from pydantic_core import from_json
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
-
-
-class ProxmoxVersionInfo(BaseModel):
-    release: str
-    repoid: str
-    version: str
 
 
 class AsyncProxmoxAPI:
@@ -36,13 +28,7 @@ class AsyncProxmoxAPI:
     password: str
     verify_tls: bool
     ticket: Optional[str] = None
-    ticket_date: Optional[float] = None
     csrf_token: Optional[str] = None
-    discovered_proxmox_version: Optional[ProxmoxVersionInfo] = None
-
-    # PVE tickets expire after 2 hours; refresh proactively with 10 min buffer
-    TICKET_LIFETIME_SECONDS = 7200
-    TICKET_REFRESH_THRESHOLD = TICKET_LIFETIME_SECONDS - 600
 
     # note: host *includes* :port
     def __init__(self, host: str, user: str, password: str, verify_tls: bool = True):
@@ -66,15 +52,7 @@ class AsyncProxmoxAPI:
 
             data = response.json()["data"]
             self.ticket = data["ticket"]
-            self.ticket_date = time.monotonic()
             self.csrf_token = data["CSRFPreventionToken"]
-            version_info = await self.request("GET", "/version")
-            self.discovered_proxmox_version = ProxmoxVersionInfo(**version_info)
-
-    def get_discovered_proxmox_version(self) -> ProxmoxVersionInfo:
-        if self.discovered_proxmox_version is None:
-            raise ValueError("Need to be logged in")
-        return self.discovered_proxmox_version
 
     async def request(
         self,
@@ -91,8 +69,8 @@ class AsyncProxmoxAPI:
             verify=self.verify_tls,
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
-            # Get a fresh ticket if we don't have one or it's approaching expiry
-            if not self.ticket or self._ticket_near_expiry():
+            # Always get a fresh ticket if we don't have one
+            if not self.ticket:
                 await self._login(client)
 
             if self.csrf_token is None:
@@ -152,12 +130,6 @@ class AsyncProxmoxAPI:
                 raise ValueError("CSRF token was not set; login first")
             headers["CSRFPreventionToken"] = self.csrf_token
         return headers
-
-    def _ticket_near_expiry(self) -> bool:
-        """Check if the current ticket is approaching its 2-hour expiry."""
-        if self.ticket_date is None:
-            return True
-        return (time.monotonic() - self.ticket_date) >= self.TICKET_REFRESH_THRESHOLD
 
     # this more naturally belongs in qemu_commands
     # but it's copied here because of read_file
