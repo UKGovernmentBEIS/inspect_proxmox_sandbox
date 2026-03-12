@@ -27,12 +27,15 @@ export INSTANCE_PROFILE=your-ssm-instance-profile
 # 4. Connect with port forwarding for Proxmox web UI
 ./connect.sh <instance-id>
 # Then browse to https://localhost:8006
-# Login: root / PAM / ProxmoxAdmin2026!
+# Login: root / PAM / <password from wait-for-install.sh output>
 
-# 5. Run a quick command on the host
+# 5. Retrieve the root password (if you missed the wait-for-install.sh output)
+./run-on-host.sh <instance-id> "cat /root/root-password"
+
+# 6. Run a quick command on the host
 ./run-on-host.sh <instance-id> "pveversion"
 
-# 6. Run a script on the host (e.g. create a test VM)
+# 7. Run a script on the host (e.g. create a test VM)
 ./run-script-on-host.sh <instance-id> ./create-test-vm.sh
 ```
 

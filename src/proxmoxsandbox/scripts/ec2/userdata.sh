@@ -95,7 +95,10 @@ DEBIAN_FRONTEND=noninteractive apt-get remove -y linux-image-amd64 'linux-image-
 update-grub
 
 # --- Set root password for web UI access ---
-echo "root:ProxmoxAdmin2026!" | chpasswd
+ROOT_PASSWORD=$(openssl rand -base64 18)
+echo "root:$ROOT_PASSWORD" | chpasswd
+echo "$ROOT_PASSWORD" > /root/root-password
+chmod 600 /root/root-password
 
 # --- SDN dependencies ---
 # dnsmasq: needed for SDN DHCP/IPAM; disable the system service (PVE manages per-zone instances)

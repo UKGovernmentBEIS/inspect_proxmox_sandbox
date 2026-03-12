@@ -39,6 +39,13 @@ while true; do
                 --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)
             if [ "$STATUS" = "Online" ]; then
                 echo "Instance ready after final reboot."
+                echo ""
+                PASSWORD=$("$SCRIPT_DIR/run-on-host.sh" "$INST" "cat /root/root-password" 2>/dev/null || true)
+                if [ -n "$PASSWORD" ]; then
+                    echo "Proxmox web UI: https://localhost:8006"
+                    echo "  Login: root / PAM"
+                    echo "  Password: $PASSWORD"
+                fi
                 exit 0
             fi
             sleep 10
