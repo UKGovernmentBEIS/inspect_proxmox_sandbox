@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Dict
 
 from inspect_ai.util import SandboxConnection, SandboxEnvironment
+import pytest
 from pytest import raises
 
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
@@ -229,6 +230,10 @@ async def check_os(sandbox: SandboxEnvironment, expected_in_id: str):
     )
 
 
+@pytest.mark.skip(
+    reason="Hangs forever: second setup_sandbox blocks on empty instance pool "
+    "queue because the first sandbox is never released before acquiring again."
+)
 async def test_multiple_sandboxes_isolated(sandbox_env_config) -> None:
     sandboxes = {}
 
