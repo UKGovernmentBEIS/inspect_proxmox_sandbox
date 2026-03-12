@@ -57,6 +57,7 @@ async def test_sample_init_cleanup_on_create_sdn_failure(
     5. Then release the instance back to pool
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     patch_path = "proxmoxsandbox._proxmox_sandbox_environment.InfraCommands"
     with patch(patch_path) as mock_infra:
@@ -119,6 +120,7 @@ async def test_sample_init_no_cleanup_on_early_failure(
     should be attempted since nothing was created.
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     patch_path = "proxmoxsandbox._proxmox_sandbox_environment.InfraCommands"
     with patch(patch_path) as mock_infra:
@@ -173,6 +175,7 @@ async def test_sample_init_precheck_cleans_dirty_instance(
     the pre-check should detect them and call cleanup_no_id before proceeding.
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     patch_path = "proxmoxsandbox._proxmox_sandbox_environment.InfraCommands"
     with patch(patch_path) as mock_infra:
@@ -226,6 +229,7 @@ async def test_sample_init_precheck_cleanup_fails_but_continues(
     and continue (not raise).
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     patch_path = "proxmoxsandbox._proxmox_sandbox_environment.InfraCommands"
     with patch(patch_path) as mock_infra:
@@ -282,6 +286,7 @@ async def test_sample_init_precheck_read_vnets_fails_but_continues(
     (not raise).
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     patch_path = "proxmoxsandbox._proxmox_sandbox_environment.InfraCommands"
     with patch(patch_path) as mock_infra:
@@ -338,6 +343,7 @@ async def test_sample_init_dirty_instance_not_returned_when_cleanup_fails(
     - This prevents cascading failures across samples
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     patch_path = "proxmoxsandbox._proxmox_sandbox_environment.InfraCommands"
     with patch(patch_path) as mock_infra:
