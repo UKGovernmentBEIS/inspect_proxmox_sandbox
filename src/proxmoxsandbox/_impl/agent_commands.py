@@ -1,5 +1,5 @@
-import asyncio
 import base64
+import logging
 from logging import getLogger
 from typing import List
 
@@ -8,21 +8,29 @@ from inspect_ai.util import (
     SandboxEnvironmentLimits,
     trace_action,
 )
+from tenacity import before_sleep_log, retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
 )
 
-# On Windows, we found that the virtio-serial channel between QEMU and
-# the guest agent drops intermittently (~5-7% of calls).  The resulting
-# 500 errors surface with varied messages ("got timeout", "is not running",
-# "being used by another process", corrupt format strings, etc.) so we
-# simply retry on ANY 500 from a QGA endpoint.  A 500 typically indicates
-# the command was not delivered to the guest agent (channel timeout or
-# disconnect), so retrying is generally safe.
-_QGA_MAX_RETRIES = 3
-_QGA_RETRY_DELAY = 3  # seconds
+
+def _is_retryable_qga_error(exc: BaseException) -> bool:
+    # On Windows, the virtio-serial channel between QEMU and the guest agent
+    # drops intermittently (~5-7% of calls). HTTP 500s surface with varied
+    # messages ("got timeout", "is not running", "being used by another
+    # process", corrupt format strings, etc.) — we retry on ANY 500 from a
+    # QGA endpoint as it typically means the command was not delivered.
+    #
+    # Transport-layer errors (ConnectError, ConnectTimeout, RemoteProtocolError,
+    # ReadError) indicate the Proxmox HTTPS API itself was unreachable, e.g.
+    # during a transient network blip. These are also safe to retry.
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 500
+    return False
 
 
 class AgentCommands:
@@ -37,25 +45,23 @@ class AgentCommands:
         self.async_proxmox = async_proxmox
         self.node = node
 
-    @staticmethod
-    def _is_transient_qga_error(exc: httpx.HTTPStatusError) -> bool:
-        """Check if an HTTP error is a transient QGA failure safe to retry."""
-        return exc.response.status_code == 500
-
     async def _retry_on_qga_error(self, label: str, coro_fn):
-        """Retry a coroutine function on transient QGA errors."""
-        for attempt in range(1, _QGA_MAX_RETRIES + 1):
-            try:
-                return await coro_fn()
-            except httpx.HTTPStatusError as e:
-                if attempt < _QGA_MAX_RETRIES and self._is_transient_qga_error(e):
-                    self.logger.warning(
-                        f"{label} failed (attempt {attempt}/{_QGA_MAX_RETRIES}), "
-                        f"retrying in {_QGA_RETRY_DELAY}s: {e}"
-                    )
-                    await asyncio.sleep(_QGA_RETRY_DELAY)
-                else:
-                    raise
+        """Retry a coroutine function on transient QGA errors.
+
+        Uses exponential backoff with jitter to spread retries when many
+        samples fail simultaneously (e.g. during a network blip).
+        """
+        @retry(
+            retry=retry_if_exception(_is_retryable_qga_error),
+            wait=wait_exponential_jitter(initial=1, max=30),
+            stop=stop_after_attempt(6),
+            before_sleep=before_sleep_log(self.logger, logging.WARNING),
+            reraise=True,
+        )
+        async def _run():
+            return await coro_fn()
+
+        return await _run()
 
     async def get_agent_exec_status(self, vm_id: int, pid: int):
         path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec-status?pid={pid}"
