@@ -54,6 +54,7 @@ def test_inspect_eval() -> None:
             ],
         ),
         log_level="trace",
+        display="plain",
         # sandbox_cleanup=False
     )
 
