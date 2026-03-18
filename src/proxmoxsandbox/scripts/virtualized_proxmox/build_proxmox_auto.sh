@@ -150,8 +150,23 @@ touch /var/local/inspect-proxmox-on-first-boot.done
 poweroff
 EOFONFIRSTBOOT
 
-cat << 'EOFDOCKER' > Dockerfile
-FROM debian:bookworm-slim
+# Use ECR pull-through cache if available
+DEBIAN_BASE_IMAGE="debian:bookworm-slim"
+if command -v aws &>/dev/null && AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null); then
+    ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    # Only use the cache if a docker-hub pull-through cache rule is actually configured
+    if aws ecr describe-pull-through-cache-rules --region "${AWS_DEFAULT_REGION}" \
+           --query "pullThroughCacheRules[?ecrRepositoryPrefix=='docker-hub'] | [0]" \
+           --output text 2>/dev/null | grep -q "docker-hub"; then
+        aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" \
+            | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+        DEBIAN_BASE_IMAGE="${ECR_REGISTRY}/docker-hub/library/debian:bookworm-slim"
+        echo "Using ECR pull-through cache: $DEBIAN_BASE_IMAGE"
+    fi
+fi
+
+cat << EOFDOCKER > Dockerfile
+FROM $DEBIAN_BASE_IMAGE
 
 RUN apt-get update && apt-get install -y \
      gnupg \
