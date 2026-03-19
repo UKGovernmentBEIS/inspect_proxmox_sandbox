@@ -154,8 +154,8 @@ EOFONFIRSTBOOT
 # DEBIAN_BASE_IMAGE=123456789.dkr.ecr.eu-west-2.amazonaws.com/docker-hub/library/debian:bookworm-slim
 DEBIAN_BASE_IMAGE=${DEBIAN_BASE_IMAGE:-debian:bookworm-slim}
 
-cat << EOFDOCKER > Dockerfile
-FROM $DEBIAN_BASE_IMAGE
+echo "FROM $DEBIAN_BASE_IMAGE" > Dockerfile
+cat << 'EOFDOCKER' >> Dockerfile
 
 RUN apt-get update && apt-get install -y \
      gnupg \
@@ -167,7 +167,7 @@ RUN mkdir -p /iso
 
 RUN wget -q -O /iso/proxmox.iso https://enterprise.proxmox.com/iso/proxmox-ve_9.0-1.iso
 
-# Confusingly, although Proxmox 9 is based on trixie (Debian 13), this Docker build 
+# Confusingly, although Proxmox 9 is based on trixie (Debian 13), this Docker build
 # must continue to use bookworm (Debian 12) because there are not yet any trixie proxmox packages.
 RUN echo "deb http://download.proxmox.com/debian/pve/ bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve.list
 RUN wget -O- http://download.proxmox.com/debian/proxmox-release-bookworm.gpg | apt-key add -
@@ -185,7 +185,6 @@ VOLUME /output
 
 # Default command to copy the ISO to the output volume
 CMD ["cp", "/iso/proxmox-auto-from-iso.iso", "/output/"]
-
 EOFDOCKER
 
 docker build -t proxmox-auto-install .
