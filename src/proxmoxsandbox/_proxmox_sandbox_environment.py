@@ -24,11 +24,8 @@ from typing_extensions import override
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.infra_commands import InfraCommands
-from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import IpamMapping
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
     SdnConfigType,
@@ -45,9 +42,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
     infra_commands: InfraCommands
     agent_commands: AgentCommands
-    qemu_commands: QemuCommands
-    task_wrapper: TaskWrapper
-    built_in_vm: BuiltInVM
     all_ipam_mappings: Tuple[IpamMapping, ...]
     sdn_config: SdnConfigType
     vm_id: int
@@ -66,9 +60,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     ):
         self.infra_commands = infra_commands
         self.agent_commands = agent_commands
-        self.qemu_commands = infra_commands.qemu_commands
-        self.built_in_vm = infra_commands.built_in_vm
-        self.task_wrapper = infra_commands.task_wrapper
         self.all_ipam_mappings = ipam_mappings
         self.sdn_config = sdn_config
         self.vm_id = vm_id
@@ -143,7 +134,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     async def ensure_vms(
         async_proxmox_api: AsyncProxmoxAPI, config: ProxmoxSandboxEnvironmentConfig
     ) -> None:
-        infra = InfraCommands.build(
+        infra_commands = InfraCommands.build(
             async_proxmox_api, config.node, config.image_storage
         )
         built_in_names = set()
@@ -151,7 +142,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             if vm_config.vm_source_config.built_in is not None:
                 built_in_names.add(vm_config.vm_source_config.built_in)
         for built_in_name in built_in_names:
-            await infra.built_in_vm.ensure_exists(built_in_name)
+            await infra_commands.built_in_vm.ensure_exists(built_in_name)
 
     @classmethod
     @override
@@ -317,12 +308,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
 
         if cleanup:
-            infra = InfraCommands.build(
+            infra_commands = InfraCommands.build(
                 cls._create_async_proxmox_api(config),
                 config.node,
                 config.image_storage,
             )
-            await infra.task_cleanup()
+            await infra_commands.task_cleanup()
         else:
             print(
                 "\nCleanup all sandbox releases with: "
@@ -334,12 +325,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     async def cli_cleanup(cls, id: str | None) -> None:
         if id is None:
             config = ProxmoxSandboxEnvironmentConfig()
-            infra = InfraCommands.build(
+            infra_commands = InfraCommands.build(
                 cls._create_async_proxmox_api(config),
                 config.node,
                 config.image_storage,
             )
-            await infra.cleanup_no_id()
+            await infra_commands.cleanup_no_id()
         else:
             print("\n[red]Cleanup by ID not implemented[/red]\n")
 
@@ -620,10 +611,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         """
         if self.vm_id is None:
             raise ConnectionError("Sandbox is not running")
-        return SandboxConnection(
-            type="proxmox",
-            command=f"open '{await self.qemu_commands.connection_url(self.vm_id)}'",
-        )
+        url = await self.infra_commands.qemu_commands.connection_url(self.vm_id)
+        return SandboxConnection(type="proxmox", command=f"open '{url}'")
 
     async def create_snapshot(self, snapshot_name: str) -> None:
         """Creates a snapshot of the VM."""
@@ -633,7 +622,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 vm_id=self.vm_id, snapshot_name=snapshot_name
             )
 
-        await self.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
+        await self.infra_commands.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
 
     async def restore_snapshot(self, snapshot_name: str) -> None:
         """Restores a snapshot of the VM."""
@@ -643,7 +632,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 vm_id=self.vm_id, snapshot_name=snapshot_name
             )
 
-        await self.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
+        await self.infra_commands.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
         await self.infra_commands.qemu_commands.await_vm(
             vm_id=self.vm_id, is_sandbox=True
         )
