@@ -89,9 +89,9 @@ class SdnCommands(abc.ABC):
         "proxmox_sdns_cleanup_executed", default=False
     )
 
-    def __init__(self, async_proxmox: AsyncProxmoxAPI):
+    def __init__(self, async_proxmox: AsyncProxmoxAPI, task_wrapper: TaskWrapper):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = TaskWrapper(async_proxmox)
+        self.task_wrapper = task_wrapper
 
     def find_existing_cidr_overlaps(
         self, list1: List[str], list2: List[str]

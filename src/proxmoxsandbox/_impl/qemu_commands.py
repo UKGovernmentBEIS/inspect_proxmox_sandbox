@@ -43,10 +43,12 @@ class QemuCommands(abc.ABC):
         async_proxmox: AsyncProxmoxAPI,
         node: str,
         image_storage: str,
+        task_wrapper: TaskWrapper,
+        storage_commands: LocalStorageCommands,
     ):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = TaskWrapper(async_proxmox)
-        self.storage_commands = LocalStorageCommands(async_proxmox, node)
+        self.task_wrapper = task_wrapper
+        self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
 
@@ -511,8 +513,7 @@ class QemuCommands(abc.ABC):
             json_for_create["name"] = vm_config.name
         if vm_config.uefi_boot:
             json_for_create["efidisk0"] = (
-                f"{self.image_storage}:0,"
-                "efitype=4m,pre-enrolled-keys=0"
+                f"{self.image_storage}:0,efitype=4m,pre-enrolled-keys=0"
             )
             json_for_create["bios"] = "ovmf"
 
