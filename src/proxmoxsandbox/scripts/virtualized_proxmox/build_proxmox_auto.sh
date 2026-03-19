@@ -150,12 +150,15 @@ touch /var/local/inspect-proxmox-on-first-boot.done
 poweroff
 EOFONFIRSTBOOT
 
-# Override DEBIAN_BASE_IMAGE to use a pull-through cache, e.g.:
+# Pre-pull base image from a pull-through cache if configured, e.g.:
 # DEBIAN_BASE_IMAGE=123456789.dkr.ecr.eu-west-2.amazonaws.com/docker-hub/library/debian:bookworm-slim
-DEBIAN_BASE_IMAGE=${DEBIAN_BASE_IMAGE:-debian:bookworm-slim}
+if [ -n "${DEBIAN_BASE_IMAGE:-}" ]; then
+    docker pull "$DEBIAN_BASE_IMAGE"
+    docker tag "$DEBIAN_BASE_IMAGE" debian:bookworm-slim
+fi
 
-echo "FROM $DEBIAN_BASE_IMAGE" > Dockerfile
-cat << 'EOFDOCKER' >> Dockerfile
+cat << 'EOFDOCKER' > Dockerfile
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
      gnupg \
