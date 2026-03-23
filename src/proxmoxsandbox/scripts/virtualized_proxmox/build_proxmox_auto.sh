@@ -273,7 +273,8 @@ root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
 
 # for some reason the hostkeys are not regenerated and proxmox complains about missing /etc/ssh/ssh_host_rsa_key.pub
 # virt-sysprep needs root to be able to access the kernel on Ubuntu so we need sudo; see https://bugs.launchpad.net/ubuntu/+source/linux/+bug/759725
-sudo LIBGUESTFS_MEMSIZE=8192 virt-sysprep -d "$VM_NEW" \
+LIBGUESTFS_MEMSIZE=$(( TOTAL_MEM_KB * 80 / 100 / 1024 ))
+sudo LIBGUESTFS_MEMSIZE=$LIBGUESTFS_MEMSIZE virt-sysprep -d "$VM_NEW" \
     --root-password "password:$root_password" \
     --operations "defaults,-ssh-hostkeys" \
 
