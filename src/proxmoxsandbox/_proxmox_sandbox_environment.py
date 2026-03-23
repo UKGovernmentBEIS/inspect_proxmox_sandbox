@@ -348,6 +348,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         user: str | None = None,
         timeout: int | None = None,
         timeout_retry: bool = True,
+        concurrency: bool = False,
     ) -> ExecResult[str]:
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
@@ -600,7 +601,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             return bytes_data
 
     @override
-    async def connection(self) -> SandboxConnection:
+    async def connection(self, *, user: str | None = None) -> SandboxConnection:
         """
         Returns a connection to the sandbox.
 
