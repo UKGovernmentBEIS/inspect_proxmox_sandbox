@@ -1,10 +1,9 @@
 import abc
 import re
-from contextvars import ContextVar
 from ipaddress import ip_address, ip_network
 from logging import getLogger
 from random import shuffle
-from typing import Collection, List, Optional, Sequence, Set, Tuple, TypeAlias
+from typing import Collection, List, Optional, Sequence, Tuple, TypeAlias
 
 from inspect_ai.util import trace_action
 from pydantic import BaseModel
@@ -78,16 +77,6 @@ class SdnCommands(abc.ABC):
 
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
-
-    _created_sdns: ContextVar[Set[str]] = ContextVar(
-        "proxmox_created_sdns", default=set()
-    )
-    _created_ipam_mappings: ContextVar[List[IpamMapping]] = ContextVar(
-        "proxmox_created_ipam_mappings", default=list()
-    )
-    _cleanup_completed: ContextVar[bool] = ContextVar(
-        "proxmox_sdns_cleanup_executed", default=False
-    )
 
     def __init__(self, async_proxmox: AsyncProxmoxAPI, task_wrapper: TaskWrapper):
         self.async_proxmox = async_proxmox
@@ -300,8 +289,6 @@ class SdnCommands(abc.ABC):
 
         await self.do_update_all_sdn()
 
-        self._created_sdns.get().add(sdn_zone_id)
-
         return sdn_zone_id, existing_vnet_aliases
 
     async def do_update_all_sdn(self) -> None:
@@ -436,21 +423,4 @@ class SdnCommands(abc.ABC):
                 f"/cluster/sdn/vnets/{ipam_mapping.vnet_id}/ips",
                 json=ipam_mapping.to_proxmox_format(),
             )
-            # We save the ip allocations so that we can delete them later
-            self._created_ipam_mappings.get().append(ipam_mapping)
 
-    async def task_cleanup(self) -> None:
-        cleanup_completed = self._cleanup_completed.get()
-
-        self.logger.debug(
-            f"sdn cleanup; {cleanup_completed=}; {self._created_sdns.get()=}"
-        )
-
-        if cleanup_completed:
-            return
-
-        with trace_action(self.logger, self.TRACE_NAME, "cleanup all SDNs"):
-            await self.tear_down_sdn_zones_and_vnets(
-                self._created_sdns.get(), self._created_ipam_mappings.get()
-            )
-            self._cleanup_completed.set(True)
