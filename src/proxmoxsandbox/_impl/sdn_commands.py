@@ -5,6 +5,7 @@ from logging import getLogger
 from random import shuffle
 from typing import Collection, List, Optional, Sequence, Tuple, TypeAlias
 
+import httpx
 from inspect_ai.util import trace_action
 from pydantic import BaseModel
 from pydantic.networks import IPvAnyAddress
@@ -111,12 +112,12 @@ class SdnCommands(abc.ABC):
             f"sdns={self._tracked_sdn_zone_ids}, "
             f"ipam_mappings={len(self._tracked_ipam_mappings)}"
         )
-        if self._tracked_sdn_zone_ids:
+        for zone_id in list(self._tracked_sdn_zone_ids):
             await self.tear_down_sdn_zones_and_vnets(
-                self._tracked_sdn_zone_ids, self._tracked_ipam_mappings
+                {zone_id}, self._tracked_ipam_mappings
             )
-        self._tracked_sdn_zone_ids.clear()
-        self._tracked_ipam_mappings.clear()
+            self._tracked_sdn_zone_ids.discard(zone_id)
+            self._tracked_ipam_mappings.clear()
 
     def find_existing_cidr_overlaps(
         self, list1: List[str], list2: List[str]
@@ -402,27 +403,43 @@ class SdnCommands(abc.ABC):
             await self.tear_down_sdn_ip_allocations(ipam_mappings)
 
             for sdn_zone_id in sdn_zone_ids:
-                all_vnets = await self.read_all_vnets()
-                relevant_vnets = list(
-                    vnet for vnet in all_vnets if vnet["zone"] == sdn_zone_id
-                )
-                for vnet_details in relevant_vnets:
-                    vnet = vnet_details["vnet"]
-                    subnets = await self.async_proxmox.request(
-                        "GET", f"/cluster/sdn/vnets/{vnet}/subnets"
+                try:
+                    all_vnets = await self.read_all_vnets()
+                    relevant_vnets = list(
+                        vnet for vnet in all_vnets if vnet["zone"] == sdn_zone_id
                     )
-                    for subnet_details in subnets:
-                        subnet_id = subnet_details["id"]
+                    for vnet_details in relevant_vnets:
+                        vnet = vnet_details["vnet"]
+                        subnets = await self.async_proxmox.request(
+                            "GET", f"/cluster/sdn/vnets/{vnet}/subnets"
+                        )
+                        for subnet_details in subnets:
+                            subnet_id = subnet_details["id"]
+                            await self.async_proxmox.request(
+                                "DELETE",
+                                f"/cluster/sdn/vnets/{vnet}/subnets/{subnet_id}",
+                            )
                         await self.async_proxmox.request(
-                            "DELETE",
-                            f"/cluster/sdn/vnets/{vnet}/subnets/{subnet_id}",
+                            "DELETE", f"/cluster/sdn/vnets/{vnet}"
                         )
                     await self.async_proxmox.request(
-                        "DELETE", f"/cluster/sdn/vnets/{vnet}"
+                        "DELETE", f"/cluster/sdn/zones/{sdn_zone_id}"
                     )
-                await self.async_proxmox.request(
-                    "DELETE", f"/cluster/sdn/zones/{sdn_zone_id}"
-                )
+                except httpx.HTTPStatusError as e:
+                    # Proxmox has been observed to return 500 (not 404) when a
+                    # zone or vnet does not exist; treat that as already gone
+                    already_gone = (
+                        e.response.status_code == 500
+                        and "does not exist" in e.response.text
+                    )
+                    if not already_gone:
+                        self.logger.warning(
+                            f"failed to tear down SDN zone {sdn_zone_id}: {e}"
+                        )
+                except Exception as e:
+                    self.logger.warning(
+                        f"failed to tear down SDN zone {sdn_zone_id}: {e}"
+                    )
 
         await self.do_update_all_sdn()
 

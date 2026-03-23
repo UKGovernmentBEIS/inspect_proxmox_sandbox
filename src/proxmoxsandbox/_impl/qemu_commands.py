@@ -5,6 +5,7 @@ from logging import getLogger
 from pathlib import Path
 from typing import Collection, Dict, List, Set
 
+import httpx
 import tenacity
 from inspect_ai.util import trace_action
 from pydantic.networks import HttpUrl
@@ -57,8 +58,23 @@ class QemuCommands(abc.ABC):
         self.logger.debug(f"qemu_commands task_cleanup; vms={self._tracked_vm_ids}")
         for vm_id in list(self._tracked_vm_ids):
             self.logger.debug(f"task_cleanup: destroy_vm {vm_id=}")
-            await self.destroy_vm(vm_id)
-        self._tracked_vm_ids.clear()
+            try:
+                await self.destroy_vm(vm_id)
+                self._tracked_vm_ids.discard(vm_id)
+            except httpx.HTTPStatusError as e:
+                # Proxmox returns 500 (not 404) when a VM config file is missing
+                already_gone = (
+                    e.response.status_code == 500
+                    and "does not exist" in e.response.text
+                )
+                if already_gone:
+                    self._tracked_vm_ids.discard(vm_id)
+                else:
+                    self.logger.warning(
+                        f"task_cleanup: failed to destroy VM {vm_id}: {e}"
+                    )
+            except Exception as e:
+                self.logger.warning(f"task_cleanup: failed to destroy VM {vm_id}: {e}")
 
     async def await_vm(
         self,

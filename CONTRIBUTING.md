@@ -85,6 +85,10 @@ The design of this provider is constrained by what is offered by the
 For example, there is no way to upload arbitrary large files directly to the server, other
 than qcow2 and OVA files.
 
+For VM and SDN zone deletions, the Proxmox API has been observed to return HTTP 500 (not 404)
+when the resource does not exist. The cleanup code checks for 500 + "does not exist" in the
+response body to distinguish this from genuine errors.
+
 ### Cleanup
 
 There are two paths for cleaning up resources. The normal, "happy", path is via `sample_cleanup()`, which uses
