@@ -81,6 +81,40 @@ class SdnCommands(abc.ABC):
     def __init__(self, async_proxmox: AsyncProxmoxAPI, task_wrapper: TaskWrapper):
         self.async_proxmox = async_proxmox
         self.task_wrapper = task_wrapper
+        self._tracked_sdn_zone_ids: set[str] = set()
+        self._tracked_ipam_mappings: List[IpamMapping] = []
+
+    def register_sdn_zone(self, zone_id: str) -> None:
+        self._tracked_sdn_zone_ids.add(zone_id)
+
+    def register_ipam_mapping(self, mapping: IpamMapping) -> None:
+        self._tracked_ipam_mappings.append(mapping)
+
+    def deregister_sdn_resources(
+        self,
+        sdn_zone_id: str | None,
+        ipam_mappings: Sequence[IpamMapping],
+    ) -> None:
+        if sdn_zone_id:
+            self._tracked_sdn_zone_ids.discard(sdn_zone_id)
+        for m in ipam_mappings:
+            try:
+                self._tracked_ipam_mappings.remove(m)
+            except ValueError:
+                pass
+
+    async def task_cleanup(self) -> None:
+        self.logger.debug(
+            f"sdn_commands task_cleanup; "
+            f"sdns={self._tracked_sdn_zone_ids}, "
+            f"ipam_mappings={len(self._tracked_ipam_mappings)}"
+        )
+        if self._tracked_sdn_zone_ids:
+            await self.tear_down_sdn_zones_and_vnets(
+                self._tracked_sdn_zone_ids, self._tracked_ipam_mappings
+            )
+        self._tracked_sdn_zone_ids.clear()
+        self._tracked_ipam_mappings.clear()
 
     def find_existing_cidr_overlaps(
         self, list1: List[str], list2: List[str]
@@ -423,4 +457,3 @@ class SdnCommands(abc.ABC):
                 f"/cluster/sdn/vnets/{ipam_mapping.vnet_id}/ips",
                 json=ipam_mapping.to_proxmox_format(),
             )
-

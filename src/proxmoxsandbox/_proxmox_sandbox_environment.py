@@ -167,9 +167,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         infra_commands = InfraCommands.build(
             async_proxmox_api, config.node, config.image_storage
         )
-        target = ProxmoxTarget(
-            host=config.host, port=config.port, node=config.node
-        )
+        target = ProxmoxTarget(host=config.host, port=config.port, node=config.node)
         InfraCommands.set_instance(target, infra_commands)
         await cls.ensure_vms(async_proxmox_api, config)
 
@@ -186,9 +184,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if not isinstance(config, ProxmoxSandboxEnvironmentConfig):
             raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
 
-        target = ProxmoxTarget(
-            host=config.host, port=config.port, node=config.node
-        )
+        target = ProxmoxTarget(host=config.host, port=config.port, node=config.node)
         infra_commands = InfraCommands.get_instance(target)
 
         task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
@@ -314,9 +310,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
 
         if cleanup:
-            target = ProxmoxTarget(
-                host=config.host, port=config.port, node=config.node
-            )
+            target = ProxmoxTarget(host=config.host, port=config.port, node=config.node)
             infra_commands = InfraCommands.get_instance(target)
             await infra_commands.task_cleanup()
         else:

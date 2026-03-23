@@ -92,7 +92,8 @@ There are two paths for cleaning up resources. The normal, "happy", path is via 
 during sample setup and passed explicitly to `InfraCommands.delete_sdn_and_vms()`.
 
 However, the user can press Ctrl-C, per the [Inspect docs](https://inspect.aisi.org.uk/sandboxing.html#environment-cleanup).
-In this case `sample_cleanup` is skipped and `task_cleanup()` handles teardown instead. `InfraCommands` tracks all
-created resources (VMs, SDN zones, IPAM mappings) as instance attributes. A single shared `InfraCommands` instance is
-created in `task_init()` and stored in a class-level dict keyed by `ProxmoxTarget(host, port, node)`, so that
-`task_cleanup()` can retrieve it and destroy any resources not already cleaned up by `sample_cleanup`.
+In this case `sample_cleanup` is skipped and `task_cleanup()` handles teardown instead. `QemuCommands` tracks
+created VM IDs and `SdnCommands` tracks created SDN zones and IPAM mappings, each as instance attributes. A single
+shared `InfraCommands` instance (which owns these collaborators) is created in `task_init()` and stored in a
+class-level dict keyed by `ProxmoxTarget(host, port, node)`, so that `task_cleanup()` can retrieve it and delegate
+cleanup to each collaborator for any resources not already cleaned up by `sample_cleanup`.

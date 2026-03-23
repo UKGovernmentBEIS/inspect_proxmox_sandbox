@@ -3,7 +3,7 @@ import re
 import tarfile
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List
+from typing import Collection, Dict, List, Set
 
 import tenacity
 from inspect_ai.util import trace_action
@@ -43,6 +43,21 @@ class QemuCommands(abc.ABC):
         self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
+        self._tracked_vm_ids: Set[int] = set()
+
+    def register_vm(self, vm_id: int) -> None:
+        self._tracked_vm_ids.add(vm_id)
+
+    def deregister_vms(self, vm_ids: Collection[int]) -> None:
+        for vm_id in vm_ids:
+            self._tracked_vm_ids.discard(vm_id)
+
+    async def task_cleanup(self) -> None:
+        self.logger.debug(f"qemu_commands task_cleanup; vms={self._tracked_vm_ids}")
+        for vm_id in list(self._tracked_vm_ids):
+            self.logger.debug(f"task_cleanup: destroy_vm {vm_id=}")
+            await self.destroy_vm(vm_id)
+        self._tracked_vm_ids.clear()
 
     async def await_vm(
         self,
@@ -303,7 +318,6 @@ class QemuCommands(abc.ABC):
                     sdn_vnet_aliases,
                     vm_config.is_sandbox,
                 )
-
 
             else:
                 raise NotImplementedError(

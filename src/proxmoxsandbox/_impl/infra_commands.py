@@ -39,8 +39,9 @@ class ProxmoxTarget(NamedTuple):
 class InfraCommands(abc.ABC):
     """Orchestrates Proxmox infrastructure commands.
 
-    Tracks created resources (VMs, SDN zones, IPAM mappings) so that
-    ``task_cleanup`` can destroy anything left behind after an interrupted eval.
+    Collaborators (``QemuCommands``, ``SdnCommands``) track their own created
+    resources so that ``task_cleanup`` can destroy anything left behind after
+    an interrupted eval.
     """
 
     logger = getLogger(__name__)
@@ -72,9 +73,6 @@ class InfraCommands(abc.ABC):
         self.qemu_commands = qemu_commands
         self.built_in_vm = built_in_vm
         self.node = node
-        self._tracked_vm_ids: Set[int] = set()
-        self._tracked_sdn_zone_ids: Set[str] = set()
-        self._tracked_ipam_mappings: List[IpamMapping] = []
 
     @classmethod
     def get_instance(cls, target: ProxmoxTarget) -> "InfraCommands":
@@ -95,18 +93,6 @@ class InfraCommands(abc.ABC):
         """Store an InfraCommands instance for a Proxmox target."""
         cls._instances[target] = instance
 
-    def register_vm(self, vm_id: int) -> None:
-        """Track a created VM for cleanup on early termination."""
-        self._tracked_vm_ids.add(vm_id)
-
-    def register_sdn_zone(self, zone_id: str) -> None:
-        """Track a created SDN zone for cleanup on early termination."""
-        self._tracked_sdn_zone_ids.add(zone_id)
-
-    def register_ipam_mapping(self, mapping: IpamMapping) -> None:
-        """Track a created IPAM mapping for cleanup on early termination."""
-        self._tracked_ipam_mappings.append(mapping)
-
     def deregister_resources(
         self,
         vm_ids: Tuple[int, ...],
@@ -114,15 +100,8 @@ class InfraCommands(abc.ABC):
         ipam_mappings: Sequence[IpamMapping],
     ) -> None:
         """Remove successfully cleaned-up resources from tracking."""
-        for vm_id in vm_ids:
-            self._tracked_vm_ids.discard(vm_id)
-        if sdn_zone_id:
-            self._tracked_sdn_zone_ids.discard(sdn_zone_id)
-        for m in ipam_mappings:
-            try:
-                self._tracked_ipam_mappings.remove(m)
-            except ValueError:
-                pass
+        self.qemu_commands.deregister_vms(vm_ids)
+        self.sdn_commands.deregister_sdn_resources(sdn_zone_id, ipam_mappings)
 
     @classmethod
     def build(
@@ -159,7 +138,7 @@ class InfraCommands(abc.ABC):
             proxmox_ids_start, sdn_config
         )
         if sdn_zone_id:
-            self.register_sdn_zone(sdn_zone_id)
+            self.sdn_commands.register_sdn_zone(sdn_zone_id)
 
         known_builtins = await self.built_in_vm.known_builtins()
 
@@ -179,7 +158,7 @@ class InfraCommands(abc.ABC):
                     vm_config=vm_config,
                     built_in_vm_ids=known_builtins,
                 )
-                self.register_vm(vm_id)
+                self.qemu_commands.register_vm(vm_id)
                 vm_configs_with_ids.append((vm_id, vm_config))
 
         # TODO check for failed starts in the log somehow
@@ -244,7 +223,7 @@ class InfraCommands(abc.ABC):
                 vnet_id=vnet_id, zone_id=sdn_zone_id, mac=nic.mac, ipv4=nic.ipv4
             )
             await self.sdn_commands.create_ipam_mapping(ipam_mapping)
-            self.register_ipam_mapping(ipam_mapping)
+            self.sdn_commands.register_ipam_mapping(ipam_mapping)
             ipam_mappings.append(ipam_mapping)
         return ipam_mappings
 
@@ -271,20 +250,9 @@ class InfraCommands(abc.ABC):
 
     async def task_cleanup(self) -> None:
         """Destroy any tracked resources not already cleaned up by sample_cleanup."""
-        self.logger.debug(
-            f"infra_commands task_cleanup; "
-            f"vms={self._tracked_vm_ids}, sdns={self._tracked_sdn_zone_ids}"
-        )
-        for vm_id in list(self._tracked_vm_ids):
-            self.logger.debug(f"task_cleanup: destroy_vm {vm_id=}")
-            await self.qemu_commands.destroy_vm(vm_id)
-        if self._tracked_sdn_zone_ids:
-            await self.sdn_commands.tear_down_sdn_zones_and_vnets(
-                self._tracked_sdn_zone_ids, self._tracked_ipam_mappings
-            )
-        self._tracked_vm_ids.clear()
-        self._tracked_sdn_zone_ids.clear()
-        self._tracked_ipam_mappings.clear()
+        self.logger.debug("infra_commands task_cleanup activated")
+        await self.qemu_commands.task_cleanup()
+        await self.sdn_commands.task_cleanup()
 
     async def cleanup_no_id(self) -> None:
         noticed_vnets = set()
