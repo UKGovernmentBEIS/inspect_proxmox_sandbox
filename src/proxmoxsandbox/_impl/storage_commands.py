@@ -19,9 +19,11 @@ class LocalStorageCommands(abc.ABC):
     task_wrapper: TaskWrapper
     node: str
 
-    def __init__(self, async_proxmox: AsyncProxmoxAPI, node: str):
+    def __init__(
+        self, async_proxmox: AsyncProxmoxAPI, node: str, task_wrapper: TaskWrapper
+    ):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = TaskWrapper(async_proxmox)
+        self.task_wrapper = task_wrapper
         self.node = node
 
     async def upload_file_to_storage(

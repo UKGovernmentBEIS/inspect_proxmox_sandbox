@@ -6,13 +6,18 @@ import pytest
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
+from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, VnetAliases
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
-from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
+
+
+@pytest.fixture
+async def sandbox_env_config() -> ProxmoxSandboxEnvironmentConfig:
+    return ProxmoxSandboxEnvironmentConfig()
 
 
 @pytest.fixture
@@ -28,52 +33,28 @@ async def async_proxmox_api(
 
 
 @pytest.fixture
-async def node(
+async def infra_commands(
+    async_proxmox_api: AsyncProxmoxAPI,
     sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
-) -> str:
-    return sandbox_env_config.node
-
-
-@pytest.fixture
-async def sandbox_env_config() -> ProxmoxSandboxEnvironmentConfig:
-    return ProxmoxSandboxEnvironmentConfig()
-
-
-@pytest.fixture
-async def sdn_commands(async_proxmox_api: AsyncProxmoxAPI) -> SdnCommands:
-    return SdnCommands(async_proxmox_api)
-
-
-@pytest.fixture
-async def image_storage(
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
-) -> str:
-    return sandbox_env_config.image_storage
-
-
-@pytest.fixture
-async def qemu_commands(
-    async_proxmox_api: AsyncProxmoxAPI, node: str, image_storage: str
-) -> QemuCommands:
-    return QemuCommands(
-        async_proxmox_api, node=node, image_storage=image_storage
+) -> InfraCommands:
+    return InfraCommands.build(
+        async_proxmox_api, sandbox_env_config.node, sandbox_env_config.image_storage
     )
 
 
 @pytest.fixture
-async def built_in_vm(
-    async_proxmox_api: AsyncProxmoxAPI, node: str, image_storage: str
-) -> BuiltInVM:
-    return BuiltInVM(
-        async_proxmox_api, node=node, image_storage=image_storage
-    )
+async def sdn_commands(infra_commands: InfraCommands) -> SdnCommands:
+    return infra_commands.sdn_commands
 
 
 @pytest.fixture
-async def storage_commands(
-    async_proxmox_api: AsyncProxmoxAPI, node: str
-) -> LocalStorageCommands:
-    return LocalStorageCommands(async_proxmox_api, node=node)
+async def qemu_commands(infra_commands: InfraCommands) -> QemuCommands:
+    return infra_commands.qemu_commands
+
+
+@pytest.fixture
+async def built_in_vm(infra_commands: InfraCommands) -> BuiltInVM:
+    return infra_commands.built_in_vm
 
 
 @pytest.fixture(scope="function")

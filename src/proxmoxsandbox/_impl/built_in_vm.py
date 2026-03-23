@@ -60,14 +60,16 @@ class BuiltInVM(abc.ABC):
         async_proxmox: AsyncProxmoxAPI,
         node: str,
         image_storage: str,
+        task_wrapper: TaskWrapper,
+        qemu_commands: QemuCommands,
+        sdn_commands: SdnCommands,
+        storage_commands: LocalStorageCommands,
     ):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = TaskWrapper(async_proxmox)
-        self.qemu_commands = QemuCommands(
-            async_proxmox, node, image_storage=image_storage
-        )
-        self.sdn_commands = SdnCommands(async_proxmox)
-        self.storage_commands = LocalStorageCommands(async_proxmox, node)
+        self.task_wrapper = task_wrapper
+        self.qemu_commands = qemu_commands
+        self.sdn_commands = sdn_commands
+        self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
         self.cache_dir = platformdirs.user_cache_path(

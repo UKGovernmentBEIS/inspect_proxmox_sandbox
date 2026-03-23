@@ -20,6 +20,7 @@ from proxmoxsandbox._impl.sdn_commands import (
     SdnCommands,
     VnetAliases,
 )
+from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     SdnConfigType,
@@ -43,18 +44,42 @@ class InfraCommands(abc.ABC):
         self,
         async_proxmox: AsyncProxmoxAPI,
         node: str,
-        image_storage: str,
+        task_wrapper: TaskWrapper,
+        sdn_commands: SdnCommands,
+        qemu_commands: QemuCommands,
+        built_in_vm: BuiltInVM,
     ):
+        """Prefer InfraCommands.build() unless injecting collaborators for testing."""
         self.async_proxmox = async_proxmox
-        self.task_wrapper = TaskWrapper(async_proxmox)
-        self.sdn_commands = SdnCommands(async_proxmox)
-        self.qemu_commands = QemuCommands(
-            async_proxmox, node, image_storage=image_storage
-        )
-        self.built_in_vm = BuiltInVM(
-            async_proxmox, node, image_storage=image_storage
-        )
+        self.task_wrapper = task_wrapper
+        self.sdn_commands = sdn_commands
+        self.qemu_commands = qemu_commands
+        self.built_in_vm = built_in_vm
         self.node = node
+
+    @classmethod
+    def build(
+        cls, async_proxmox: AsyncProxmoxAPI, node: str, image_storage: str
+    ) -> "InfraCommands":
+        """Build the full object graph bottom-up."""
+        task_wrapper = TaskWrapper(async_proxmox)
+        storage_commands = LocalStorageCommands(async_proxmox, node, task_wrapper)
+        sdn_commands = SdnCommands(async_proxmox, task_wrapper)
+        qemu_commands = QemuCommands(
+            async_proxmox, node, image_storage, task_wrapper, storage_commands
+        )
+        built_in_vm = BuiltInVM(
+            async_proxmox,
+            node,
+            image_storage,
+            task_wrapper,
+            qemu_commands,
+            sdn_commands,
+            storage_commands,
+        )
+        return cls(
+            async_proxmox, node, task_wrapper, sdn_commands, qemu_commands, built_in_vm
+        )
 
     async def create_sdn_and_vms(
         self,
