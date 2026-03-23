@@ -78,7 +78,7 @@ sandbox=SandboxEnvironmentSpec(
             VmConfig(
                 # A virtual machine that this provider will install and configure automatically.
                 vm_source_config=VmSourceConfig(
-                    built_in="ubuntu24.04" # currently supported: "ubuntu24.04, "debian13", "kali2025.3"; see schema.py
+                    built_in="ubuntu24.04" # currently supported: "ubuntu24.04", "debian13", "kali2025.4"; see schema.py
                 ),
                 name="romeo", # name is optional, but recommended - it will be shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name.
                 ram_mb=512, # optional, default is 2048 MB
@@ -321,6 +321,10 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 - Firewall off the SDN from the Proxmox server and from other SDNs
 - Support cloud-init for VM definition
 - Escape hatch for Proxmox API so you can specify arbitrary parameters during VM / SDN creation 
+
+## Built-in VM image versions
+
+The built-in VMs (`ubuntu24.04`, `debian13`, `kali2025.4`) pin specific upstream image URLs in `built_in_vm.py`. These are not auto-updated — when a new upstream release appears (e.g. a new Kali quarterly release), the URL, the `Literal` type in `schema.py`, and all references in tests and examples must be updated together.
 
 ## Tech debt
 
