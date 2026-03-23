@@ -148,7 +148,7 @@ async def test_built_in() -> None:
             ),
             VmConfig(
                 name="kali",
-                vm_source_config=VmSourceConfig(built_in="kali2025.3"),
+                vm_source_config=VmSourceConfig(built_in="kali2025.4"),
                 nics=(
                     VmNicConfig(vnet_alias="vnet80"),
                     VmNicConfig(vnet_alias="vnet81"),
