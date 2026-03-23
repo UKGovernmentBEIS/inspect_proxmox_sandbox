@@ -46,6 +46,19 @@ uv run pytest
 
 The tests require your Proxmox node to have at least 3 vCPUs available.
 
+### Debug logging
+
+To see debug-level log output while running tests:
+
+```
+uv run pytest --log-cli-level=DEBUG
+```
+
+The `httpcore` and `httpx` loggers are set to `WARNING` in `conftest.py` to suppress
+their per-request connection/TLS/header noise, which otherwise drowns out application
+logs. If you need to debug HTTP-level issues, temporarily comment out the
+`setLevel(logging.WARNING)` lines in `tests/proxmoxsandboxtest/conftest.py`.
+
 ## Linting & Formatting
 
 [Ruff](https://docs.astral.sh/ruff/) is used for linting and formatting. To run both
