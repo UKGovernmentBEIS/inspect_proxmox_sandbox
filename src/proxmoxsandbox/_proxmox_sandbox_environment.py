@@ -28,10 +28,7 @@ from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import IpamMapping
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
-from proxmoxsandbox.schema import (
-    ProxmoxSandboxEnvironmentConfig,
-    SdnConfigType,
-)
+from proxmoxsandbox.schema import ProxmoxSandboxEnvironmentConfig
 
 
 @sandboxenv(name="proxmox")
@@ -47,7 +44,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     qemu_commands: QemuCommands
     task_wrapper: TaskWrapper
     all_ipam_mappings: Tuple[IpamMapping, ...]
-    sdn_config: SdnConfigType
     vm_id: int
     all_vm_ids: Tuple[int, ...]
     sdn_zone_id: str | None
@@ -57,7 +53,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         infra_commands: InfraCommands,
         agent_commands: AgentCommands,
         ipam_mappings: Tuple[IpamMapping, ...],
-        sdn_config: SdnConfigType,
         vm_id: int,
         all_vm_ids: Tuple[int, ...],
         sdn_zone_id: str | None,
@@ -67,7 +62,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.qemu_commands = infra_commands.qemu_commands
         self.task_wrapper = infra_commands.task_wrapper
         self.all_ipam_mappings = ipam_mappings
-        self.sdn_config = sdn_config
         self.vm_id = vm_id
         self.all_vm_ids = all_vm_ids
         self.sdn_zone_id = sdn_zone_id
@@ -227,7 +221,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 infra_commands=infra_commands,
                 agent_commands=agent_commands,
                 ipam_mappings=ipam_mappings,
-                sdn_config=config.sdn_config,
                 vm_id=vm_config_and_id[0],
                 all_vm_ids=vm_ids,
                 sdn_zone_id=sdn_zone_id,

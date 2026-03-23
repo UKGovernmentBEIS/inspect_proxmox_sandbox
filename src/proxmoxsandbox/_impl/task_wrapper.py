@@ -37,6 +37,11 @@ class TaskWrapper(abc.ABC):
             post_action_current_tasks = await self.new_incomplete_tasks(
                 pre_existing_incomplete_tasks=incomplete_tasks_pre_action
             )
+            if post_action_current_tasks:
+                self.logger.debug(
+                    "waiting for tasks: %s",
+                    [t.get("upid", t) for t in post_action_current_tasks],
+                )
             return not post_action_current_tasks
 
         await new_tasks_are_complete()

@@ -67,6 +67,12 @@ class QemuCommands(abc.ABC):
                 "GET", f"/nodes/{self.node}/qemu/{vm_id}/status/current"
             )
             if vm_status["status"] != status_for_wait:
+                self.logger.debug(
+                    "vm %s status is %s, waiting for %s",
+                    vm_id,
+                    vm_status["status"],
+                    status_for_wait,
+                )
                 raise ValueError(f"vm {vm_id} not {status_for_wait}")
 
         with trace_action(
@@ -148,10 +154,13 @@ class QemuCommands(abc.ABC):
         vm_id: int,
         is_sandbox: bool,
     ) -> None:
-        await self.async_proxmox.request(
-            "POST",
-            f"/nodes/{self.node}/qemu/{vm_id}/status/start",
-        )
+        async def start() -> None:
+            await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{vm_id}/status/start",
+            )
+
+        await self.task_wrapper.do_action_and_wait_for_tasks(start)
 
         await self.await_vm(
             vm_id=vm_id,
