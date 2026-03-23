@@ -77,6 +77,8 @@ class SdnCommands(abc.ABC):
 
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
+    _tracked_sdn_zone_ids: set[str]
+    _tracked_ipam_mappings: List[IpamMapping]
 
     def __init__(self, async_proxmox: AsyncProxmoxAPI, task_wrapper: TaskWrapper):
         self.async_proxmox = async_proxmox

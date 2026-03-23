@@ -29,6 +29,7 @@ class QemuCommands(abc.ABC):
     image_storage: str
     storage_commands: LocalStorageCommands
     node: str
+    _tracked_vm_ids: Set[int]
 
     def __init__(
         self,
