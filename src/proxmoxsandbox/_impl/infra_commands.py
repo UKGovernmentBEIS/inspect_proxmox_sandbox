@@ -4,7 +4,7 @@ import re
 import sys
 from logging import getLogger
 from random import randint
-from typing import Collection, List, Sequence, Set, Tuple
+from typing import ClassVar, Collection, Dict, List, NamedTuple, Sequence, Set, Tuple
 
 from inspect_ai.util import trace_action
 from rich import box, print
@@ -28,10 +28,27 @@ from proxmoxsandbox.schema import (
 )
 
 
+class ProxmoxTarget(NamedTuple):
+    """Identifies a specific Proxmox host+node combination."""
+
+    host: str
+    port: int
+    node: str
+
+
 class InfraCommands(abc.ABC):
+    """Orchestrates Proxmox infrastructure commands.
+
+    Collaborators (``QemuCommands``, ``SdnCommands``) track their own created
+    resources so that ``task_cleanup`` can destroy anything left behind after
+    an interrupted eval.
+    """
+
     logger = getLogger(__name__)
 
     TRACE_NAME = "proxmox_infra_command"
+
+    _instances: ClassVar[Dict[ProxmoxTarget, "InfraCommands"]] = {}
 
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
@@ -56,6 +73,35 @@ class InfraCommands(abc.ABC):
         self.qemu_commands = qemu_commands
         self.built_in_vm = built_in_vm
         self.node = node
+
+    @classmethod
+    def get_instance(cls, target: ProxmoxTarget) -> "InfraCommands":
+        """Retrieve the InfraCommands instance for a Proxmox target.
+
+        Raises:
+            LookupError: If no instance has been stored for *target*
+                (i.e. ``task_init`` was not called).
+        """
+        if target not in cls._instances:
+            raise LookupError(
+                f"No InfraCommands instance for {target}. Was task_init called?"
+            )
+        return cls._instances[target]
+
+    @classmethod
+    def set_instance(cls, target: ProxmoxTarget, instance: "InfraCommands") -> None:
+        """Store an InfraCommands instance for a Proxmox target."""
+        cls._instances[target] = instance
+
+    def deregister_resources(
+        self,
+        vm_ids: Tuple[int, ...],
+        sdn_zone_id: str | None,
+        ipam_mappings: Sequence[IpamMapping],
+    ) -> None:
+        """Remove successfully cleaned-up resources from tracking."""
+        self.qemu_commands.deregister_vms(vm_ids)
+        self.sdn_commands.deregister_sdn_resources(sdn_zone_id, ipam_mappings)
 
     @classmethod
     def build(
@@ -91,6 +137,8 @@ class InfraCommands(abc.ABC):
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config
         )
+        if sdn_zone_id:
+            self.sdn_commands.register_sdn_zone(sdn_zone_id)
 
         known_builtins = await self.built_in_vm.known_builtins()
 
@@ -110,6 +158,7 @@ class InfraCommands(abc.ABC):
                     vm_config=vm_config,
                     built_in_vm_ids=known_builtins,
                 )
+                self.qemu_commands.register_vm(vm_id)
                 vm_configs_with_ids.append((vm_id, vm_config))
 
         # TODO check for failed starts in the log somehow
@@ -174,6 +223,7 @@ class InfraCommands(abc.ABC):
                 vnet_id=vnet_id, zone_id=sdn_zone_id, mac=nic.mac, ipv4=nic.ipv4
             )
             await self.sdn_commands.create_ipam_mapping(ipam_mapping)
+            self.sdn_commands.register_ipam_mapping(ipam_mapping)
             ipam_mappings.append(ipam_mapping)
         return ipam_mappings
 
@@ -199,7 +249,8 @@ class InfraCommands(abc.ABC):
         )
 
     async def task_cleanup(self) -> None:
-        self.logger.debug("infra_commands cleanup activated")
+        """Destroy any tracked resources not already cleaned up by sample_cleanup."""
+        self.logger.debug("infra_commands task_cleanup activated")
         await self.qemu_commands.task_cleanup()
         await self.sdn_commands.task_cleanup()
 

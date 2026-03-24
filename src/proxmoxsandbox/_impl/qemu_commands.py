@@ -1,11 +1,11 @@
 import abc
 import re
 import tarfile
-from contextvars import ContextVar
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Collection, Dict, List, Set
 
+import httpx
 import tenacity
 from inspect_ai.util import trace_action
 from pydantic.networks import HttpUrl
@@ -30,13 +30,7 @@ class QemuCommands(abc.ABC):
     image_storage: str
     storage_commands: LocalStorageCommands
     node: str
-
-    _running_proxmox_vms: ContextVar[Set[int]] = ContextVar(
-        "proxmox_running_vms", default=set()
-    )
-    _cleanup_completed: ContextVar[bool] = ContextVar(
-        "proxmox_vms_cleanup_executed", default=False
-    )
+    _tracked_vm_ids: Set[int]
 
     def __init__(
         self,
@@ -51,6 +45,36 @@ class QemuCommands(abc.ABC):
         self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
+        self._tracked_vm_ids: Set[int] = set()
+
+    def register_vm(self, vm_id: int) -> None:
+        self._tracked_vm_ids.add(vm_id)
+
+    def deregister_vms(self, vm_ids: Collection[int]) -> None:
+        for vm_id in vm_ids:
+            self._tracked_vm_ids.discard(vm_id)
+
+    async def task_cleanup(self) -> None:
+        self.logger.debug(f"qemu_commands task_cleanup; vms={self._tracked_vm_ids}")
+        for vm_id in list(self._tracked_vm_ids):
+            self.logger.debug(f"task_cleanup: destroy_vm {vm_id=}")
+            try:
+                await self.destroy_vm(vm_id)
+                self._tracked_vm_ids.discard(vm_id)
+            except httpx.HTTPStatusError as e:
+                # Proxmox returns 500 (not 404) when a VM config file is missing
+                already_gone = (
+                    e.response.status_code == 500
+                    and "does not exist" in e.response.text
+                )
+                if already_gone:
+                    self._tracked_vm_ids.discard(vm_id)
+                else:
+                    self.logger.warning(
+                        f"task_cleanup: failed to destroy VM {vm_id}: {e}"
+                    )
+            except Exception as e:
+                self.logger.warning(f"task_cleanup: failed to destroy VM {vm_id}: {e}")
 
     async def await_vm(
         self,
@@ -311,7 +335,6 @@ class QemuCommands(abc.ABC):
                     sdn_vnet_aliases,
                     vm_config.is_sandbox,
                 )
-                await self.register_created_vm(new_vm_id)
 
             else:
                 raise NotImplementedError(
@@ -483,7 +506,6 @@ class QemuCommands(abc.ABC):
                 f"/nodes/{self.node}/qemu/{vm_id_to_clone}/clone",
                 json={"newid": new_vm_id, "full": 0, "name": vm_config.name},
             )
-            await self.register_created_vm(new_vm_id)
 
         await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
 
@@ -533,21 +555,3 @@ class QemuCommands(abc.ABC):
 
     async def connection_url(self, vm_id: int) -> str:
         return f"{self.async_proxmox.base_url}/?console=kvm&novnc=1&vmid={vm_id}&node={self.node}"  # noqa: E501
-
-    async def register_created_vm(self, vm_id: int | None) -> None:
-        if vm_id is not None:
-            self._running_proxmox_vms.get().add(vm_id)
-
-    async def task_cleanup(self) -> None:
-        cleanup_completed = self._cleanup_completed.get()
-        self.logger.debug(f"qemu_commands cleanup activated; {cleanup_completed=}")
-        if cleanup_completed:
-            return
-
-        with trace_action(self.logger, self.TRACE_NAME, "cleanup all VMs"):
-            running_proxmox_vms = self._running_proxmox_vms.get()
-            self.logger.debug(f"existing vm count: {len(running_proxmox_vms)}")
-            for vm_id in running_proxmox_vms:
-                self.logger.debug(f"destroy_vm {vm_id=}")
-                await self.destroy_vm(vm_id)
-            self._cleanup_completed.set(True)

@@ -24,7 +24,7 @@ from typing_extensions import override
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.infra_commands import InfraCommands
+from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import IpamMapping
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
@@ -159,12 +159,17 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     async def task_init(
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
-        if config is not None:
-            if not isinstance(config, ProxmoxSandboxEnvironmentConfig):
-                raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
-            async_proxmox_api = cls._create_async_proxmox_api(config)
-            await ProxmoxSandboxEnvironment.ensure_vms(async_proxmox_api, config)
-        return None
+        if config is None:
+            config = ProxmoxSandboxEnvironmentConfig()
+        if not isinstance(config, ProxmoxSandboxEnvironmentConfig):
+            raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
+        async_proxmox_api = cls._create_async_proxmox_api(config)
+        infra_commands = InfraCommands.build(
+            async_proxmox_api, config.node, config.image_storage
+        )
+        target = ProxmoxTarget(host=config.host, port=config.port, node=config.node)
+        InfraCommands.set_instance(target, infra_commands)
+        await cls.ensure_vms(async_proxmox_api, config)
 
     @classmethod
     @override
@@ -179,19 +184,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if not isinstance(config, ProxmoxSandboxEnvironmentConfig):
             raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
 
-        async_proxmox_api = cls._create_async_proxmox_api(config)
-
-        infra_commands = InfraCommands.build(
-            async_proxmox_api, config.node, config.image_storage
-        )
+        target = ProxmoxTarget(host=config.host, port=config.port, node=config.node)
+        infra_commands = InfraCommands.get_instance(target)
 
         task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
 
         proxmox_ids_start = await infra_commands.find_proxmox_ids_start(task_name_start)
-
-        await ProxmoxSandboxEnvironment.ensure_vms(
-            async_proxmox_api=async_proxmox_api, config=config
-        )
 
         async with concurrency("proxmox", 1):
             (
@@ -213,7 +211,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         found_default = False
 
         agent_commands = AgentCommands(
-            async_proxmox=async_proxmox_api, node=config.node
+            async_proxmox=infra_commands.async_proxmox, node=config.node
         )
 
         for idx, vm_config_and_id in enumerate(vm_configs_with_ids):
@@ -288,6 +286,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                         ipam_mappings=any_vm_sandbox_environment.all_ipam_mappings,
                         vm_ids=any_vm_sandbox_environment.all_vm_ids,
                     )
+                    any_vm_sandbox_environment.infra_commands.deregister_resources(
+                        vm_ids=any_vm_sandbox_environment.all_vm_ids,
+                        sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
+                        ipam_mappings=any_vm_sandbox_environment.all_ipam_mappings,
+                    )
         return None
 
     @classmethod
@@ -307,11 +310,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             raise ValueError("config must be a ProxmoxSandboxEnvironmentConfig")
 
         if cleanup:
-            infra_commands = InfraCommands.build(
-                cls._create_async_proxmox_api(config),
-                config.node,
-                config.image_storage,
-            )
+            target = ProxmoxTarget(host=config.host, port=config.port, node=config.node)
+            infra_commands = InfraCommands.get_instance(target)
             await infra_commands.task_cleanup()
         else:
             print(
