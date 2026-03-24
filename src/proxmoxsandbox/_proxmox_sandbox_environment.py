@@ -557,8 +557,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             # Sweep orphaned resources across all Proxmox instances that
             # were used during this task run.
             for target, infra_commands in InfraCommands._instances.items():
-                cls.logger.debug(f"task_cleanup for {target}")
-                await infra_commands.task_cleanup()
+                try:
+                    cls.logger.debug(f"task_cleanup for {target}")
+                    await infra_commands.task_cleanup()
+                except Exception as e:
+                    cls.logger.warning(
+                        f"task_cleanup failed for {target}: {e}"
+                    )
         else:
             print(
                 "\nCleanup all sandbox releases with: "
