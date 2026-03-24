@@ -339,6 +339,64 @@ async def test_connect(proxmox_sandbox_environment: ProxmoxSandboxEnvironment) -
     assert "open 'http" in connection.command
 
 
+async def test_task_cleanup_after_interrupted_sample(
+    qemu_commands: QemuCommands, sdn_commands: SdnCommands
+) -> None:
+    """Simulate Ctrl-C: skip sample_cleanup, verify task_cleanup destroys resources."""
+    sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
+        vms_config=(
+            VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                name="test-task-cleanup",
+            ),
+        )
+    )
+
+    existing_vms = await qemu_commands.list_vms()
+    existing_zones = await sdn_commands.list_sdn_zones()
+
+    task_name = "ttc"
+    _, envs_dict = await setup_sandbox(task_name, sandbox_env_config)
+
+    # Resources should exist on Proxmox
+    mid_vms = await qemu_commands.list_vms()
+    mid_zones = await sdn_commands.list_sdn_zones()
+    assert len(mid_vms) == len(existing_vms) + 1
+    assert len(mid_zones) == len(existing_zones) + 1
+
+    # Simulate Ctrl-C: sample_cleanup is called with interrupted=True,
+    # which skips the happy-path deletion
+    await ProxmoxSandboxEnvironment.sample_cleanup(
+        task_name=task_name,
+        config=sandbox_env_config,
+        environments=envs_dict,
+        interrupted=True,
+    )
+
+    # Resources should still exist — sample_cleanup did nothing
+    still_vms = await qemu_commands.list_vms()
+    still_zones = await sdn_commands.list_sdn_zones()
+    assert len(still_vms) == len(existing_vms) + 1
+    assert len(still_zones) == len(existing_zones) + 1
+
+    # Now task_cleanup runs (as Inspect would after Ctrl-C)
+    await ProxmoxSandboxEnvironment.task_cleanup(
+        task_name=task_name,
+        config=sandbox_env_config,
+        cleanup=True,
+    )
+
+    # Resources should be gone
+    post_vms = await qemu_commands.list_vms()
+    post_zones = await sdn_commands.list_sdn_zones()
+    assert set(vm["vmid"] for vm in post_vms) == set(
+        vm["vmid"] for vm in existing_vms
+    )
+    existing_zones.sort(key=lambda x: x["zone"])
+    post_zones.sort(key=lambda x: x["zone"])
+    assert post_zones == existing_zones
+
+
 async def test_cli_cleanup(
     qemu_commands: QemuCommands, sdn_commands: SdnCommands
 ) -> None:

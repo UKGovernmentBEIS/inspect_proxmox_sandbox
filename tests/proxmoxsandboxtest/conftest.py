@@ -15,9 +15,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
-from proxmoxsandbox._impl.infra_commands import InfraCommands
+from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, VnetAliases
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
+from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
+from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
@@ -46,14 +48,32 @@ async def infra_commands(
     async_proxmox_api: AsyncProxmoxAPI,
     sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
 ) -> InfraCommands:
-    return InfraCommands.build(
+    target = ProxmoxTarget(
+        host=sandbox_env_config.host,
+        port=sandbox_env_config.port,
+        node=sandbox_env_config.node,
+    )
+    instance = InfraCommands.build(
         async_proxmox_api, sandbox_env_config.node, sandbox_env_config.image_storage
     )
+    InfraCommands.set_instance(target, instance)
+    return instance
 
 
 @pytest.fixture
 async def sdn_commands(infra_commands: InfraCommands) -> SdnCommands:
     return infra_commands.sdn_commands
+
+
+@pytest.fixture
+async def storage_commands(
+    async_proxmox_api: AsyncProxmoxAPI,
+    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
+) -> LocalStorageCommands:
+    task_wrapper = TaskWrapper(async_proxmox_api)
+    return LocalStorageCommands(
+        async_proxmox_api, sandbox_env_config.node, task_wrapper
+    )
 
 
 @pytest.fixture
