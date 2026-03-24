@@ -9,8 +9,8 @@ from inspect_ai.scorer import includes
 from inspect_ai.solver import basic_agent, generate
 from inspect_ai.tool import bash
 
-from src.proxmoxsandbox._impl.qemu_commands import QemuCommands
-from src.proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
 CURRENT_DIR = Path(__file__).parent
 
