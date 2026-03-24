@@ -1,11 +1,11 @@
 import abc
 import re
 import tarfile
-from contextvars import ContextVar
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Collection, Dict, List, Set
 
+import httpx
 import tenacity
 from inspect_ai.util import trace_action
 from pydantic.networks import HttpUrl
@@ -15,7 +15,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     ProxmoxJsonDataType,
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
-from proxmoxsandbox._impl.storage_commands import StorageCommands
+from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
 
@@ -27,25 +27,54 @@ class QemuCommands(abc.ABC):
 
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
-    # TODO disambiguate that "this.storage" is for images rather than VM disks
-    # which continue to live in local-lvm
-    storage: str
-    storage_commands: StorageCommands
+    image_storage: str
+    storage_commands: LocalStorageCommands
     node: str
+    _tracked_vm_ids: Set[int]
 
-    _running_proxmox_vms: ContextVar[Set[int]] = ContextVar(
-        "proxmox_running_vms", default=set()
-    )
-    _cleanup_completed: ContextVar[bool] = ContextVar(
-        "proxmox_vms_cleanup_executed", default=False
-    )
-
-    def __init__(self, async_proxmox: AsyncProxmoxAPI, node: str):
+    def __init__(
+        self,
+        async_proxmox: AsyncProxmoxAPI,
+        node: str,
+        image_storage: str,
+        task_wrapper: TaskWrapper,
+        storage_commands: LocalStorageCommands,
+    ):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = TaskWrapper(async_proxmox)
-        self.storage = "local"
-        self.storage_commands = StorageCommands(async_proxmox, node, self.storage)
+        self.task_wrapper = task_wrapper
+        self.storage_commands = storage_commands
         self.node = node
+        self.image_storage = image_storage
+        self._tracked_vm_ids: Set[int] = set()
+
+    def register_vm(self, vm_id: int) -> None:
+        self._tracked_vm_ids.add(vm_id)
+
+    def deregister_vms(self, vm_ids: Collection[int]) -> None:
+        for vm_id in vm_ids:
+            self._tracked_vm_ids.discard(vm_id)
+
+    async def task_cleanup(self) -> None:
+        self.logger.debug(f"qemu_commands task_cleanup; vms={self._tracked_vm_ids}")
+        for vm_id in list(self._tracked_vm_ids):
+            self.logger.debug(f"task_cleanup: destroy_vm {vm_id=}")
+            try:
+                await self.destroy_vm(vm_id)
+                self._tracked_vm_ids.discard(vm_id)
+            except httpx.HTTPStatusError as e:
+                # Proxmox returns 500 (not 404) when a VM config file is missing
+                already_gone = (
+                    e.response.status_code == 500
+                    and "does not exist" in e.response.text
+                )
+                if already_gone:
+                    self._tracked_vm_ids.discard(vm_id)
+                else:
+                    self.logger.warning(
+                        f"task_cleanup: failed to destroy VM {vm_id}: {e}"
+                    )
+            except Exception as e:
+                self.logger.warning(f"task_cleanup: failed to destroy VM {vm_id}: {e}")
 
     async def await_vm(
         self,
@@ -150,10 +179,13 @@ class QemuCommands(abc.ABC):
         vm_id: int,
         is_sandbox: bool,
     ) -> None:
-        await self.async_proxmox.request(
-            "POST",
-            f"/nodes/{self.node}/qemu/{vm_id}/status/start",
-        )
+        async def start() -> None:
+            await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{vm_id}/status/start",
+            )
+
+        await self.task_wrapper.do_action_and_wait_for_tasks(start)
 
         await self.await_vm(
             vm_id=vm_id,
@@ -266,7 +298,7 @@ class QemuCommands(abc.ABC):
                     # and may be brittle
                     for i, vmdk in enumerate(vmdks):
                         json_for_create[f"{disk_prefix}{i}"] = (
-                            f"local-lvm:0,import-from={self.storage}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
+                            f"{self.image_storage}:0,import-from={LOCAL_STORAGE}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
                         )
 
                     new_vm_template_id = await self.find_next_available_vm_id()
@@ -314,7 +346,6 @@ class QemuCommands(abc.ABC):
                     sdn_vnet_aliases,
                     vm_config.is_sandbox,
                 )
-                await self.register_created_vm(new_vm_id)
 
             else:
                 raise NotImplementedError(
@@ -452,7 +483,7 @@ class QemuCommands(abc.ABC):
 
                     netx = f"{nic_prefix},bridge={bridge_name}"
                     if nic.mac:
-                        netx += f",macaddr={nic.mac.upper()}"
+                        netx += f",macaddr={str(nic.mac).upper()}"
                     if vm_config.firewall:
                         netx += ",firewall=1"
                     network_update_json[f"net{i}"] = netx
@@ -489,7 +520,6 @@ class QemuCommands(abc.ABC):
                 f"/nodes/{self.node}/qemu/{vm_id_to_clone}/clone",
                 json={"newid": new_vm_id, "full": 0, "name": vm_config.name},
             )
-            await self.register_created_vm(new_vm_id)
 
         await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
 
@@ -527,7 +557,9 @@ class QemuCommands(abc.ABC):
         if vm_config.name is not None:
             json_for_create["name"] = vm_config.name
         if vm_config.uefi_boot:
-            json_for_create["efidisk0"] = "local-lvm:0,efitype=4m,pre-enrolled-keys=0"
+            json_for_create["efidisk0"] = (
+                f"{self.image_storage}:0,efitype=4m,pre-enrolled-keys=0"
+            )
             json_for_create["bios"] = "ovmf"
 
     async def ping_qemu_agent(self, vm_id: int):
@@ -537,20 +569,3 @@ class QemuCommands(abc.ABC):
 
     async def connection_url(self, vm_id: int) -> str:
         return f"{self.async_proxmox.base_url}/?console=kvm&novnc=1&vmid={vm_id}&node={self.node}"  # noqa: E501
-
-    async def register_created_vm(self, vm_id: int | None) -> None:
-        if vm_id is not None:
-            self._running_proxmox_vms.get().add(vm_id)
-
-    async def cleanup(self) -> None:
-        if self._cleanup_completed.get():
-            return
-
-        with trace_action(self.logger, self.TRACE_NAME, "cleanup all VMs"):
-            existing_vms = await self.list_vms()
-            for vm in existing_vms:
-                vm_id = vm["vmid"]
-                if vm_id in self._running_proxmox_vms.get():
-                    # TODO parallelize this
-                    await self.destroy_vm(vm_id)
-            self._cleanup_completed.set(True)

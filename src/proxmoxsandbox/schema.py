@@ -99,7 +99,7 @@ class VmSourceConfig(BaseModel, frozen=True):
     # source.
     # From Proxmox 9.0 onwards, qcow2 and raw are also supported, allowing Debian 13,
     # Kali, and others.
-    built_in: Literal["ubuntu24.04", "debian13", "kali2025.3"] | None = None
+    built_in: Literal["ubuntu24.04", "debian13", "kali2025.4"] | None = None
 
     @model_validator(mode="after")
     def _validate_single_source(self) -> "VmSourceConfig":
@@ -134,6 +134,7 @@ class VmNicConfig(BaseModel, frozen=True):
         ipv4: The static IPv4 address for the network interface (optional).
             If specified, a DHCP static mapping (host reservation) will be created.
             Requires a MAC address to be specified as well.
+            Please read the notes in README.md for Proxmox server patching requirements
     """
 
     vnet_alias: str
@@ -148,6 +149,7 @@ class VmNicConfig(BaseModel, frozen=True):
                 + "DHCP static mapping"
             )
         return self
+
 
 
 # Proxmox QEMU OS types. See https://pve.proxmox.com/wiki/Manual:_qm.conf
@@ -288,6 +290,10 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
     Attributes:
         instance_pool_id: Which pool to use for this sample (must match a pool_id in
             PROXMOX_CONFIG_FILE or defaults to "default" for legacy single-instance mode)
+        image_storage: The Proxmox storage pool for VM disk images (e.g.
+            "local-lvm"). Defaults to the PROXMOX_IMAGE_STORAGE environment variable,
+            or "local-lvm" if not set, which is the default if you installed Proxmox
+            normally.
         sdn_config: Software-defined networking configuration
         vms_config: Configurations for virtual machines
         host: (Legacy) The hostname or IP address of the Proxmox server
@@ -319,4 +325,8 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
     node: str = Field(default_factory=lambda: getenv("PROXMOX_NODE", "proxmox"))
     verify_tls: bool = Field(
         default_factory=lambda: getenv("PROXMOX_VERIFY_TLS", "1") == "1"
+    )
+
+    image_storage: str = Field(
+        default_factory=lambda: getenv("PROXMOX_IMAGE_STORAGE", "local-lvm")
     )

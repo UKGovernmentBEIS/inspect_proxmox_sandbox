@@ -90,8 +90,58 @@ rm -f /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 # install dnsmasq for SDN, and xterm so we can use the resize command in terminal windows
 apt update
 apt upgrade -y
-apt install -y dnsmasq xterm
+apt install -y dnsmasq xterm patch
 systemctl disable --now dnsmasq
+
+# Fix IPAM bug, see https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/
+# and https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
+
+cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
+--- a/usr/share/perl5/PVE/Network/SDN/Subnets.pm
++++ b/usr/share/perl5/PVE/Network/SDN/Subnets.pm
+@@ -235,6 +235,30 @@ sub add_next_free_ip {
+     #verify dns zones before ipam
+     verify_dns_zone($dnszone, $dns) if !$skipdns;
+ 
++    if ($mac && $ipamid) {
++        my ($zoneid) = split(/-/, $subnetid);
++        my ($existing_ip4, $existing_ip6) = PVE::Network::SDN::Ipams::get_ips_from_mac(
++            $mac, $zoneid, $zone,
++        );
++
++        my $is_ipv4 = Net::IP::ip_is_ipv4($subnet->{network});
++        my $existing_ip = $is_ipv4 ? $existing_ip4 : $existing_ip6;
++
++        if ($existing_ip) {
++            my $ip_obj = NetAddr::IP->new($existing_ip);
++            my $subnet_obj = NetAddr::IP->new($subnet->{cidr});
++
++            if ($subnet_obj->contains($ip_obj)) {
++                $ip = $existing_ip;
++
++                eval { PVE::Network::SDN::Ipams::add_cache_mac_ip($mac, $ip); };
++                warn $@ if $@;
++
++                goto DNS_SETUP;
++            }
++        }
++    }
++
+     if ($ipamid) {
+         my $ipam_cfg = PVE::Network::SDN::Ipams::config();
+         my $plugin_config = $ipam_cfg->{ids}->{$ipamid};
+@@ -267,6 +291,7 @@ sub add_next_free_ip {
+         warn $@ if $@;
+     }
+ 
++DNS_SETUP:
+     eval {
+         my $reversednszone = get_reversedns_zone($subnetid, $subnet, $reversedns, $ip);
+ 
+EOFPATCH
+
+# modify version to indicate we patched
+sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
 
 touch /var/local/inspect-proxmox-on-first-boot.done
 
@@ -99,6 +149,13 @@ touch /var/local/inspect-proxmox-on-first-boot.done
 # in theory this isn't necessary because of 'reboot-mode = "power-off"' but that doesn't seem to work.
 poweroff
 EOFONFIRSTBOOT
+
+# Pre-pull base image from a pull-through cache if configured, e.g.:
+# DEBIAN_BASE_IMAGE=123456789.dkr.ecr.eu-west-2.amazonaws.com/docker-hub/library/debian:bookworm-slim
+if [ -n "${DEBIAN_BASE_IMAGE:-}" ]; then
+    docker pull "$DEBIAN_BASE_IMAGE"
+    docker tag "$DEBIAN_BASE_IMAGE" debian:bookworm-slim
+fi
 
 cat << 'EOFDOCKER' > Dockerfile
 FROM debian:bookworm-slim
@@ -113,7 +170,7 @@ RUN mkdir -p /iso
 
 RUN wget -q -O /iso/proxmox.iso https://enterprise.proxmox.com/iso/proxmox-ve_9.0-1.iso
 
-# Confusingly, although Proxmox 9 is based on trixie (Debian 13), this Docker build 
+# Confusingly, although Proxmox 9 is based on trixie (Debian 13), this Docker build
 # must continue to use bookworm (Debian 12) because there are not yet any trixie proxmox packages.
 RUN echo "deb http://download.proxmox.com/debian/pve/ bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve.list
 RUN wget -O- http://download.proxmox.com/debian/proxmox-release-bookworm.gpg | apt-key add -
@@ -131,7 +188,6 @@ VOLUME /output
 
 # Default command to copy the ISO to the output volume
 CMD ["cp", "/iso/proxmox-auto-from-iso.iso", "/output/"]
-
 EOFDOCKER
 
 docker build -t proxmox-auto-install .
@@ -217,7 +273,7 @@ root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
 
 # for some reason the hostkeys are not regenerated and proxmox complains about missing /etc/ssh/ssh_host_rsa_key.pub
 # virt-sysprep needs root to be able to access the kernel on Ubuntu so we need sudo; see https://bugs.launchpad.net/ubuntu/+source/linux/+bug/759725
-sudo LIBGUESTFS_MEMSIZE=8192 virt-sysprep -d "$VM_NEW" \
+sudo LIBGUESTFS_MEMSIZE=$VM_MEM_MB virt-sysprep -d "$VM_NEW" \
     --root-password "password:$root_password" \
     --operations "defaults,-ssh-hostkeys" \
 

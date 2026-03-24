@@ -1,15 +1,26 @@
 # tests/conftest.py
+import logging
 import os
 import random
 from typing import AsyncGenerator
 
 import pytest
 
+# httpcore and httpx emit extremely verbose DEBUG logs (every TCP connect,
+# TLS handshake, header send/receive, body send/receive, etc.) that drown
+# out application-level debug output.  Rather than disabling DEBUG globally,
+# we raise the level on just these loggers so our own DEBUG messages remain
+# visible.
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
+from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, VnetAliases
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
-from proxmoxsandbox._impl.storage_commands import StorageCommands
+from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
+from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
@@ -21,6 +32,11 @@ from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 # The template must be tagged with "inspect;<tag>" and have the QEMU
 # guest agent installed. When unset, Windows test variants are skipped.
 WINDOWS_TEMPLATE_TAG = os.getenv("PROXMOX_WINDOWS_TEMPLATE_TAG")
+
+
+@pytest.fixture
+async def sandbox_env_config() -> ProxmoxSandboxEnvironmentConfig:
+    return ProxmoxSandboxEnvironmentConfig()
 
 
 @pytest.fixture
@@ -36,37 +52,46 @@ async def async_proxmox_api(
 
 
 @pytest.fixture
-async def node(
+async def infra_commands(
+    async_proxmox_api: AsyncProxmoxAPI,
     sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
-) -> str:
-    return sandbox_env_config.node
+) -> InfraCommands:
+    target = ProxmoxTarget(
+        host=sandbox_env_config.host,
+        port=sandbox_env_config.port,
+        node=sandbox_env_config.node,
+    )
+    instance = InfraCommands.build(
+        async_proxmox_api, sandbox_env_config.node, sandbox_env_config.image_storage
+    )
+    InfraCommands.set_instance(target, instance)
+    return instance
 
 
 @pytest.fixture
-async def sandbox_env_config() -> ProxmoxSandboxEnvironmentConfig:
-    return ProxmoxSandboxEnvironmentConfig()
-
-
-@pytest.fixture
-async def sdn_commands(async_proxmox_api: AsyncProxmoxAPI) -> SdnCommands:
-    return SdnCommands(async_proxmox_api)
-
-
-@pytest.fixture
-async def qemu_commands(async_proxmox_api: AsyncProxmoxAPI, node: str) -> QemuCommands:
-    return QemuCommands(async_proxmox_api, node=node)
-
-
-@pytest.fixture
-async def built_in_vm(async_proxmox_api: AsyncProxmoxAPI, node: str) -> BuiltInVM:
-    return BuiltInVM(async_proxmox_api, node=node)
+async def sdn_commands(infra_commands: InfraCommands) -> SdnCommands:
+    return infra_commands.sdn_commands
 
 
 @pytest.fixture
 async def storage_commands(
-    async_proxmox_api: AsyncProxmoxAPI, node: str
-) -> StorageCommands:
-    return StorageCommands(async_proxmox_api, node=node, storage="local")
+    async_proxmox_api: AsyncProxmoxAPI,
+    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
+) -> LocalStorageCommands:
+    task_wrapper = TaskWrapper(async_proxmox_api)
+    return LocalStorageCommands(
+        async_proxmox_api, sandbox_env_config.node, task_wrapper
+    )
+
+
+@pytest.fixture
+async def qemu_commands(infra_commands: InfraCommands) -> QemuCommands:
+    return infra_commands.qemu_commands
+
+
+@pytest.fixture
+async def built_in_vm(infra_commands: InfraCommands) -> BuiltInVM:
+    return infra_commands.built_in_vm
 
 
 @pytest.fixture(scope="function")
@@ -84,7 +109,7 @@ async def auto_sdn_vnet_aliases(
     sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(ids_start, "auto")
     assert sdn_zone_id is not None
     yield vnet_aliases
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id)
+    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
 def _get_os_params() -> list[str]:

@@ -6,8 +6,11 @@ from typing import Any, Literal, Optional
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 
+LOCAL_STORAGE = "local"
+"""Proxmox's built-in directory storage at /var/lib/vz, always available."""
 
-class StorageCommands(abc.ABC):
+
+class LocalStorageCommands(abc.ABC):
     logger = getLogger(__name__)
 
     TRACE_NAME = "proxmox_storage_commands"
@@ -15,13 +18,13 @@ class StorageCommands(abc.ABC):
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
     node: str
-    storage: str
 
-    def __init__(self, async_proxmox: AsyncProxmoxAPI, node: str, storage: str):
+    def __init__(
+        self, async_proxmox: AsyncProxmoxAPI, node: str, task_wrapper: TaskWrapper
+    ):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = TaskWrapper(async_proxmox)
+        self.task_wrapper = task_wrapper
         self.node = node
-        self.storage = storage
 
     async def upload_file_to_storage(
         self,
@@ -51,7 +54,7 @@ class StorageCommands(abc.ABC):
         if size_check is not None:
             existing_content = await self.async_proxmox.request(
                 "GET",
-                f"/nodes/{self.node}/storage/{self.storage}/content?content={content_type}",
+                f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content?content={content_type}",
             )
             for existing_file in existing_content:
                 if "volid" in existing_file and existing_file["volid"].endswith(
@@ -59,7 +62,7 @@ class StorageCommands(abc.ABC):
                 ):
                     size_match = existing_file["size"] == size_check
                     self.logger.debug(
-                        f"File {filename} already exists in storage {self.storage}"
+                        f"File {filename} already exists in storage {LOCAL_STORAGE}"
                         + f" on node {self.node} at {existing_file['volid']};"
                         + f" {size_match=}"
                     )
@@ -68,12 +71,12 @@ class StorageCommands(abc.ABC):
 
         async def do_upload():
             await self.async_proxmox.upload_file_with_curl(
-                self.node, self.storage, file, content_type, filename=filename
+                self.node, LOCAL_STORAGE, file, content_type, filename=filename
             )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(do_upload)
 
     async def list_storage(self) -> list[dict[str, Any]]:
         return await self.async_proxmox.request(
-            "GET", f"/nodes/{self.node}/storage/{self.storage}/content"
+            "GET", f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content"
         )
