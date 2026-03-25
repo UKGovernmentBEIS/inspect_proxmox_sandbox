@@ -271,11 +271,21 @@ fi
 
 root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
 
-# for some reason the hostkeys are not regenerated and proxmox complains about missing /etc/ssh/ssh_host_rsa_key.pub
-# virt-sysprep needs root to be able to access the kernel on Ubuntu so we need sudo; see https://bugs.launchpad.net/ubuntu/+source/linux/+bug/759725
-sudo LIBGUESTFS_MEMSIZE=$VM_MEM_MB virt-sysprep -d "$VM_NEW" \
-    --root-password "password:$root_password" \
-    --operations "defaults,-ssh-hostkeys" \
+# Set root password using guestfish with an explicit mount of the root LV.
+# The previous method using virt-sysprep, while cleaner than this, was too slow
+# virt-sysprep runs full disk inspection (including LVM PV scan) which is
+# slow on large disks. guestfish with -m skips inspection entirely.
+DISK_TO_EDIT="${LINKED_CLONE:-$VM_NEW_DISK}"
+hashed_password=$(openssl passwd -6 "$root_password")
+sudo guestfish --rw -a "$DISK_TO_EDIT" <<EOFGUESTFISH
+run
+mount /dev/pve/root /
+download /etc/shadow /tmp/shadow-edit-\$\$
+! sed -i 's|^root:[^:]*:|root:${hashed_password}:|' /tmp/shadow-edit-\$\$
+upload /tmp/shadow-edit-\$\$ /etc/shadow
+! rm -f /tmp/shadow-edit-\$\$
+umount /
+EOFGUESTFISH
 
 EDITOR="sed -i 's/hostfwd=tcp::[0-9]\+-:8006/hostfwd=tcp::$PROXMOX_EXPOSED_PORT-:8006/'" virsh edit "$VM_NEW"
 
