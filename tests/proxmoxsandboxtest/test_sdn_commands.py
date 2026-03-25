@@ -206,4 +206,6 @@ async def test_create_dhcp_mapping(ids_start: str, sdn_commands: SdnCommands) ->
     # If we didn't have the new ip-cleanup logic in place, the above mapping would
     # block subnet/vnet/zone deletion since the "VM" with that static allocation
     # is not deleted by PVE and thus the IPAM entry would keep existing by default.
+    # AOC note: this now no longer makes sense
+    assert sdn_zone_id is not None
     await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, (other_ipam_mapping,))
