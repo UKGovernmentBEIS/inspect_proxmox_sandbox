@@ -277,15 +277,11 @@ root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
 # slow on large disks. guestfish with -m skips inspection entirely.
 DISK_TO_EDIT="${LINKED_CLONE:-$VM_NEW_DISK}"
 hashed_password=$(openssl passwd -6 "$root_password")
-sudo guestfish --rw -a "$DISK_TO_EDIT" <<EOFGUESTFISH
-run
-mount /dev/pve/root /
-download /etc/shadow /tmp/shadow-edit-\$\$
-! sed -i 's|^root:[^:]*:|root:${hashed_password}:|' /tmp/shadow-edit-\$\$
-upload /tmp/shadow-edit-\$\$ /etc/shadow
-! rm -f /tmp/shadow-edit-\$\$
-umount /
-EOFGUESTFISH
+SHADOW_TMP=$(sudo mktemp)
+sudo guestfish --rw -a "$DISK_TO_EDIT" -m /dev/pve/root download /etc/shadow "$SHADOW_TMP"
+sudo sed -i "s|^root:[^:]*:|root:${hashed_password}:|" "$SHADOW_TMP"
+sudo guestfish --rw -a "$DISK_TO_EDIT" -m /dev/pve/root upload "$SHADOW_TMP" /etc/shadow
+sudo rm -f "$SHADOW_TMP"
 
 EDITOR="sed -i 's/hostfwd=tcp::[0-9]\+-:8006/hostfwd=tcp::$PROXMOX_EXPOSED_PORT-:8006/'" virsh edit "$VM_NEW"
 
