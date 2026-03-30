@@ -15,16 +15,7 @@
 
 # TODO: rewrite this in Python so the individual functions can be reused elsewhere
 
-virsh destroy proxmox-auto || echo "not removing proxmox-auto; not found"
-virsh undefine --nvram --remove-all-storage proxmox-auto || true
-
 set -eu
-
-docker ps || echo 'You must have Docker installed and be in the correct docker group(s) to use this script.'
-
-sudo apt update
-sudo apt install -y virt-manager libvirt-clients libvirt-daemon-system qemu-system-x86 virtinst guestfs-tools
-sudo usermod --append --groups libvirt $(whoami)
 
 cat << 'EOFCAPACITY' > capacity.sh
 TOTAL_CPUS=$(nproc)
@@ -37,6 +28,108 @@ VM_MEM_MB=$((TOTAL_MEM_KB * 75 / 100 / 1024))
 VM_CPUS=$((VM_CPUS < 2 ? 2 : VM_CPUS))
 VM_MEM_MB=$((VM_MEM_MB < 4096 ? 4096 : VM_MEM_MB))
 EOFCAPACITY
+
+cat << 'EOFVEND' > vend.sh
+#!/usr/bin/env bash
+set -eu
+
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <VM_ID> [SOURCE_QCOW_DISK]"
+    echo "  VM_ID: Numeric ID for the new VM (e.g., 1, 2, 3)"
+    echo "  SOURCE_QCOW_DISK: Optional path to source qcow2 disk to use as backing file"
+    exit 1
+fi
+
+source ./capacity.sh
+
+VM_ID=$1
+SOURCE_QCOW_DISK=${2:-}
+VM_ORIG=proxmox-auto
+VM_NEW="proxmox-clone-$VM_ID"
+VM_NEW_DISK="/var/lib/libvirt/images/$VM_NEW.qcow2"
+PROXMOX_EXPOSED_PORT=$(( 11000 + $VM_ID ))
+
+SKIP=""
+
+if [ -n "$SOURCE_QCOW_DISK" ]; then
+    SKIP="--skip-copy vda"
+fi
+
+virt-clone --original "$VM_ORIG" \
+               --name "$VM_NEW" \
+               --file "$VM_NEW_DISK" $SKIP \
+              --check disk_size=off
+
+if [ -n "$SOURCE_QCOW_DISK" ]; then
+
+    SOURCE_DIR=$(dirname "$SOURCE_QCOW_DISK")
+    SOURCE_BASENAME=$(basename "$SOURCE_QCOW_DISK" .qcow2)
+    LINKED_CLONE="$SOURCE_DIR/${SOURCE_BASENAME}-linked-$VM_ID.qcow2"
+    # Get the actual disk path that virt-clone created
+    CLONED_DISK=$(virsh domblklist "$VM_NEW" | grep vda | awk '{print $2}')
+
+    echo "Creating linked clone: $LINKED_CLONE"
+    qemu-img create -f qcow2 -b "$SOURCE_QCOW_DISK" -F qcow2 "$LINKED_CLONE"
+
+    # Update the VM definition to use the linked clone
+    EDITOR="sed -i \"s|$CLONED_DISK|$LINKED_CLONE|g\"" virsh edit "$VM_NEW"
+fi
+
+root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
+
+# Set root password using guestfish with an explicit mount of the root LV.
+# The previous method using virt-sysprep, while cleaner than this, was too slow
+# virt-sysprep runs full disk inspection (including LVM PV scan) which is
+# slow on large disks. guestfish with -m skips inspection entirely.
+DISK_TO_EDIT="${LINKED_CLONE:-$VM_NEW_DISK}"
+hashed_password=$(openssl passwd -6 "$root_password")
+SHADOW_TMP=$(sudo mktemp)
+sudo guestfish --rw -a "$DISK_TO_EDIT" -m /dev/pve/root download /etc/shadow "$SHADOW_TMP"
+sudo sed -i "s|^root:[^:]*:|root:${hashed_password}:|" "$SHADOW_TMP"
+sudo guestfish --rw -a "$DISK_TO_EDIT" -m /dev/pve/root upload "$SHADOW_TMP" /etc/shadow
+sudo rm -f "$SHADOW_TMP"
+
+EDITOR="sed -i 's/hostfwd=tcp::[0-9]\+-:8006/hostfwd=tcp::$PROXMOX_EXPOSED_PORT-:8006/'" virsh edit "$VM_NEW"
+
+virsh setmaxmem "$VM_NEW" ${VM_MEM_MB}M --config
+virsh setmem "$VM_NEW" ${VM_MEM_MB}M --config
+virsh setvcpus "$VM_NEW" $VM_CPUS  --maximum  --config
+
+virsh autostart "$VM_NEW"
+virsh start "$VM_NEW"
+
+echo "Created VM $VM_NEW on port $PROXMOX_EXPOSED_PORT with root password $root_password"
+echo "You can remove it with the following command:"
+echo "virsh destroy $VM_NEW; virsh undefine --nvram --remove-all-storage $VM_NEW"
+
+# only full "which" supports the -s flag, hence use of "command"
+if ! command which -s ec2-metadata; then
+    echo "ec2-metadata not found; you need to figure out PROXMOX_HOST yourself"
+else
+    echo "PROXMOX_HOST=$(ec2-metadata  --local-ipv4 | cut -d ' ' -f 2)"
+fi
+echo "PROXMOX_PORT=$PROXMOX_EXPOSED_PORT"
+echo "PROXMOX_USER=root"
+echo "PROXMOX_REALM=pam"
+echo "PROXMOX_PASSWORD=$root_password"
+echo "PROXMOX_NODE=proxmox"
+echo "PROXMOX_VERIFY_TLS=0"
+EOFVEND
+chmod +x ./vend.sh
+
+if [ "${VEND_VEND_SCRIPT:-}" = "1" ]; then
+    echo "VEND_VEND_SCRIPT=1: wrote vend.sh and capacity.sh, skipping full build."
+    exit 0
+fi
+
+virsh destroy proxmox-auto || echo "not removing proxmox-auto; not found"
+virsh undefine --nvram --remove-all-storage proxmox-auto || true
+
+docker ps || echo 'You must have Docker installed and be in the correct docker group(s) to use this script.'
+
+sudo apt update
+sudo apt install -y virt-manager libvirt-clients libvirt-daemon-system qemu-system-x86 virtinst guestfs-tools
+sudo usermod --append --groups libvirt $(whoami)
 
 cat << 'EOFANSWERS' > answers.toml
 [global]
@@ -222,94 +315,6 @@ EOFVIRTINST
 
 chmod +x virt-inst-proxmox.sh
 sudo tmux new-session -d -s virt-inst-proxmox -x 80 -y 10 "./virt-inst-proxmox.sh 2>&1 | tee virt-inst-proxmox.log"
-
-cat << 'EOFVEND' > vend.sh
-#!/usr/bin/env bash
-set -eu
-
-if [ $# -lt 1 ]; then
-    echo "Usage: $0 <VM_ID> [SOURCE_QCOW_DISK]"
-    echo "  VM_ID: Numeric ID for the new VM (e.g., 1, 2, 3)"
-    echo "  SOURCE_QCOW_DISK: Optional path to source qcow2 disk to use as backing file"
-    exit 1
-fi
-
-source ./capacity.sh
-
-VM_ID=$1
-SOURCE_QCOW_DISK=${2:-}
-VM_ORIG=proxmox-auto
-VM_NEW="proxmox-clone-$VM_ID"
-VM_NEW_DISK="/var/lib/libvirt/images/$VM_NEW.qcow2"
-PROXMOX_EXPOSED_PORT=$(( 11000 + $VM_ID ))
-
-SKIP=""
-
-if [ -n "$SOURCE_QCOW_DISK" ]; then
-    SKIP="--skip-copy vda"
-fi
-
-virt-clone --original "$VM_ORIG" \
-               --name "$VM_NEW" \
-               --file "$VM_NEW_DISK" $SKIP \
-              --check disk_size=off 
-
-if [ -n "$SOURCE_QCOW_DISK" ]; then
-
-    SOURCE_DIR=$(dirname "$SOURCE_QCOW_DISK")
-    SOURCE_BASENAME=$(basename "$SOURCE_QCOW_DISK" .qcow2)
-    LINKED_CLONE="$SOURCE_DIR/${SOURCE_BASENAME}-linked-$VM_ID.qcow2"
-    # Get the actual disk path that virt-clone created
-    CLONED_DISK=$(virsh domblklist "$VM_NEW" | grep vda | awk '{print $2}')
-    
-    echo "Creating linked clone: $LINKED_CLONE"
-    qemu-img create -f qcow2 -b "$SOURCE_QCOW_DISK" -F qcow2 "$LINKED_CLONE"
-    
-    # Update the VM definition to use the linked clone
-    EDITOR="sed -i \"s|$CLONED_DISK|$LINKED_CLONE|g\"" virsh edit "$VM_NEW"
-fi
-
-root_password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 20)
-
-# Set root password using guestfish with an explicit mount of the root LV.
-# The previous method using virt-sysprep, while cleaner than this, was too slow
-# virt-sysprep runs full disk inspection (including LVM PV scan) which is
-# slow on large disks. guestfish with -m skips inspection entirely.
-DISK_TO_EDIT="${LINKED_CLONE:-$VM_NEW_DISK}"
-hashed_password=$(openssl passwd -6 "$root_password")
-SHADOW_TMP=$(sudo mktemp)
-sudo guestfish --rw -a "$DISK_TO_EDIT" -m /dev/pve/root download /etc/shadow "$SHADOW_TMP"
-sudo sed -i "s|^root:[^:]*:|root:${hashed_password}:|" "$SHADOW_TMP"
-sudo guestfish --rw -a "$DISK_TO_EDIT" -m /dev/pve/root upload "$SHADOW_TMP" /etc/shadow
-sudo rm -f "$SHADOW_TMP"
-
-EDITOR="sed -i 's/hostfwd=tcp::[0-9]\+-:8006/hostfwd=tcp::$PROXMOX_EXPOSED_PORT-:8006/'" virsh edit "$VM_NEW"
-
-virsh setmaxmem "$VM_NEW" ${VM_MEM_MB}M --config
-virsh setmem "$VM_NEW" ${VM_MEM_MB}M --config
-virsh setvcpus "$VM_NEW" $VM_CPUS  --maximum  --config
-
-virsh autostart "$VM_NEW"
-virsh start "$VM_NEW"
-
-echo "Created VM $VM_NEW on port $PROXMOX_EXPOSED_PORT with root password $root_password"
-echo "You can remove it with the following command:"
-echo "virsh destroy $VM_NEW; virsh undefine --nvram --remove-all-storage $VM_NEW"
-
-# only full "which" supports the -s flag, hence use of "command"
-if ! command which -s ec2-metadata; then
-    echo "ec2-metadata not found; you need to figure out PROXMOX_HOST yourself"
-else
-    echo "PROXMOX_HOST=$(ec2-metadata  --local-ipv4 | cut -d ' ' -f 2)"
-fi
-echo "PROXMOX_PORT=$PROXMOX_EXPOSED_PORT"
-echo "PROXMOX_USER=root"
-echo "PROXMOX_REALM=pam"
-echo "PROXMOX_PASSWORD=$root_password"
-echo "PROXMOX_NODE=proxmox"
-echo "PROXMOX_VERIFY_TLS=0"
-EOFVEND
-chmod +x ./vend.sh
 
 yes | watch --errexit --exec sudo tmux capture-pane -pt virt-inst-proxmox:0.0 || true
 
