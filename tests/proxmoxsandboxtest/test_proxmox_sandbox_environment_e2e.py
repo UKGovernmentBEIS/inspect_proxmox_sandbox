@@ -253,7 +253,7 @@ async def test_allow_domains() -> None:
                     subnets=(
                         SubnetConfig(
                             cidr=ip_network("10.88.0.0/24"),
-                            gateway=ip_address("10.88.0.1"),
+                            gateway=ip_address("10.88.0.2"),
                             snat=True,
                             dhcp_ranges=(
                                 DhcpRange(

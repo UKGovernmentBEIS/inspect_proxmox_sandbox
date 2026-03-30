@@ -298,11 +298,12 @@ async def test_ipv6_slaac_blocked() -> None:
 async def test_dns_over_tls_port_853_blocked() -> None:
     """Gateway nftables drops port 853 even to allowed-domain IPs.
 
-    The forward chain rule `ip saddr {sandbox_cidr} ip dport 853 drop` runs
-    before the `@allowed_ips accept` rule, so port 853 is blocked regardless
-    of whether the destination IP is in the allowed set.  This closes the
-    DNS-over-TLS bypass path (a sandbox could otherwise send encrypted DNS
-    queries directly to a DoT resolver, bypassing the dnsmasq allowlist).
+    The forward chain rules `tcp dport 853 drop` and `udp dport 853 drop`
+    run before the `@allowed_ips accept` rule, so port 853 is blocked
+    regardless of whether the destination IP is in the allowed set.  This
+    closes DNS-over-TLS and DNS-over-QUIC bypass paths (a sandbox could
+    otherwise send encrypted DNS queries directly to a resolver, bypassing
+    the dnsmasq allowlist).
 
     Cloudflare (1.1.1.1) is both an allowed domain AND a DoT resolver.
     This test exploits that: port 443 to cloudflare.com succeeds (proving
@@ -345,7 +346,7 @@ async def test_dns_over_tls_port_853_blocked() -> None:
         )
         assert "OPEN" not in nc_853.stdout, (
             f"Port 853 to cloudflare IP {cloudflare_ip} should be blocked "
-            f"by the ip dport 853 drop rule, but got: {nc_853=}"
+            f"by the tcp/udp dport 853 drop rule, but got: {nc_853=}"
         )
     finally:
         if envs_dict:

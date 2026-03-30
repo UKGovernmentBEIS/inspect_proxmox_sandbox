@@ -119,7 +119,8 @@ table inet gateway {{
     chain forward {{
         type filter hook forward priority filter; policy drop;
         ct state established,related counter accept
-        ip saddr {sandbox_cidr} ip dport 853 drop
+        ip saddr {sandbox_cidr} tcp dport 853 drop
+        ip saddr {sandbox_cidr} udp dport 853 drop
         ip saddr {sandbox_cidr} ip daddr @allowed_ips counter accept
         counter drop
     }}

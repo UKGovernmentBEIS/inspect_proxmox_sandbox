@@ -5,9 +5,13 @@ from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
 
-from pydantic import BaseModel, Field, model_validator
+import re
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
+
+_DOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$")
 
 
 class DhcpRange(BaseModel, frozen=True):
@@ -126,6 +130,17 @@ class SdnConfig(BaseModel, frozen=True):
     vnet_configs: Tuple[VnetConfig, ...]
     use_pve_ipam_dnsnmasq: bool = True
     allow_domains: Tuple[str, ...] = ()
+
+    @field_validator("allow_domains")
+    @classmethod
+    def _validate_domain_strings(cls, v: Tuple[str, ...]) -> Tuple[str, ...]:
+        for domain in v:
+            if not _DOMAIN_RE.match(domain) or ".." in domain:
+                raise ValueError(
+                    f"Invalid domain {domain!r}: must be a valid hostname "
+                    f"(alphanumeric, hyphens, dots only)"
+                )
+        return v
 
     @model_validator(mode="after")
     def _validate_allow_domains_constraints(self) -> "SdnConfig":
