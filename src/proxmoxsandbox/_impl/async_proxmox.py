@@ -2,10 +2,11 @@ import asyncio
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from io import BytesIO
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import pycurl
@@ -137,6 +138,14 @@ class AsyncProxmoxAPI:
                 if response.is_error:
                     return response.json()
             return response.json()["data"]
+            
+    async def get_version(self):
+        """Get the Proxmox server version.
+        
+        Returns:
+            dict: Version information with keys like 'version', 'release', etc.
+        """
+        return await self.request("GET", "/version")
 
     def _prepare_headers(self, method: str, content_type: str | None):
         headers = {
