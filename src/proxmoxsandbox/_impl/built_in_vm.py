@@ -20,7 +20,7 @@ from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
-from proxmoxsandbox._impl.storage_commands import StorageCommands
+from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     DhcpRange,
@@ -39,8 +39,8 @@ UBUNTU_URL = (
 )
 UBUNTU_VMDK_FILENAME = "ubuntu-noble-24.04-cloudimg.vmdk"
 DEBIAN_13_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
-KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.3/kali-linux-2025.3-cloud-genericcloud-amd64.tar.xz"
-KALI_DISK_RENAMED = "kali-2025.3-genericcloud-amd64.raw"
+KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.4/kali-linux-2025.4-cloud-genericcloud-amd64.tar.xz"
+KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
 
 STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
 
@@ -52,18 +52,26 @@ class BuiltInVM(abc.ABC):
     qemu_commands: QemuCommands
     sdn_commands: SdnCommands
     task_wrapper: TaskWrapper
-    storage_commands: StorageCommands
-    storage: str
+    storage_commands: LocalStorageCommands
     node: str
 
-    def __init__(self, async_proxmox: AsyncProxmoxAPI, node: str):
+    def __init__(
+        self,
+        async_proxmox: AsyncProxmoxAPI,
+        node: str,
+        image_storage: str,
+        task_wrapper: TaskWrapper,
+        qemu_commands: QemuCommands,
+        sdn_commands: SdnCommands,
+        storage_commands: LocalStorageCommands,
+    ):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = TaskWrapper(async_proxmox)
-        self.qemu_commands = QemuCommands(async_proxmox, node)
-        self.sdn_commands = SdnCommands(async_proxmox)
-        self.storage = "local"
-        self.storage_commands = StorageCommands(async_proxmox, node, self.storage)
+        self.task_wrapper = task_wrapper
+        self.qemu_commands = qemu_commands
+        self.sdn_commands = sdn_commands
+        self.storage_commands = storage_commands
         self.node = node
+        self.image_storage = image_storage
         self.cache_dir = platformdirs.user_cache_path(
             appname="inspect_proxmox_sandbox", ensure_exists=True
         )
@@ -82,15 +90,12 @@ class BuiltInVM(abc.ABC):
         Raises:
             ValueError: If the Proxmox version is below the required version
         """
-        version_info = await self.async_proxmox.request(
-            "GET", f"/nodes/{self.node}/version"
-        )
-        version_string = version_info.get("version", "")
+        release_string = self.async_proxmox.get_discovered_proxmox_version().release
 
         # Parse version string (e.g., "8.2.2" or "9.0")
-        match = re.match(r"(\d+)\.(\d+)", version_string)
+        match = re.match(r"(\d+)\.(\d+)", release_string)
         if not match:
-            raise ValueError(f"Could not parse Proxmox version: {version_string}")
+            raise ValueError(f"Could not parse Proxmox version: {release_string}")
 
         major = int(match.group(1))
         minor = int(match.group(2))
@@ -99,7 +104,7 @@ class BuiltInVM(abc.ABC):
             major == required_major and minor < required_minor
         ):
             raise ValueError(
-                f"Proxmox version {version_string} does not meet minimum requirement "
+                f"Proxmox version {release_string} does not meet minimum requirement "
                 f"{required_major}.{required_minor}"
             )
 
@@ -245,7 +250,7 @@ runcmd:
             await self.async_proxmox.request(
                 "POST",
                 f"/nodes/{self.node}/qemu/{vm_id}/config",
-                json={"ide2": f"{self.storage}:iso/{filename},media=cdrom"},
+                json={"ide2": f"{LOCAL_STORAGE}:iso/{filename},media=cdrom"},
             )
 
         await attach_to_vm()
@@ -267,7 +272,7 @@ runcmd:
                         if content["volid"].endswith(storage_name):
                             await self.async_proxmox.request(
                                 "DELETE",
-                                f"/nodes/{self.node}/storage/{self.storage}/content/{content['volid']}",
+                                f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
                             )
 
             existing_vms = await self.known_builtins()
@@ -306,7 +311,7 @@ runcmd:
     async def read_all_content(self):
         existing_content = await self.async_proxmox.request(
             "GET",
-            f"/nodes/{self.node}/storage/{self.storage}/content",
+            f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content",
         )
 
         return existing_content
@@ -335,7 +340,7 @@ runcmd:
                 built_in=built_in_name,
                 source_image_source_url=DEBIAN_13_URL,
             )
-        elif built_in_name == "kali2025.3":
+        elif built_in_name == "kali2025.4":
             await self.ensure_version(9)
             await self.ensure_exists_from_xz(
                 next_available_vm_id=next_available_vm_id,
@@ -411,13 +416,13 @@ runcmd:
                 download_path = os.path.join(self.cache_dir, download_filename)
                 with open(download_path, "wb") as f:
                     c = pycurl.Curl()
-                    c.setopt(c.URL, source_image_source_url)
-                    c.setopt(c.WRITEDATA, f)
-                    c.setopt(c.FOLLOWLOCATION, True)
-                    c.setopt(c.FAILONERROR, True)
+                    c.setopt(c.URL, source_image_source_url)  # type: ignore[attr-defined]
+                    c.setopt(c.WRITEDATA, f)  # type: ignore[attr-defined]
+                    c.setopt(c.FOLLOWLOCATION, True)  # type: ignore[attr-defined]
+                    c.setopt(c.FAILONERROR, True)  # type: ignore[attr-defined]
                     try:
                         c.perform()
-                        status_code = c.getinfo(c.RESPONSE_CODE)
+                        status_code = c.getinfo(c.RESPONSE_CODE)  # type: ignore[attr-defined]
                         if status_code >= 400:
                             raise ValueError(
                                 f"Download failed with status code: {status_code}"
@@ -466,7 +471,7 @@ runcmd:
             ):
                 await self.async_proxmox.request(
                     "POST",
-                    f"/nodes/{self.node}/storage/{self.storage}/download-url",
+                    f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/download-url",
                     json={
                         "content": "import",
                         "filename": source_image_name,
@@ -508,8 +513,8 @@ runcmd:
                         "memory": 8192,
                         "cores": 2,
                         "ostype": "l26",
-                        "scsi0": "local-lvm:0,"
-                        + f"import-from={self.storage}:{import_source},"
+                        "scsi0": f"{self.image_storage}:0,"
+                        + f"import-from={LOCAL_STORAGE}:{import_source},"
                         + "format=qcow2,cache=writeback",
                         "scsihw": "virtio-scsi-single",
                         "net0": f"virtio,bridge={STATIC_VNET_ID}",

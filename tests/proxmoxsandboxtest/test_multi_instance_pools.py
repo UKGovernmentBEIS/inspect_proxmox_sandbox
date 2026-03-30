@@ -8,8 +8,38 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 from proxmoxsandbox.schema import ProxmoxSandboxEnvironmentConfig
+
+
+def _make_mock_infra():
+    """Create a mock InfraCommands instance with all needed attributes."""
+    infra = MagicMock()
+    vm_config_mock = MagicMock()
+    vm_config_mock.is_sandbox = True
+    vm_config_mock.name = None
+    vm_config_mock.os_type = None
+    infra.create_sdn_and_vms = AsyncMock(return_value=(
+        [(101, vm_config_mock)],  # vm_configs_with_ids
+        "zone1",  # sdn_zone_id
+        (),  # ipam_mappings
+    ))
+    infra.delete_sdn_and_vms = AsyncMock()
+    infra.deregister_resources = MagicMock()
+    infra.task_cleanup = AsyncMock()
+    infra.find_proxmox_ids_start = AsyncMock(return_value="tst100")
+    infra.cleanup_no_id = AsyncMock()
+    # Mock nested objects
+    infra.sdn_commands = MagicMock()
+    infra.sdn_commands.read_all_vnets = AsyncMock(return_value=[])
+    infra.qemu_commands = MagicMock()
+    infra.task_wrapper = MagicMock()
+    infra.built_in_vm = AsyncMock()
+    infra.built_in_vm.ensure_exists = AsyncMock()
+    infra.async_proxmox = AsyncMock()
+    infra.node = "pve1"
+    return infra
 
 
 @pytest.fixture
@@ -23,31 +53,20 @@ def mock_proxmox_api():
 
 
 @pytest.fixture
-def mock_built_in_vm():
-    """Mock BuiltInVM."""
-    with patch('proxmoxsandbox._proxmox_sandbox_environment.BuiltInVM') as mock:
-        vm_instance = AsyncMock()
-        vm_instance.ensure_exists = AsyncMock()
-        mock.return_value = vm_instance
-        yield mock
-
-
-@pytest.fixture
 def mock_infra_commands():
-    """Mock InfraCommands."""
-    with patch('proxmoxsandbox._proxmox_sandbox_environment.InfraCommands') as mock:
-        infra = AsyncMock()
-        # Mock VM creation response
-        vm_config_mock = MagicMock()
-        vm_config_mock.is_sandbox = True
-        vm_config_mock.name = None
-        infra.create_sdn_and_vms = AsyncMock(return_value=(
-            [(101, vm_config_mock)],  # vm_configs_with_ids
-            "zone1"  # sdn_zone_id
-        ))
-        infra.delete_sdn_and_vms = AsyncMock()
-        mock.return_value = infra
-        yield mock
+    """Mock InfraCommands.get_instance and build classmethods."""
+    infra = _make_mock_infra()
+    with patch.object(InfraCommands, 'get_instance', side_effect=LookupError("not found")), \
+         patch.object(InfraCommands, 'build', return_value=infra), \
+         patch.object(InfraCommands, 'set_instance'):
+        yield infra
+
+
+@pytest.fixture(autouse=True)
+def cleanup_infra_instances():
+    """Clear InfraCommands._instances after each test."""
+    yield
+    InfraCommands._instances.clear()
 
 
 @pytest.fixture
@@ -81,7 +100,6 @@ def simple_config_file():
 async def test_single_instance_single_sample(
     simple_config_file,
     mock_proxmox_api,
-    mock_built_in_vm,
     mock_infra_commands
 ):
     """
@@ -202,7 +220,6 @@ def multi_pool_config_file():
 async def test_two_pools_two_configs(
     multi_pool_config_file,
     mock_proxmox_api,
-    mock_built_in_vm,
     mock_infra_commands
 ):
     """
@@ -316,7 +333,6 @@ async def test_two_pools_two_configs(
 async def test_wrong_pool_id_raises_error(
     simple_config_file,
     mock_proxmox_api,
-    mock_built_in_vm,
     mock_infra_commands
 ):
     """Test that requesting non-existent pool raises clear error."""
@@ -349,7 +365,6 @@ async def test_wrong_pool_id_raises_error(
 async def test_pool_exhaustion_blocks(
     simple_config_file,
     mock_proxmox_api,
-    mock_built_in_vm,
     mock_infra_commands
 ):
     """Test that acquiring from exhausted pool blocks until instance available."""
@@ -399,13 +414,14 @@ async def test_pool_exhaustion_blocks(
 async def test_sample_error_releases_instance(
     simple_config_file,
     mock_proxmox_api,
-    mock_built_in_vm,
 ):
     """Test that instance is returned to pool even when sample_init fails."""
-    # Make infra_commands raise an error
-    with patch('proxmoxsandbox._proxmox_sandbox_environment.InfraCommands') as mock_infra:
-        infra_instance = mock_infra.return_value
-        infra_instance.find_proxmox_ids_start.side_effect = Exception("Simulated error")
+    infra = _make_mock_infra()
+    infra.find_proxmox_ids_start.side_effect = Exception("Simulated error")
+
+    with patch.object(InfraCommands, 'get_instance', side_effect=LookupError("not found")), \
+         patch.object(InfraCommands, 'build', return_value=infra), \
+         patch.object(InfraCommands, 'set_instance'):
 
         os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
 
@@ -495,13 +511,13 @@ async def test_concurrent_task_init_calls(multi_pool_config_file):
 async def test_cleanup_with_interrupted_flag(
     simple_config_file,
     mock_proxmox_api,
-    mock_built_in_vm,
     mock_infra_commands
 ):
-    """Test that cleanup runs and instance is returned when interrupted=True.
+    """Test that instance is returned to pool when interrupted=True.
 
-    The interrupted flag indicates user cancellation (Ctrl-C) or timeout,
-    but cleanup must still run to avoid leaving VMs running on the instance.
+    When interrupted, sample_cleanup skips VM/SDN deletion (task_cleanup
+    will sweep orphans later), but the instance must still be released
+    back to the pool so it can be reused.
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
 
@@ -522,8 +538,11 @@ async def test_cleanup_with_interrupted_flag(
             "test_task", config, envs, interrupted=True
         )
 
-        # Cleanup should run successfully and instance returned to pool
+        # Instance should be returned to pool even though cleanup was skipped
         assert pool.qsize() == 1
+
+        # delete_sdn_and_vms should NOT have been called (cleanup skipped)
+        mock_infra_commands.delete_sdn_and_vms.assert_not_called()
 
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:

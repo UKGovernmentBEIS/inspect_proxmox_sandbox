@@ -33,6 +33,7 @@ PROXMOX_REALM=[authentication realm, usually 'pam' unless you have configured cu
 PROXMOX_PASSWORD=[password]
 PROXMOX_NODE=[node name, usually 'proxmox']
 PROXMOX_VERIFY_TLS=[1 = verify, 0 = do not verify]
+PROXMOX_IMAGE_STORAGE=[storage pool for VM disk images, usually 'local-lvm']
 ```
 
 Your Proxmox instance must allow additional storage types in `local` from the default.
@@ -70,13 +71,14 @@ sandbox=SandboxEnvironmentSpec(
         password=[password]
         node=[node name, usually 'proxmox']
         verify_tls=[True: verify, False: do not verify]
+        image_storage=[storage pool for VM disk images, default 'local-lvm']
         # End config from environment
 
         vms_config=(
             VmConfig(
                 # A virtual machine that this provider will install and configure automatically.
                 vm_source_config=VmSourceConfig(
-                    built_in="ubuntu24.04" # currently supported: "ubuntu24.04, "debian13", "kali2025.3"; see schema.py
+                    built_in="ubuntu24.04" # currently supported: "ubuntu24.04", "debian13", "kali2025.4"; see schema.py
                 ),
                 name="romeo", # name is optional, but recommended - it will be shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name.
                 ram_mb=512, # optional, default is 2048 MB
@@ -99,6 +101,7 @@ sandbox=SandboxEnvironmentSpec(
                         # Specifying a static IPv4 address is optional. If provided,
                         # a DHCP static mapping (host reservation) will be created.
                         # Note: requires a MAC address to be specified as well.
+                        # Please read the notes in README.md for Proxmox server patching requirements
                         ipv4=ip_address("192.168.20.10")
                     ),
                 )
@@ -209,7 +212,7 @@ nics=(
 - The `ipv4` field requires a `mac` address to be specified (validation will fail otherwise)
 - The IP address must fall within one of the configured subnet CIDR ranges
 - `use_pve_ipam_dnsnmasq` must be `True` in the SDN config
-
+- The Proxmox server *must* be patched using the patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
 ### Using Existing Proxmox VNETs (Advanced/Not Recommended)
 
@@ -235,6 +238,8 @@ sandbox = SandboxEnvironmentSpec(
     ),
 )
 ```
+
+Static IP address assignment is *not* supported with this feature.
 
 ## Using OVA files
 
@@ -316,6 +321,10 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 - Firewall off the SDN from the Proxmox server and from other SDNs
 - Support cloud-init for VM definition
 - Escape hatch for Proxmox API so you can specify arbitrary parameters during VM / SDN creation 
+
+## Built-in VM image versions
+
+The built-in VMs (`ubuntu24.04`, `debian13`, `kali2025.4`) pin specific upstream image URLs in `built_in_vm.py`. These are not auto-updated — when a new upstream release appears (e.g. a new Kali quarterly release), the URL, the `Literal` type in `schema.py`, and all references in tests and examples must be updated together.
 
 ## Tech debt
 
