@@ -140,41 +140,47 @@ async def test_proxmox_host_ip_is_blocked() -> None:
             )
 
 
-async def test_subdomain_blocked_when_only_apex_listed() -> None:
-    """Subdomain IPs are not pre-seeded; only apex domain IPs are.
+async def test_subdomain_reachable_when_apex_listed() -> None:
+    """Subdomains are covered dynamically via dnsmasq nftset=.
 
-    "gnu.org" in the allowlist lets dnsmasq resolve ftp.gnu.org (DNS works),
-    but the returned IP (.20) was never added to allowed_ips (only gnu.org's .116
-    was pre-seeded), so the FORWARD chain drops the traffic.
+    "gnu.org" in the allowlist causes dnsmasq to forward DNS queries
+    for ftp.gnu.org (subdomain) AND inject the resolved IPs into the
+    nftables allowed_ips set via nftset=.  Both DNS and IP-level
+    access work.
 
-    Note: domains that share CDN IPs (e.g. debian.org and deb.debian.org both
-    resolve to the same Fastly anycast IPs from 8.8.8.8) do NOT demonstrate this
-    gap — allowing the apex inadvertently allows the subdomain.  gnu.org and
-    ftp.gnu.org use distinct, non-CDN IPs, making the gap observable.
+    gnu.org and ftp.gnu.org use distinct, non-CDN IPs, confirming
+    this is dynamic nftset injection (not shared-IP coincidence).
     """
     envs_dict: Dict[str, SandboxEnvironment] = {}
     config = _base_config(allow_domains=("gnu.org",), third_octet=11)
-    task_name = "tsubblocked"
+    task_name = "tsubdyn"
     try:
         _, envs_dict = await setup_sandbox(task_name, config)
         sandbox = envs_dict["default"]
 
-        # DNS resolves (dnsmasq forwards subdomain queries for allowed apex).
-        # Query the gateway VM directly — it is always at network-address+2.
+        # DNS resolves — dnsmasq forwards subdomain queries and
+        # nftset= injects resolved IPs into allowed_ips.
         dns_result = await sandbox.exec(
-            ["bash", "-c", "dig +short ftp.gnu.org @10.77.11.2 | head -3"],
+            ["bash", "-c",
+             "dig +short ftp.gnu.org @10.77.11.2 | head -3"],
             timeout=15,
         )
-        print(f"\n[subdomain DNS] ftp.gnu.org: {dns_result.stdout.strip()!r}")
-
-        # But HTTP connection is dropped — ftp.gnu.org's IP is not in allowed_ips
-        curl_result = await sandbox.exec(
-            ["curl", "--fail", "--max-time", "5", "http://ftp.gnu.org"],
-            timeout=10,
+        print(
+            f"\n[subdomain DNS] ftp.gnu.org:"
+            f" {dns_result.stdout.strip()!r}"
         )
-        assert not curl_result.success, (
-            "curl to ftp.gnu.org should be blocked (subdomain IPs not pre-seeded), "
-            f"but succeeded: {curl_result=}"
+
+        # HTTP succeeds — nftset= injected ftp.gnu.org's IP when
+        # dnsmasq resolved the subdomain query above.
+        curl_result = await sandbox.exec(
+            ["curl", "--fail", "--max-time", "10",
+             "http://ftp.gnu.org"],
+            timeout=15,
+        )
+        assert curl_result.success, (
+            "curl to ftp.gnu.org should succeed "
+            "(nftset= injects subdomain IPs dynamically)"
+            f", but failed: {curl_result=}"
         )
     finally:
         if envs_dict:
@@ -187,11 +193,12 @@ async def test_subdomain_blocked_when_only_apex_listed() -> None:
 
 
 async def test_subdomain_allowed_when_listed_explicitly() -> None:
-    """Explicitly listing a subdomain in allow_domains pre-seeds its IPs correctly.
+    """Explicitly listing a subdomain in allow_domains also works.
 
-    Paired with test_subdomain_blocked_when_only_apex_listed: adding ftp.gnu.org
-    explicitly causes its IP (.20) to be pre-seeded alongside gnu.org's (.116),
-    so HTTP to ftp.gnu.org succeeds.
+    Paired with test_subdomain_reachable_when_apex_listed: that test shows
+    listing only the apex is sufficient (dnsmasq nftset= covers subdomains
+    automatically).  This test confirms that explicitly listing both the apex
+    and the subdomain is also fine — no conflict or duplicate-IP issues.
     """
     envs_dict: Dict[str, SandboxEnvironment] = {}
     config = _base_config(allow_domains=("gnu.org", "ftp.gnu.org"), third_octet=12)

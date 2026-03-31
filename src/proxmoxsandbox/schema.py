@@ -80,9 +80,12 @@ class SdnConfig(BaseModel, frozen=True):
             nftables (IP-level). The gateway VM is outside the sandbox VM, so root
             inside the sandbox cannot bypass it.
 
-            Subdomains must be listed explicitly: "gnu.org" does NOT cover
-            "ftp.gnu.org" — list each subdomain you need. Leave empty (the
-            default) for unrestricted internet access.
+            Subdomain coverage: "gnu.org" covers ftp.gnu.org
+            automatically — dnsmasq's server= and nftset= directives
+            both match the apex and all subdomains.  Subdomain IPs
+            are injected into the nftables set dynamically on first
+            DNS query (not pre-seeded at provision time).  Leave
+            empty (the default) for unrestricted internet access.
 
             When allow_domains is non-empty:
             - snat on sandbox subnets is set to False (the gateway VM does NAT)
@@ -109,15 +112,12 @@ class SdnConfig(BaseModel, frozen=True):
             - Filtering is IP-level, not URL-level.  All TCP/UDP ports to an
               allowed domain's IPs are permitted, not just HTTP/HTTPS.
               ICMP is blocked (forward chain allows TCP/UDP only).
-            - Subdomain coverage: "gnu.org" covers ftp.gnu.org at
-              both DNS level (dnsmasq server=) and IP level (dnsmasq
-              nftset= pushes resolved IPs into the nftables set on
-              every query).  However, listing "gnu.org" only
-              pre-seeds the apex IPs at provision time; subdomain
-              IPs are added dynamically on first DNS query.  If a
-              subdomain resolves to IPs not shared by the apex,
-              the very first TCP SYN may be dropped (before dnsmasq
-              has seen a query for it).  A retry will succeed.
+            - Only apex domain IPs are pre-seeded at provision time.
+              Subdomain IPs are injected dynamically by dnsmasq's
+              nftset= on first DNS query.  If a client connects to
+              a subdomain IP without a prior DNS query (hardcoded
+              IP), the first SYN is dropped.  Normal DNS-based
+              access works on first attempt.
             - IPv6 is blocked at two layers: sandbox VMs provisioned from
               built-in templates have accept-ra: false in their cloud-init
               network config (preventing SLAAC address assignment); custom VM
