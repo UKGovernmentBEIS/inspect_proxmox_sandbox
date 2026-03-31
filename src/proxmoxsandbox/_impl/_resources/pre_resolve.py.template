@@ -1,3 +1,4 @@
+import ipaddress
 import subprocess
 try:
     import dns.resolver as _dns
@@ -7,22 +8,43 @@ except ImportError:
     # Falls back to system resolver, which may return different IPs than dnsmasq.
     import socket
     _dns_available = False
+
+_PRIVATE_NETS = (
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+    ipaddress.ip_network('127.0.0.0/8'),
+    ipaddress.ip_network('169.254.0.0/16'),
+)
+
+def _is_private(ip_str):
+    addr = ipaddress.ip_address(ip_str)
+    return any(addr in net for net in _PRIVATE_NETS)
+
 domains = {domains_repr}
-ips = []
+raw_ips = []
 if _dns_available:
     resolver = _dns.Resolver()
     resolver.nameservers = ['8.8.8.8']
     for d in domains:
         try:
-            ips.extend(str(r) for r in resolver.resolve(d, 'A'))
+            raw_ips.extend(str(r) for r in resolver.resolve(d, 'A'))
         except Exception:
             pass
 else:
     for d in domains:
         try:
-            ips.extend(r[4][0] for r in socket.getaddrinfo(d, None, socket.AF_INET))
+            raw_ips.extend(r[4][0] for r in socket.getaddrinfo(d, None, socket.AF_INET))
         except Exception:
             pass
+# Filter out RFC1918, loopback, and link-local to prevent DNS
+# rebinding attacks from seeding internal IPs into the nftables set.
+def _safe_public(ip_str):
+    try:
+        return not _is_private(ip_str)
+    except ValueError:
+        return False
+ips = [ip for ip in raw_ips if _safe_public(ip)]
 if ips:
     nft_in = 'add element inet gateway allowed_ips { ' + ', '.join(ips) + ' }'
     subprocess.run(['nft', '-f', '-'], input=nft_in, text=True, check=True)

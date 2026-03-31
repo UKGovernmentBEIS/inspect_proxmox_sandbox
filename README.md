@@ -266,8 +266,10 @@ sdn_config=SdnConfig(
 )
 ```
 
-`"debian.org"` covers the apex and all subdomains — no `*.` prefix needed.  See the
-`allow_domains` docstring in `schema.py` for full constraints and caveats.
+Subdomains must be listed explicitly: `"debian.org"` does **not** cover
+`"deb.debian.org"` or `"security.debian.org"` — list each subdomain you need.
+See the `allow_domains` docstring in `schema.py` for full constraints and
+caveats.
 
 **Costs:** the gateway template (`inspect-gw`) is built once (~5–10 min).  Per-eval
 overhead is ~30–60 s for the gateway clone to boot.

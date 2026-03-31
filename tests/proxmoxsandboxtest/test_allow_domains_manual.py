@@ -11,8 +11,11 @@ Covers:
    IPv6 address is assigned, so IPv6 cannot be used to bypass the gateway.
 6. DNS-over-TLS (port 853) blocked — the gateway nftables forward chain drops
    port 853 traffic even to allowed-domain IPs, closing the DoT bypass path.
+7. Multi-vnet egress filtering — 2 vnets with distinct CIDRs, 1 VM each on a
+   different vnet. Allowed domain reachable from both VMs, blocked domain fails
+   from both.
 
-Note: each test uses a distinct /24 subnet (10.77.10–15.0/24) so tests do not
+Note: each test uses a distinct /24 subnet (10.77.10–19.0/24) so tests do not
 conflict with each other or with stale zones from interrupted previous runs.
 If CIDR conflicts are still reported, run `inspect sandbox cleanup proxmox` first.
 """
@@ -30,6 +33,7 @@ from proxmoxsandbox.schema import (
     SdnConfig,
     SubnetConfig,
     VmConfig,
+    VmNicConfig,
     VmSourceConfig,
     VnetConfig,
 )
@@ -37,6 +41,26 @@ from proxmoxsandbox.schema import (
 from .proxmox_sandbox_utils import setup_sandbox
 
 PROXMOX_HOST_IP = os.environ.get("PROXMOX_HOST", "")
+
+
+def _make_vnet(alias: str, third_octet: int) -> VnetConfig:
+    """Build a VnetConfig with 10.77.<third_octet>.0/24, DHCP .50-.100."""
+    base = f"10.77.{third_octet}"
+    return VnetConfig(
+        alias=alias,
+        subnets=(
+            SubnetConfig(
+                cidr=ip_network(f"{base}.0/24"),
+                snat=True,
+                dhcp_ranges=(
+                    DhcpRange(
+                        start=ip_address(f"{base}.50"),
+                        end=ip_address(f"{base}.100"),
+                    ),
+                ),
+            ),
+        ),
+    )
 
 
 def _base_config(
@@ -348,6 +372,88 @@ async def test_dns_over_tls_port_853_blocked() -> None:
             f"Port 853 to cloudflare IP {cloudflare_ip} should be blocked "
             f"by the tcp/udp dport 853 drop rule, but got: {nc_853=}"
         )
+    finally:
+        if envs_dict:
+            await ProxmoxSandboxEnvironment.sample_cleanup(
+                task_name=task_name,
+                config=config,
+                environments=envs_dict,
+                interrupted=False,
+            )
+
+
+async def test_multi_vnet_egress_filtering() -> None:
+    """Two vnets with distinct CIDRs share the same allowlist via one gateway.
+
+    VM-A on vnet 16, VM-B on vnet 17.  Both should reach cloudflare.com
+    (allowed) and both should fail to reach google.com (blocked).
+
+    This is the core CAST requirement: multiple sandbox vnets sharing a
+    single gateway VM with a shared domain allowlist.
+    """
+    envs_dict: Dict[str, SandboxEnvironment] = {}
+    config = ProxmoxSandboxEnvironmentConfig(
+        sdn_config=SdnConfig(
+            vnet_configs=(
+                _make_vnet("multi-a", 16),
+                _make_vnet("multi-b", 17),
+            ),
+            use_pve_ipam_dnsnmasq=True,
+            allow_domains=("cloudflare.com",),
+        ),
+        vms_config=(
+            VmConfig(
+                name="multi-vm-a",
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                ram_mb=512,
+                vcpus=1,
+                nics=(VmNicConfig(vnet_alias="multi-a"),),
+            ),
+            VmConfig(
+                name="multi-vm-b",
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                ram_mb=512,
+                vcpus=1,
+                nics=(VmNicConfig(vnet_alias="multi-b"),),
+            ),
+        ),
+    )
+    task_name = "tmultivnet"
+    try:
+        _, envs_dict = await setup_sandbox(task_name, config)
+        sandboxes = list(envs_dict.values())
+        assert len(sandboxes) == 2, (
+            f"Expected 2 sandbox envs, got {len(sandboxes)}"
+        )
+
+        for i, sandbox in enumerate(sandboxes):
+            label = f"VM-{i}"
+
+            # Allowed domain should be reachable
+            curl_allowed = await sandbox.exec(
+                [
+                    "curl", "--fail", "--max-time", "15",
+                    "http://cloudflare.com",
+                ],
+                timeout=20,
+            )
+            assert curl_allowed.success, (
+                f"{label}: curl to cloudflare.com (allowed) "
+                f"should succeed: {curl_allowed=}"
+            )
+
+            # Blocked domain should fail
+            curl_blocked = await sandbox.exec(
+                [
+                    "curl", "--fail", "--max-time", "5",
+                    "http://google.com",
+                ],
+                timeout=10,
+            )
+            assert not curl_blocked.success, (
+                f"{label}: curl to google.com (blocked) "
+                f"should fail: {curl_blocked=}"
+            )
     finally:
         if envs_dict:
             await ProxmoxSandboxEnvironment.sample_cleanup(

@@ -1,17 +1,17 @@
 """Data models and schemas for the Proxmox sandbox configuration."""
 
+import re
 from ipaddress import ip_address, ip_network
 from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
-
-import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
 
 _DOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$")
+_BARE_IP_RE = re.compile(r"^\d+(\.\d+)+$")
 
 
 class DhcpRange(BaseModel, frozen=True):
@@ -93,9 +93,9 @@ class SdnConfig(BaseModel, frozen=True):
 
             Constraints (validated at construction time):
             - use_pve_ipam_dnsnmasq must be True
-            - exactly one vnet_config must be provided
-            - that vnet must have exactly one subnet
-            - the subnet's DHCP range must not include network-address+2
+            - one or more vnet_configs must be provided
+            - each vnet must have exactly one subnet
+            - each subnet's DHCP range must not include network-address+2
 
             Requires Proxmox 9+. The gateway VM template is built once on first use
             (one-time cost: ~5–10 minutes). Per-eval overhead is ~30–60 s for the
@@ -108,12 +108,16 @@ class SdnConfig(BaseModel, frozen=True):
             Known limitations:
             - Filtering is IP-level, not URL-level.  All TCP/UDP ports to an
               allowed domain's IPs are permitted, not just HTTP/HTTPS.
-            - Only apex domain IPs are pre-seeded in the nftables filter at
-              provision time.  Subdomains (e.g. ftp.gnu.org when "gnu.org"
-              is allowed) have their IPs resolved by dnsmasq at query time, but
-              those IPs are NOT added to the filter — traffic will be dropped.
-              This affects apt-get, pip, and similar tools that use subdomains.
-              A future improvement is to enable dnsmasq's nftset= support.
+              ICMP is blocked (forward chain allows TCP/UDP only).
+            - Subdomain coverage: "gnu.org" covers ftp.gnu.org at
+              both DNS level (dnsmasq server=) and IP level (dnsmasq
+              nftset= pushes resolved IPs into the nftables set on
+              every query).  However, listing "gnu.org" only
+              pre-seeds the apex IPs at provision time; subdomain
+              IPs are added dynamically on first DNS query.  If a
+              subdomain resolves to IPs not shared by the apex,
+              the very first TCP SYN may be dropped (before dnsmasq
+              has seen a query for it).  A retry will succeed.
             - IPv6 is blocked at two layers: sandbox VMs provisioned from
               built-in templates have accept-ra: false in their cloud-init
               network config (preventing SLAAC address assignment); custom VM
@@ -135,10 +139,16 @@ class SdnConfig(BaseModel, frozen=True):
     @classmethod
     def _validate_domain_strings(cls, v: Tuple[str, ...]) -> Tuple[str, ...]:
         for domain in v:
+            if _BARE_IP_RE.match(domain):
+                raise ValueError(
+                    f"{domain!r} looks like an IP address, not a "
+                    f"domain name. allow_domains only accepts "
+                    f"hostnames."
+                )
             if not _DOMAIN_RE.match(domain) or ".." in domain:
                 raise ValueError(
-                    f"Invalid domain {domain!r}: must be a valid hostname "
-                    f"(alphanumeric, hyphens, dots only)"
+                    f"Invalid domain {domain!r}: must be a valid "
+                    f"hostname (alphanumeric, hyphens, dots only)"
                 )
         return v
 
@@ -156,38 +166,57 @@ class SdnConfig(BaseModel, frozen=True):
                 "allow_domains requires use_pve_ipam_dnsnmasq=True "
                 "(the gateway VM uses Proxmox IPAM for its static IP assignment)"
             )
-        if len(self.vnet_configs) != 1:
+        if len(self.vnet_configs) < 1:
             raise ValueError(
-                f"allow_domains requires exactly one vnet_config, "
+                "allow_domains requires at least one vnet_config, "
                 f"got {len(self.vnet_configs)}"
             )
-        subnet_list = self.vnet_configs[0].subnets
-        if len(subnet_list) != 1:
-            raise ValueError(
-                f"allow_domains requires exactly one subnet per vnet, "
-                f"got {len(subnet_list)}"
-            )
-        # The gateway VM is assigned network-address+2.  Validate that the DHCP
-        # pool does not include that address, which would cause an IPAM conflict.
-        subnet = subnet_list[0]
-        gateway_vm_ip = ip_network(str(subnet.cidr)).network_address + 2
-        for dhcp_range in subnet.dhcp_ranges:
-            start = ip_address(str(dhcp_range.start))
-            end = ip_address(str(dhcp_range.end))
-            if start <= ip_address(gateway_vm_ip) <= end:
+        for vnet_idx, vnet in enumerate(self.vnet_configs):
+            subnet_list = vnet.subnets
+            if len(subnet_list) != 1:
                 raise ValueError(
-                    f"allow_domains: gateway VM will be assigned {gateway_vm_ip} "
-                    f"(subnet network address +2), but that address falls within "
-                    f"the DHCP range {dhcp_range.start}–{dhcp_range.end}. "
-                    "Adjust the DHCP range to exclude it (e.g. start at .10 or higher)."
+                    "allow_domains requires exactly one subnet "
+                    f"per vnet, got {len(subnet_list)} in "
+                    f"vnet {vnet_idx}"
                 )
-        if subnet.gateway is not None and ip_address(str(subnet.gateway)) != ip_address(gateway_vm_ip):
-            raise ValueError(
-                f"allow_domains: do not set the gateway in SubnetConfig manually. "
-                f"It will be automatically set to {gateway_vm_ip} (network-address+2). "
-                f"You specified {subnet.gateway}; either remove the gateway field or "
-                f"set it to {gateway_vm_ip}."
+            # The gateway VM is assigned network-address+2.
+            # Validate that the DHCP pool does not include that
+            # address (IPAM conflict).
+            subnet = subnet_list[0]
+            gateway_vm_ip = (
+                ip_network(str(subnet.cidr)).network_address + 2
             )
+            for dhcp_range in subnet.dhcp_ranges:
+                start = ip_address(str(dhcp_range.start))
+                end = ip_address(str(dhcp_range.end))
+                if start <= ip_address(gateway_vm_ip) <= end:
+                    raise ValueError(
+                        "allow_domains: gateway VM will be "
+                        f"assigned {gateway_vm_ip} "
+                        "(subnet network address +2) in "
+                        f"vnet {vnet_idx}, but that address "
+                        "falls within the DHCP range "
+                        f"{dhcp_range.start}\u2013"
+                        f"{dhcp_range.end}. Adjust the DHCP "
+                        "range to exclude it "
+                        "(e.g. start at .10 or higher)."
+                    )
+            gw_set = subnet.gateway is not None
+            gw_mismatch = gw_set and (
+                ip_address(str(subnet.gateway))
+                != ip_address(gateway_vm_ip)
+            )
+            if gw_mismatch:
+                raise ValueError(
+                    "allow_domains: do not set the gateway "
+                    "in SubnetConfig manually. It will be "
+                    f"automatically set to {gateway_vm_ip} "
+                    "(network-address+2) in vnet "
+                    f"{vnet_idx}. You specified "
+                    f"{subnet.gateway}; either remove the "
+                    "gateway field or set it to "
+                    f"{gateway_vm_ip}."
+                )
         return self
 
 
