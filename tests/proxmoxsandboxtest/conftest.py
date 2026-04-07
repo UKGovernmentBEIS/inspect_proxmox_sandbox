@@ -112,6 +112,7 @@ async def auto_sdn_vnet_aliases(
     await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
+
 def _get_os_params() -> list[str]:
     params = ["linux"]
     if WINDOWS_TEMPLATE_TAG:
