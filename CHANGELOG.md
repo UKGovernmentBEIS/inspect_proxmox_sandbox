@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 - 2026-04-08
 
 - Multi-instance pool-based allocation: run evals across multiple Proxmox servers
   with automatic instance acquisition/release via `PROXMOX_CONFIG_FILE`
