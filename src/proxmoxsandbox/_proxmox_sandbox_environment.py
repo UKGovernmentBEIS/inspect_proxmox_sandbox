@@ -134,6 +134,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     async def ensure_vms(
         async_proxmox_api: AsyncProxmoxAPI, config: ProxmoxSandboxEnvironmentConfig
     ) -> None:
+        from proxmoxsandbox.schema import SdnConfig
+
         infra_commands = InfraCommands.build(
             async_proxmox_api, config.node, config.image_storage
         )
@@ -143,6 +145,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 built_in_names.add(vm_config.vm_source_config.built_in)
         for built_in_name in built_in_names:
             await infra_commands.built_in_vm.ensure_exists(built_in_name)
+
+        # Ensure OPNsense base template exists if any subnet uses OPNsense
+        has_opnsense = False
+        if isinstance(config.sdn_config, SdnConfig):
+            for vnet in config.sdn_config.vnet_configs:
+                for subnet in vnet.subnets:
+                    if subnet.type == "opnsense":
+                        has_opnsense = True
+                        break
+                if has_opnsense:
+                    break
+        if has_opnsense:
+            await infra_commands.opnsense_template_manager.ensure_template()
 
     @classmethod
     @override

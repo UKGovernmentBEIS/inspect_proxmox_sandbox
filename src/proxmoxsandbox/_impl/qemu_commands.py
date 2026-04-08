@@ -1,4 +1,5 @@
 import abc
+import os
 import re
 import tarfile
 from logging import getLogger
@@ -15,7 +16,10 @@ from proxmoxsandbox._impl.async_proxmox import (
     ProxmoxJsonDataType,
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
-from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
+from proxmoxsandbox._impl.storage_commands import (
+    LOCAL_STORAGE,
+    LocalStorageCommands,
+)
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
 
@@ -204,6 +208,7 @@ class QemuCommands(abc.ABC):
         sdn_vnet_aliases: VnetAliases,
         vm_config: VmConfig,
         built_in_vm_ids: Dict[str, int],
+        attach_cdrom: Path | None = None,
     ) -> int:
         new_vm_id: int | None = None
 
@@ -226,7 +231,11 @@ class QemuCommands(abc.ABC):
                 )
 
             new_vm_id = await self.clone_vm_and_start(
-                vm_config, vm_id_to_clone, sdn_vnet_aliases, False
+                vm_config,
+                vm_id_to_clone,
+                sdn_vnet_aliases,
+                False,
+                attach_cdrom=attach_cdrom,
             )
         elif vm_config.vm_source_config.ova is not None:
             if isinstance(vm_config.vm_source_config.ova, HttpUrl):
@@ -334,6 +343,7 @@ class QemuCommands(abc.ABC):
                     new_vm_template_id,
                     sdn_vnet_aliases,
                     vm_config.is_sandbox,
+                    attach_cdrom=attach_cdrom,
                 )
 
             else:
@@ -373,7 +383,11 @@ class QemuCommands(abc.ABC):
             vm_id_to_clone = found_vm[0]["vmid"]
 
             new_vm_id = await self.clone_vm_and_start(
-                vm_config, vm_id_to_clone, sdn_vnet_aliases, True
+                vm_config,
+                vm_id_to_clone,
+                sdn_vnet_aliases,
+                True,
+                attach_cdrom=attach_cdrom,
             )
 
         else:
@@ -497,6 +511,7 @@ class QemuCommands(abc.ABC):
         vm_id_to_clone: int,
         sdn_vnet_aliases: VnetAliases,
         preserve_tags: bool,
+        attach_cdrom: Path | None = None,
     ) -> int:
         new_vm_id = await self.find_next_available_vm_id()
 
@@ -531,8 +546,44 @@ class QemuCommands(abc.ABC):
 
         await self.task_wrapper.do_action_and_wait_for_tasks(other_updates)
 
+        if attach_cdrom is not None:
+            await self._upload_and_attach_cdrom(new_vm_id, attach_cdrom)
+
         await self.start_and_await(vm_id=new_vm_id, is_sandbox=vm_config.is_sandbox)
         return new_vm_id
+
+    async def _upload_and_attach_cdrom(
+        self, vm_id: int, iso_path: Path
+    ) -> None:
+        """Upload a local ISO to Proxmox storage and attach as ide2."""
+        filename = f"vm-{vm_id}-cdrom.iso"
+        try:
+            await self.storage_commands.upload_file_to_storage(
+                file=iso_path,
+                content_type="iso",
+                filename=filename,
+            )
+        finally:
+            os.unlink(iso_path)
+
+        @tenacity.retry(
+            wait=tenacity.wait_exponential(min=1, exp_base=1.3),
+            stop=tenacity.stop_after_delay(30),
+        )
+        async def attach() -> None:
+            await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{vm_id}/config",
+                json={
+                    "ide2": (
+                        f"{LOCAL_STORAGE}:iso/{filename},"
+                        "media=cdrom"
+                    ),
+                },
+            )
+
+        await attach()
+        self.logger.info(f"CDROM ISO attached to VM {vm_id}")
 
     def other_config_json(
         self, vm_config: VmConfig, json_for_create: ProxmoxJsonDataType

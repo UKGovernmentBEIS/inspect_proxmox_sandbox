@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This plugin for [Inspect](https://inspect.aisi.org.uk/) allows you to use virtual machines, 
+This plugin for [Inspect](https://inspect.aisi.org.uk/) allows you to use virtual machines,
 running within a [Proxmox](https://www.proxmox.com/products/proxmox-virtual-environment/overview) instance, as [sandboxes](https://inspect.aisi.org.uk/sandboxing.html).
 
 ## Installing
@@ -49,14 +49,14 @@ For details on how to set up a local Proxmox instance for testing, see [CONTRIBU
 
 ## Configuring
 
-Here is a full example sandbox configuration. 
+Here is a full example sandbox configuration.
 
-Note that some of the fields (e.g. subnets) are tuples, so the trailing comma is vital 
+Note that some of the fields (e.g. subnets) are tuples, so the trailing comma is vital
 if there is only a single item in the tuple.
 
 Most tools use only the first sandbox, so you should list the one you want the agent to operate from first.
 
-Virtual machines must have the [qemu-guest-agent](https://pve.proxmox.com/wiki/Qemu-guest-agent) installed, unless they are not sandboxes. 
+Virtual machines must have the [qemu-guest-agent](https://pve.proxmox.com/wiki/Qemu-guest-agent) installed, unless they are not sandboxes.
 At least one VM in the configuration must be a sandbox.
 
 ```python
@@ -115,7 +115,7 @@ sandbox=SandboxEnvironmentSpec(
                 os_type="win10" # optional, default "l26".
             ),
             # A virtual machine to clone from an existing template VM.
-            # This is *not recommended* since it is dependent on configuring a 
+            # This is *not recommended* since it is dependent on configuring a
             # customised Proxmox instance that contains the template VM before
             # the eval start.
             VmConfig(
@@ -142,7 +142,7 @@ sandbox=SandboxEnvironmentSpec(
             ),
             # A virtual machine with no network access.
             VmConfig(
-                # ... snip ...           
+                # ... snip ...
                 nics=()
             ),
         ),
@@ -181,13 +181,13 @@ sandbox=SandboxEnvironmentSpec(
 ### VM Names
 
 It is recommended that you set the `name=` parameter for your defined VMs. This name serves two purposes:
+
 - It will be displayed in the Proxmox web interface
 - It will be the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
 
 You should avoid setting the same name for multiple VMs as this will cause conflicts in how Inspect references your VMs; later VMs with the same name will overwrite earlier ones in the sandbox name mapping. While both VMs would still be created in Proxmox, only the last one would be accessible through its name in Inspect. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`.
 
 > Note: The (first) sandbox VM is automatically named `default` internally, so you can always access it with `sandbox("default")`, regardless of any custom name you might set for it.
-
 
 ### Static IP Address Assignment
 
@@ -204,15 +204,17 @@ nics=(
 ```
 
 **How it works:**
+
 - When both `mac` and `ipv4` are specified, the system creates a DHCP static mapping (host reservation) in Proxmox
 - The VM will always receive the specified IP address when it boots
 - The IP address must be within the subnet CIDR range but does not need to be within the DHCP range
 
 **Requirements:**
+
 - The `ipv4` field requires a `mac` address to be specified (validation will fail otherwise)
 - The IP address must fall within one of the configured subnet CIDR ranges
 - `use_pve_ipam_dnsnmasq` must be `True` in the SDN config
-- The Proxmox server *must* be patched using the patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html 
+- The Proxmox server _must_ be patched using the patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
 ### Using Existing Proxmox VNETs (Advanced/Not Recommended)
 
@@ -239,11 +241,11 @@ sandbox = SandboxEnvironmentSpec(
 )
 ```
 
-Static IP address assignment is *not* supported with this feature.
+Static IP address assignment is _not_ supported with this feature.
 
 ## Using OVA files
 
-Proxmox supports OVA import but not OVA export. It is possible to extract the disk images of VMs 
+Proxmox supports OVA import but not OVA export. It is possible to extract the disk images of VMs
 from a Proxmox server in qcow2 format (instructions for this can be found online).
 
 Once you have the disk images locally, you can use the convenience script `src/proxmoxsandbox/scripts/ova/convert_ova.sh`
@@ -251,11 +253,11 @@ to convert it into an OVA.
 
 This provider creates a template VM for every OVA-type VM specified in an eval.
 Next time you run the eval, a linked clone of the template VM will be created.
-This is for performance. If you change the OVA, as long as the filesize changes, 
+This is for performance. If you change the OVA, as long as the filesize changes,
 a new template VM will be created. If you change the OVA but the filesize remains
 the same, you should manually delete it from the Proxmox server.
 
-These template VMs are *not* cleaned up because that needs to happen outside
+These template VMs are _not_ cleaned up because that needs to happen outside
 the lifecycle of an Inspect eval. You need to do this manually at the moment.
 
 ## Observing the VMs
@@ -278,7 +280,7 @@ pvesh create "/nodes/$PROXMOX_NODE/qemu/$VM_ID/agent/exec" --command bash --comm
 
 ## Snapshot
 
-QEMU, the virtualization library used by Proxmox, allows you to snapshot a running virtual machine, 
+QEMU, the virtualization library used by Proxmox, allows you to snapshot a running virtual machine,
 including the running processes. See [snapshots.py](./src/proxmoxsandbox/experimental/snapshots.py) for example tools that use this.
 
 ## Sample eval
@@ -290,7 +292,7 @@ See [ctf4.py](./src/proxmoxsandbox/experimental/ctf4.py) for an example capture-
 
 ## Identifying created resources
 
-Every VM created by this sandbox provider is tagged `inspect`. 
+Every VM created by this sandbox provider is tagged `inspect`.
 (Tags will also be duplicated if they exist on a VM already, for `existing_backup_name`- and `existing_vm_template_tag`-type VMs)
 
 SDN zones have the pattern `[3 letters from eval task name][random 3 digits][z]`. VNets are similar and can be identified from their containing zone.
@@ -303,10 +305,10 @@ Some resources will persist after the eval is complete:
 - cloud-init ISOs are left in place
 
 Environment cleanup is partially implemented. There is no way to tag all the resources
-created by a particular eval. Therefore the cleanup process for `inspect sandbox cleanup proxmox` 
+created by a particular eval. Therefore the cleanup process for `inspect sandbox cleanup proxmox`
 will delete:
 
-- all VMs tagged `inspect` 
+- all VMs tagged `inspect`
 - any SDN zones created with names matching the pattern above.
 
 ## Versioning
@@ -320,7 +322,7 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 - Normalize having a pfSense VM as the default route for networking
 - Firewall off the SDN from the Proxmox server and from other SDNs
 - Support cloud-init for VM definition
-- Escape hatch for Proxmox API so you can specify arbitrary parameters during VM / SDN creation 
+- Escape hatch for Proxmox API so you can specify arbitrary parameters during VM / SDN creation
 
 ## Built-in VM image versions
 
