@@ -194,7 +194,7 @@ class QueueBasedProxmoxPool(ProxmoxPoolABC):
         limited sandbox environments within a single task.
 
         Returns:
-            Total number of Proxmox instances, or 1 for legacy single-instance mode.
+            Total number of Proxmox instances, or 1 for single-instance mode.
         """
         try:
             instances = _load_instances_from_env_or_file()

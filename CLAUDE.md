@@ -136,7 +136,7 @@ Inspect calls these methods in order:
 
 ## Configuration Examples
 
-### Legacy Single Instance (Backwards Compatible)
+### Single Instance (Environment Variables)
 ```bash
 export PROXMOX_HOST=10.0.1.10
 export PROXMOX_NODE=pve1

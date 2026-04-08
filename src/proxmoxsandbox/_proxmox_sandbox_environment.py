@@ -295,9 +295,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 )
                 InfraCommands.set_instance(target, infra_commands)
 
-            # Sanity check previous cleanups worked
-            # N.B. this code only makes sense in the "single eval per proxmox"
-            # model and should not be merged to main!
+            # The pool guarantees one sample per instance at a time, so any
+            # leftover VNETs here are orphans from a previous failed cleanup.
             await cls._ensure_instance_clean(infra_commands, instance.instance_id)
 
             task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())

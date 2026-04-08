@@ -249,7 +249,7 @@ def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
 
     Priority order:
     1. PROXMOX_CONFIG_FILE environment variable (JSON file)
-    2. Legacy single-instance environment variables (backwards compatibility)
+    2. Single-instance environment variables (PROXMOX_HOST, etc.)
 
     Returns:
         Tuple of ProxmoxInstanceConfig objects
@@ -262,7 +262,7 @@ def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
             instances_data = data.get("instances", [])
             return tuple(ProxmoxInstanceConfig(**inst) for inst in instances_data)
 
-    # Priority 2: Backwards compatibility - single instance from env vars
+    # Priority 2: Single instance from env vars
     host = getenv("PROXMOX_HOST")
     if host:
         return (
@@ -289,20 +289,20 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
 
     Attributes:
         instance_pool_id: Which pool to use for this sample (must match a pool_id in
-            PROXMOX_CONFIG_FILE or defaults to "default" for legacy single-instance mode)
+            PROXMOX_CONFIG_FILE or defaults to "default" for single-instance mode)
         image_storage: The Proxmox storage pool for VM disk images (e.g.
             "local-lvm"). Defaults to the PROXMOX_IMAGE_STORAGE environment variable,
             or "local-lvm" if not set, which is the default if you installed Proxmox
             normally.
         sdn_config: Software-defined networking configuration
         vms_config: Configurations for virtual machines
-        host: (Legacy) The hostname or IP address of the Proxmox server
-        port: (Legacy) The port number for the Proxmox API, usually 8006
-        user: (Legacy) The username for Proxmox authentication
-        user_realm: (Legacy) The authentication realm for the Proxmox user
-        password: (Legacy) The password for Proxmox authentication
-        node: (Legacy) The name of the Proxmox node
-        verify_tls: (Legacy) Whether to verify the Proxmox server's TLS certificate
+        host: The hostname or IP address of the Proxmox server
+        port: The port number for the Proxmox API, usually 8006
+        user: The username for Proxmox authentication
+        user_realm: The authentication realm for the Proxmox user
+        password: The password for Proxmox authentication
+        node: The name of the Proxmox node
+        verify_tls: Whether to verify the Proxmox server's TLS certificate
     """
 
     # Which pool to use (references pool_id in PROXMOX_CONFIG_FILE)
@@ -314,7 +314,7 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
 
-    # Legacy single-instance fields (for backwards compatibility)
+    # Single-instance fields (used when configuring via environment variables)
     host: str = Field(default_factory=lambda: getenv("PROXMOX_HOST", "localhost"))
     port: int = Field(default_factory=lambda: int(getenv("PROXMOX_PORT", "8006")))
     user: str = Field(default_factory=lambda: getenv("PROXMOX_USER", "root"))

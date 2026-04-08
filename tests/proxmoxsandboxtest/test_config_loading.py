@@ -91,7 +91,7 @@ def test_load_instances_from_file():
 
 
 def test_load_instances_from_env_vars():
-    """Test legacy loading from individual environment variables."""
+    """Test loading from individual environment variables."""
     old_env = os.environ.copy()
 
     try:
@@ -100,7 +100,7 @@ def test_load_instances_from_env_vars():
             if key.startswith("PROXMOX_"):
                 del os.environ[key]
 
-        # Set legacy env vars
+        # Set single-instance env vars
         os.environ["PROXMOX_HOST"] = "10.0.1.10"
         os.environ["PROXMOX_PORT"] = "8006"
         os.environ["PROXMOX_USER"] = "admin"
@@ -176,7 +176,7 @@ def test_config_file_takes_priority_over_env_vars():
     old_env = os.environ.copy()
 
     try:
-        # Set legacy env vars (should be ignored)
+        # Set env vars (should be ignored when config file is present)
         os.environ["PROXMOX_HOST"] = "10.0.1.10"
         os.environ["PROXMOX_NODE"] = "pve-env"
 
@@ -345,8 +345,8 @@ def test_default_concurrency_with_config_file():
         os.environ.update(old_env)
 
 
-def test_default_concurrency_with_legacy_env_vars():
-    """Test default_concurrency returns 1 for legacy single-instance mode."""
+def test_default_concurrency_with_env_vars():
+    """Test default_concurrency returns 1 for single-instance mode."""
     from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
     old_env = os.environ.copy()
@@ -357,13 +357,13 @@ def test_default_concurrency_with_legacy_env_vars():
             if key.startswith("PROXMOX_"):
                 del os.environ[key]
 
-        # Set legacy env vars
+        # Set single-instance env vars
         os.environ["PROXMOX_HOST"] = "10.0.1.10"
         os.environ["PROXMOX_NODE"] = "pve1"
 
         concurrency = ProxmoxSandboxEnvironment.default_concurrency()
 
-        # Should return 1 for single legacy instance
+        # Should return 1 for single instance
         assert concurrency == 1
 
     finally:
