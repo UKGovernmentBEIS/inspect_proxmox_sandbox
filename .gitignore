@@ -1,6 +1,8 @@
 .venv
 .env
 .env-*
+env-*
+tmp/
 logs/
 __pycache__/
 .mypy_cache/
