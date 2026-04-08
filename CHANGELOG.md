@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Multi-instance pool-based allocation: run evals across multiple Proxmox servers
+  with automatic instance acquisition/release via `PROXMOX_CONFIG_FILE`
+- Windows VM support: exec, read_file, write_file via QEMU guest agent on Windows guests
+- Retry transient QEMU guest agent errors (500s from virtio-serial channel drops)
+- `firewall` field on `VmConfig` to enable per-NIC Proxmox firewall
+- Clean up partial infrastructure when `sample_init` fails
+- Per-instance failure isolation in `task_cleanup`
+- Dirty-instance detection before sample start
+
 ## 0.9.5 - 2025-11-28
 
 - Support static IPv4 allocation
@@ -7,16 +18,18 @@
 ## 0.9.4 - 2025-11-25
 
 - OOM and AMD CPU fixes in build_proxmox_auto
+
+## 0.9.3 - 2025-11-18
+
 - Size clones correctly in build_proxmox_auto
+
+## 0.9.2 - 2025-11-10
+
 - Allow vending of arbitrary qcow images in build_proxmox_auto
 
-## 0.9.3 - 2025-11-06
+## 0.9.1 - 2025-11-06
 
 - Fix occasional failure of vended instance to stay started
-
-## 0.9.2 - 2025-11-06
-
-- Support static IPv4 allocation
 
 ## 0.9.0 - 2025-10-27
 
