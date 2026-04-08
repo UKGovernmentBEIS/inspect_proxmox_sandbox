@@ -34,14 +34,49 @@ class SubnetConfig(BaseModel, frozen=True):
     Attributes:
         cidr: The subnet in CIDR notation
         gateway: The gateway IP address for the subnet
-        snat: Whether source NAT is enabled for this subnet
+        snat: Whether source NAT is enabled for this subnet.
+            Required when type="proxmox", must be None when type="opnsense".
         dhcp_ranges: DHCP ranges configured for this subnet
+        type: "proxmox" (default) uses Proxmox dnsmasq for DHCP/gateway.
+            "opnsense" deploys an OPNsense gateway VM that provides
+            DHCP, DNS, NAT, and domain-based egress filtering.
+        domain_whitelist: FQDNs permitted for egress. Only valid when
+            type="opnsense". When set, only outbound connections to
+            these domains are allowed; all other egress is dropped.
     """
 
     cidr: IPvAnyNetwork
     gateway: IPvAnyAddress
-    snat: bool
+    snat: Optional[bool] = None
     dhcp_ranges: Tuple[DhcpRange, ...]
+    type: Literal["proxmox", "opnsense"] = "proxmox"
+    domain_whitelist: Optional[Tuple[str, ...]] = None
+
+    @model_validator(mode="after")
+    def _validate_type_constraints(self) -> "SubnetConfig":
+        if self.type == "proxmox":
+            if self.snat is None:
+                raise ValueError(
+                    "snat must be explicitly set for Proxmox-managed "
+                    "subnets (type='proxmox')"
+                )
+            if self.domain_whitelist is not None:
+                raise ValueError(
+                    "domain_whitelist is only supported with "
+                    "type='opnsense'"
+                )
+        elif self.type == "opnsense":
+            if self.snat is not None:
+                raise ValueError(
+                    "snat must not be set for OPNsense-managed subnets "
+                    "— OPNsense handles NAT, not Proxmox"
+                )
+            if self.domain_whitelist is None:
+                raise ValueError(
+                    "domain_whitelist is required for OPNsense-managed "
+                    "subnets (type='opnsense')"
+                )
+        return self
 
 
 class VnetConfig(BaseModel, frozen=True):
@@ -87,18 +122,20 @@ class VmSourceConfig(BaseModel, frozen=True):
     Exactly one source type must be specified.
 
     Attributes:
-        existing_vm_template_tag: Clone VM from existing Proxmox template with this tag
-        ova: Create VM from this OVA file in the local (not Proxmox) filesystem.
-        built_in: Use this provider's built-in VM template (currently "ubuntu24.04"
-            is supported)
+        existing_vm_template_tag: Clone VM from existing Proxmox template
+            with this tag
+        ova: Create VM from this OVA file in the local (not Proxmox)
+            filesystem.
+        built_in: Use this provider's built-in VM template (currently
+            "ubuntu24.04" is supported)
     """
 
     existing_vm_template_tag: str | None = None
     ova: Path | None = None
-    # Ubuntu 24.04 is supported because an OVA is publicly available from a reliable
-    # source.
-    # From Proxmox 9.0 onwards, qcow2 and raw are also supported, allowing Debian 13,
-    # Kali, and others.
+    # Ubuntu 24.04 is supported because an OVA is publicly available from
+    # a reliable source.
+    # From Proxmox 9.0 onwards, qcow2 and raw are also supported, allowing
+    # Debian 13, Kali, and others.
     built_in: Literal["ubuntu24.04", "debian13", "kali2025.4"] | None = None
 
     @model_validator(mode="after")
@@ -116,7 +153,8 @@ class VmSourceConfig(BaseModel, frozen=True):
         if len(set_sources) != 1:
             raise ValueError(
                 "Exactly one source must be set. "
-                + f"Found {len(set_sources)}: {', '.join(set_sources) or 'none'}"
+                + f"Found {len(set_sources)}: "
+                + f"{', '.join(set_sources) or 'none'}"
             )
 
         return self

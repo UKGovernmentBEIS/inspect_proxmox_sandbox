@@ -1,0 +1,279 @@
+<?xml version="1.0"?>
+<opnsense>
+  <theme>opnsense</theme>
+  <sysctl>
+    <item>
+      <descr>Increase UFS read-ahead speeds</descr>
+      <tunable>vfs.read_max</tunable>
+      <value>default</value>
+    </item>
+    <item>
+      <descr>Disable CTRL+ALT+Delete reboot from keyboard.</descr>
+      <tunable>hw.syscons.kbd_reboot</tunable>
+      <value>0</value>
+    </item>
+    <item>
+      <descr>Enable TCP segmentation offloading</descr>
+      <tunable>net.inet.tcp.tso</tunable>
+      <value>1</value>
+    </item>
+    <item>
+      <descr>Randomize PID</descr>
+      <tunable>kern.randompid</tunable>
+      <value>347</value>
+    </item>
+    <item>
+      <descr>Increase maximum connection count</descr>
+      <tunable>kern.ipc.somaxconn</tunable>
+      <value>32768</value>
+    </item>
+    <item>
+      <descr>TCP Keepalive Timeout</descr>
+      <tunable>net.inet.tcp.keepinit</tunable>
+      <value>default</value>
+    </item>
+  </sysctl>
+  <system>
+    <optimization>normal</optimization>
+    <hostname>opnsense-gw</hostname>
+    <domain>localdomain</domain>
+    <dnsallowoverride>1</dnsallowoverride>
+    <group>
+      <name>admins</name>
+      <description>System Administrators</description>
+      <scope>system</scope>
+      <gid>1999</gid>
+      <member>0</member>
+      <priv>page-all</priv>
+    </group>
+    <user>
+      <name>root</name>
+      <descr>System Administrator</descr>
+      <scope>system</scope>
+      <groupname>admins</groupname>
+      <password>$2y$10$YRVoF4SgskIsrXOvOQjGieB9XqHPRra9R7d80B3BZdbY/j21TwBfS</password>
+      <uid>0</uid>
+    </user>
+    <nextuid>2000</nextuid>
+    <nextgid>2000</nextgid>
+    <timezone>Etc/UTC</timezone>
+    <timeservers>0.opnsense.pool.ntp.org 1.opnsense.pool.ntp.org 2.opnsense.pool.ntp.org 3.opnsense.pool.ntp.org</timeservers>
+    <webgui>
+      <protocol>https</protocol>
+      <port>443</port>
+      <ssl-certref>self_signed</ssl-certref>
+      <nohttpreferercheck>1</nohttpreferercheck>
+      <noantilockout>1</noantilockout>
+    </webgui>
+    <disablenatreflection>yes</disablenatreflection>
+    <usevirtualterminal>1</usevirtualterminal>
+    <disableconsolemenu>1</disableconsolemenu>
+    <disablechecksumoffloading>1</disablechecksumoffloading>
+    <disablesegmentationoffloading>1</disablesegmentationoffloading>
+    <disablelargereceiveoffloading>1</disablelargereceiveoffloading>
+    <ipv6allow>0</ipv6allow>
+    <powerd_ac_mode>hadp</powerd_ac_mode>
+    <powerd_battery_mode>hadp</powerd_battery_mode>
+    <powerd_normal_mode>hadp</powerd_normal_mode>
+    <bogonsinterval>monthly</bogonsinterval>
+    <ssh>
+      <enabled>enabled</enabled>
+      <group>admins</group>
+      <permitrootlogin>1</permitrootlogin>
+      <passwordauth>1</passwordauth>
+    </ssh>
+    <serialspeed>115200</serialspeed>
+    <primaryconsole>serial</primaryconsole>
+  </system>
+  <interfaces>
+    <wan>
+      <enable>1</enable>
+      <if>vtnet0</if>
+      <ipaddr>dhcp</ipaddr>
+      <dhcphostname/>
+      <alias-address/>
+      <alias-subnet>32</alias-subnet>
+      <dhcprejectfrom/>
+      <adv_dhcp_pt_timeout/>
+      <adv_dhcp_pt_retry/>
+      <adv_dhcp_pt_select_timeout/>
+      <adv_dhcp_pt_reboot/>
+      <adv_dhcp_pt_backoff_cutoff/>
+      <adv_dhcp_pt_initial_interval/>
+      <adv_dhcp_config_advanced/>
+      <adv_dhcp_config_file_override/>
+      <adv_dhcp_config_file_override_path/>
+      <blockpriv>1</blockpriv>
+      <blockbogons>1</blockbogons>
+    </wan>
+    <lan>
+      <enable>1</enable>
+      <if>vtnet1</if>
+      <ipaddr>10.0.2.1</ipaddr>
+      <subnet>24</subnet>
+    </lan>
+  </interfaces>
+  <dhcpd>
+    <lan>
+      <enable>1</enable>
+      <range>
+        <from>10.0.2.50</from>
+        <to>10.0.2.200</to>
+      </range>
+      <gateway>10.0.2.1</gateway>
+      <dnsserver>10.0.2.1</dnsserver>
+      <defaultleasetime>7200</defaultleasetime>
+      <maxleasetime>86400</maxleasetime>
+    </lan>
+  </dhcpd>
+  <unbound>
+    <enable>on</enable>
+    <dnssec>0</dnssec>
+    <port>53</port>
+    <active_interface>lan</active_interface>
+    <outgoing_interface>wan</outgoing_interface>
+    <forwarding>0</forwarding>
+  </unbound>
+  <nat>
+    <outbound>
+      <mode>automatic</mode>
+    </outbound>
+  </nat>
+  <filter>
+    <!-- Floating rules: processed before interface rules (priority 200000).
+         These block all TCP/UDP to OPNsense itself except DNS.
+         DHCP uses BPF (raw sockets) which bypasses pf entirely. -->
+    <rule uuid="f1000001-0000-0000-0000-000000000001">
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>udp</protocol>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <network>lanip</network>
+        <port>53</port>
+      </destination>
+      <floating>yes</floating>
+      <quick>yes</quick>
+      <direction>in</direction>
+      <descr>Float: allow DNS (UDP) to OPNsense</descr>
+    </rule>
+    <rule uuid="f1000002-0000-0000-0000-000000000002">
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <network>lanip</network>
+        <port>53</port>
+      </destination>
+      <floating>yes</floating>
+      <quick>yes</quick>
+      <direction>in</direction>
+      <descr>Float: allow DNS (TCP) to OPNsense</descr>
+    </rule>
+    <rule uuid="f1000003-0000-0000-0000-000000000003">
+      <type>block</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <network>lanip</network>
+      </destination>
+      <floating>yes</floating>
+      <quick>yes</quick>
+      <direction>in</direction>
+      <log>1</log>
+      <descr>Float: block all TCP to OPNsense</descr>
+    </rule>
+    <rule uuid="f1000004-0000-0000-0000-000000000004">
+      <type>block</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>udp</protocol>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <network>lanip</network>
+      </destination>
+      <floating>yes</floating>
+      <quick>yes</quick>
+      <direction>in</direction>
+      <log>1</log>
+      <descr>Float: block all UDP to OPNsense</descr>
+    </rule>
+    <!-- Interface rules: handle transit traffic (LAN → internet) -->
+    <rule uuid="a1000001-0000-0000-0000-000000000001">
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>icmp</protocol>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <any/>
+      </destination>
+      <descr>Allow ICMP from LAN (for diagnostics)</descr>
+    </rule>
+    <rule uuid="a1000004-0000-0000-0000-000000000004">
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <address>whitelisted_domains</address>
+      </destination>
+      <descr>Allow traffic to whitelisted domains</descr>
+    </rule>
+    <rule uuid="a1000005-0000-0000-0000-000000000005">
+      <type>block</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <any/>
+      </destination>
+      <log>1</log>
+      <descr>Block all other LAN egress (logged)</descr>
+    </rule>
+  </filter>
+  <OPNsense>
+    <Firewall>
+      <Alias version="1.0.1">
+        <aliases>
+          <alias uuid="b2000001-0000-0000-0000-000000000001">
+            <enabled>1</enabled>
+            <name>whitelisted_domains</name>
+            <type>host</type>
+            <proto/>
+            <updatefreq>300</updatefreq>
+            <content>ifconfig.me
+example.com
+api.ipify.org</content>
+            <description>Whitelisted domains for egress filtering</description>
+          </alias>
+        </aliases>
+      </Alias>
+    </Firewall>
+  </OPNsense>
+  <syslog/>
+  <revision>
+    <time>1711900000</time>
+    <description>Auto-generated config for domain whitelist gateway investigation</description>
+    <username>root</username>
+  </revision>
+</opnsense>

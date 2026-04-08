@@ -17,6 +17,7 @@ dependencies = [
     "inspect_ai>=0.3.79",
     "rich>=13.9",
     "platformdirs>=4.3.7",
+    "bcrypt>=5.0.0",
 ]
 
 [project.entry-points."inspect_ai"]
