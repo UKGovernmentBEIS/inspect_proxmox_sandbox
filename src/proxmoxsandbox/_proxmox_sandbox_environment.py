@@ -537,7 +537,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                         f"from pool '{pool_id}' - "
                         f"cleanup failed, instance may be dirty\n"
                         f"instance={instance}\n"
-                        f"pool_id={pool_id}"
+                        f"pool_id={pool_id}\n"
                         f"cleanup_succeeded={cleanup_succeeded}"
                     )
 
@@ -823,7 +823,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         # Create parent directory
         if is_windows:
-            parent_dir = str(Path(file).parent)
+            parent_dir = str(PureWindowsPath(file).parent)
             await self.exec(
                 cmd=["cmd.exe", "/c", f'if not exist "{parent_dir}" mkdir "{parent_dir}"']
             )
