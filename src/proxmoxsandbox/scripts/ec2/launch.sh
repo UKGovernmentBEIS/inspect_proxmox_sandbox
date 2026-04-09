@@ -4,9 +4,11 @@
 # Required environment variables:
 #   SUBNET_ID          - EC2 subnet ID to launch into
 #   SECURITY_GROUP_ID  - Security group ID for the instance
-#   INSTANCE_PROFILE   - IAM instance profile name (must include AmazonSSMManagedInstanceCore)
 #
 # Optional environment variables:
+#   INSTANCE_PROFILE   - IAM instance profile name. If omitted, the instance
+#                        relies on Default Host Management Configuration (DHMC)
+#                        for SSM access.
 #   REGION             - AWS region (default: us-east-1)
 #   INSTANCE_TYPE      - EC2 instance type (default: m8i.2xlarge)
 #   INSTANCE_NAME      - Name tag for the instance (default: proxmox)
@@ -20,10 +22,10 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-m8i.2xlarge}"
 INSTANCE_NAME="${INSTANCE_NAME:-proxmox}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-for var in SUBNET_ID SECURITY_GROUP_ID INSTANCE_PROFILE; do
+for var in SUBNET_ID SECURITY_GROUP_ID; do
     if [ -z "${!var:-}" ]; then
         echo "Error: $var is not set." >&2
-        echo "Required: SUBNET_ID, SECURITY_GROUP_ID, INSTANCE_PROFILE" >&2
+        echo "Required: SUBNET_ID, SECURITY_GROUP_ID" >&2
         exit 1
     fi
 done
@@ -49,21 +51,29 @@ if [[ -n "${LAUNCH_EXTRA_TAGS:-}" ]]; then
     )
 fi
 
+RUN_ARGS=(
+    --region "$REGION"
+    --image-id "$AMI"
+    --instance-type "$INSTANCE_TYPE"
+    --cpu-options "NestedVirtualization=enabled"
+    --subnet-id "$SUBNET_ID"
+    --security-group-ids "$SECURITY_GROUP_ID"
+    --block-device-mappings
+        "DeviceName=/dev/xvda,Ebs={VolumeSize=1024,VolumeType=gp3,DeleteOnTermination=true}"
+    --user-data "file://$SCRIPT_DIR/userdata.sh"
+    --tag-specifications "${TAG_SPECS[@]}"
+    --query 'Instances[0].InstanceId'
+    --output text
+)
+if [[ -n "${INSTANCE_PROFILE:-}" ]]; then
+    RUN_ARGS+=(--iam-instance-profile "Name=$INSTANCE_PROFILE")
+else
+    echo "WARNING: No INSTANCE_PROFILE set. SSM access requires Default Host" >&2
+    echo "  Management Configuration (DHMC) to be enabled in this account/region." >&2
+fi
+
 echo "Launching instance..."
-INSTANCE_ID=$(aws ec2 run-instances \
-    --region "$REGION" \
-    --image-id "$AMI" \
-    --instance-type "$INSTANCE_TYPE" \
-    --iam-instance-profile "Name=$INSTANCE_PROFILE" \
-    --cpu-options "NestedVirtualization=enabled" \
-    --subnet-id "$SUBNET_ID" \
-    --security-group-ids "$SECURITY_GROUP_ID" \
-    --block-device-mappings \
-        "DeviceName=/dev/xvda,Ebs={VolumeSize=1024,VolumeType=gp3,DeleteOnTermination=true}" \
-    --user-data "file://$SCRIPT_DIR/userdata.sh" \
-    --tag-specifications "${TAG_SPECS[@]}" \
-    --query 'Instances[0].InstanceId' \
-    --output text)
+INSTANCE_ID=$(aws ec2 run-instances "${RUN_ARGS[@]}")
 
 echo ""
 echo "Launched: $INSTANCE_ID"
