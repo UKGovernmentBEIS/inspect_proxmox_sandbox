@@ -2,6 +2,10 @@
 # Installs SSM agent on Debian 13 (not included by default), then installs Proxmox VE.
 # Follows https://pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_13_Trixie
 # with workarounds for non-interactive EC2 environments.
+#
+# NOTE: This script shares setup logic (IPAM patch, SDN config, storage config)
+# with scripts/virtualized_proxmox/build_proxmox_auto.sh (the on-first-boot.sh
+# heredoc). If you change shared logic here, update that file too and vice versa.
 set -euxo pipefail
 # Log all output with timestamps to /root/install-proxmox.log for debugging
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
@@ -106,8 +110,9 @@ update-grub
 # dnsmasq: needed for SDN DHCP/IPAM; disable the system service (PVE manages per-zone instances)
 DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq patch
 systemctl disable --now dnsmasq
-# frr: needed for SDN routing (EVPN/OSPF zones); installed with proxmox-ve but not enabled
-systemctl enable frr
+# frr: needed for SDN routing (EVPN/OSPF zones); installed with proxmox-ve but not enabled.
+# Not needed for simple zones (the default), only for EVPN/OSPF.
+# systemctl enable frr
 
 # --- Fix IPAM bug ---
 # Without this patch, static DHCP IP reservations (by MAC address) don't work.
