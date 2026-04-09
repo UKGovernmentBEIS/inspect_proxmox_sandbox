@@ -1,5 +1,7 @@
 """Data models and schemas for the Proxmox sandbox configuration."""
 
+import json
+import os
 from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
@@ -149,6 +151,25 @@ class VmNicConfig(BaseModel, frozen=True):
         return self
 
 
+
+# Proxmox QEMU OS types. See https://pve.proxmox.com/wiki/Manual:_qm.conf
+OsType: TypeAlias = Literal[
+    "l24",  # Linux 2.4 kernel
+    "l26",  # Linux 2.6+  kernel
+    "other",
+    "solaris",
+    "w2k",  # Windows 2000
+    "w2k3",  # Windows 2003
+    "w2k8",  # Windows 2008
+    "win10",  # Windows 10/2016/2019
+    "win11",  # Windows 11/2022/2025
+    "win7",  # Windows 7/2008r2
+    "win8",  # Windows 8/2012
+    "wvista",  # Windows Vista/2008
+    "wxp",  # Windows XP/2003
+]
+
+
 class VmConfig(BaseModel, frozen=True):
     """
     Configuration for a virtual machine.
@@ -166,6 +187,8 @@ class VmConfig(BaseModel, frozen=True):
         disk_controller: The disk controller type. If unset, defaults to "scsi"
         nic_controller: The NIC controller type. If unset, defaults to "virtio".
             This is applied to all virtual network interfaces.
+        firewall: if True, enables the Proxmox firewall on all network interfaces.
+            This is required for proper VM isolation. Defaults to False.
         os_type: The OS type. If unset, defaults to "l26". Only for OVA. See
             https://pve.proxmox.com/wiki/Manual:_qm.conf for more details
 
@@ -188,23 +211,76 @@ class VmConfig(BaseModel, frozen=True):
     uefi_boot: bool = False
     disk_controller: Optional[Literal["scsi", "ide"]] = None
     nic_controller: Optional[Literal["virtio", "e1000"]] = None
-    os_type: Optional[
-        Literal[
-            "l24",
-            "l26",
-            "other",
-            "solaris",
-            "w2k",
-            "w2k3",
-            "w2k8",
-            "win10",
-            "win11",
-            "win7",
-            "win8",
-            "wvista",
-            "wxp",
-        ]
-    ] = "l26"
+    firewall: bool = False
+    os_type: Optional[OsType] = "l26"
+
+
+class ProxmoxInstanceConfig(BaseModel, frozen=True):
+    """
+    Configuration for a single Proxmox instance.
+
+    Attributes:
+        instance_id: Unique identifier for this instance
+        pool_id: Image/AMI identifier - instances with the same pool_id share a queue
+            Examples: AMI ID, S3 path, or "default" for blank instances
+        host: The hostname or IP address of the Proxmox server
+        port: The port number for the Proxmox API, usually 8006
+        user: The username for Proxmox authentication
+        user_realm: The authentication realm for the Proxmox user
+        password: The password for Proxmox authentication
+        node: The name of the Proxmox node
+        verify_tls: Whether to verify the Proxmox server's TLS certificate
+    """
+
+    instance_id: str
+    pool_id: str
+    host: str
+    port: int
+    user: str
+    user_realm: str
+    password: str
+    node: str
+    verify_tls: bool
+
+
+def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
+    """
+    Load Proxmox instance configurations from file or environment variables.
+
+    Priority order:
+    1. PROXMOX_CONFIG_FILE environment variable (JSON file)
+    2. Single-instance environment variables (PROXMOX_HOST, etc.)
+
+    Returns:
+        Tuple of ProxmoxInstanceConfig objects
+    """
+    # Priority 1: Read from PROXMOX_CONFIG_FILE environment variable
+    config_file = getenv("PROXMOX_CONFIG_FILE")
+    if config_file and os.path.exists(config_file):
+        with open(config_file) as f:
+            data = json.load(f)
+            instances_data = data.get("instances", [])
+            return tuple(ProxmoxInstanceConfig(**inst) for inst in instances_data)
+
+    # Priority 2: Single instance from env vars
+    host = getenv("PROXMOX_HOST")
+    if host:
+        return (
+            ProxmoxInstanceConfig(
+                instance_id="default",
+                pool_id="default",
+                host=host,
+                port=int(getenv("PROXMOX_PORT", "8006")),
+                user=getenv("PROXMOX_USER", "root"),
+                user_realm=getenv("PROXMOX_REALM", "pam"),
+                password=getenv("PROXMOX_PASSWORD", "password"),
+                node=getenv("PROXMOX_NODE", "proxmox"),
+                verify_tls=getenv("PROXMOX_VERIFY_TLS", "1") == "1",
+            ),
+        )
+
+    # No configuration found - return empty tuple
+    return ()
 
 
 class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
@@ -212,30 +288,33 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
     Configuration for a Proxmox sandbox environment.
 
     Attributes:
-        host: The hostname or IP address of the Proxmox server
-        port: The port number for the Proxmox API, usually 8006
-        user: The username for Proxmox authentication, 'root' unless you have configured
-            custom auth
-        user_realm: The authentication realm for the Proxmox user, 'pam' unless you have
-            configured custom auth
-        password: The password for Proxmox authentication
-        node: The name of the Proxmox node, usually 'proxmox'
-        verify_tls: Whether to verify the Proxmox server's TLS certificate.
-            1 = verify, 0 = do not verify
+        instance_pool_id: Which pool to use for this sample (must match a pool_id in
+            PROXMOX_CONFIG_FILE or defaults to "default" for single-instance mode)
         image_storage: The Proxmox storage pool for VM disk images (e.g.
             "local-lvm"). Defaults to the PROXMOX_IMAGE_STORAGE environment variable,
             or "local-lvm" if not set, which is the default if you installed Proxmox
             normally.
         sdn_config: Software-defined networking configuration
-            "auto": Create a simple SDN with a single subnet.  The IP addresses will not
-                be predictable as it depends on what subnets already exist.
-            None: No SDN will be created. VMs can reference existing VNETs in Proxmox
-                by their aliases. This is an advanced feature and not recommended for
-                normal use.
-            SdnConfig: Custom SDN configuration
         vms_config: Configurations for virtual machines
+        host: The hostname or IP address of the Proxmox server
+        port: The port number for the Proxmox API, usually 8006
+        user: The username for Proxmox authentication
+        user_realm: The authentication realm for the Proxmox user
+        password: The password for Proxmox authentication
+        node: The name of the Proxmox node
+        verify_tls: Whether to verify the Proxmox server's TLS certificate
     """
 
+    # Which pool to use (references pool_id in PROXMOX_CONFIG_FILE)
+    instance_pool_id: str = "default"
+
+    # Eval-specific configuration
+    sdn_config: SdnConfigType = "auto"
+    vms_config: Tuple[VmConfig, ...] = (
+        VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
+    )
+
+    # Single-instance fields (used when configuring via environment variables)
     host: str = Field(default_factory=lambda: getenv("PROXMOX_HOST", "localhost"))
     port: int = Field(default_factory=lambda: int(getenv("PROXMOX_PORT", "8006")))
     user: str = Field(default_factory=lambda: getenv("PROXMOX_USER", "root"))
@@ -250,9 +329,4 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
 
     image_storage: str = Field(
         default_factory=lambda: getenv("PROXMOX_IMAGE_STORAGE", "local-lvm")
-    )
-
-    sdn_config: SdnConfigType = "auto"
-    vms_config: Tuple[VmConfig, ...] = (
-        VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )

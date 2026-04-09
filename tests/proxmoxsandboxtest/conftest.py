@@ -1,5 +1,6 @@
 # tests/conftest.py
 import logging
+import os
 import random
 from typing import AsyncGenerator
 
@@ -24,6 +25,13 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+
+# Set PROXMOX_WINDOWS_TEMPLATE_TAG to run tests against a Windows VM.
+# The value should match the tag on an existing Proxmox VM template.
+# The template must be tagged with "inspect;<tag>" and have the QEMU
+# guest agent installed. When unset, Windows test variants are skipped.
+WINDOWS_TEMPLATE_TAG = os.getenv("PROXMOX_WINDOWS_TEMPLATE_TAG")
 
 
 @pytest.fixture
@@ -104,23 +112,59 @@ async def auto_sdn_vnet_aliases(
     await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
+def _get_os_params() -> list[str]:
+    params = ["linux"]
+    if WINDOWS_TEMPLATE_TAG:
+        params.append("windows")
+    return params
+
+
+def _get_os_config(os_name: str) -> ProxmoxSandboxEnvironmentConfig:
+    if os_name == "linux":
+        return ProxmoxSandboxEnvironmentConfig()
+
+    if os_name == "windows":
+        return ProxmoxSandboxEnvironmentConfig(
+            vms_config=(
+                VmConfig(
+                    vm_source_config=VmSourceConfig(
+                        existing_vm_template_tag=WINDOWS_TEMPLATE_TAG
+                    ),
+                    os_type="win11",
+                    uefi_boot=True,
+                    is_sandbox=True,
+                    ram_mb=8192,
+                ),
+            )
+        )
+
+    raise ValueError(f"Unknown OS: {os_name}")
+
+
+@pytest.fixture(params=_get_os_params())
+def sandbox_env_config_by_os(request) -> ProxmoxSandboxEnvironmentConfig:
+    return _get_os_config(request.param)
+
+
 @pytest.fixture(scope="function")
 async def proxmox_sandbox_environment(
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
+    sandbox_env_config_by_os: ProxmoxSandboxEnvironmentConfig,
 ) -> AsyncGenerator[ProxmoxSandboxEnvironment, None]:
     task_name = "from_conftest"
     await ProxmoxSandboxEnvironment.task_init(task_name=task_name, config=None)
     envs_dict = await ProxmoxSandboxEnvironment.sample_init(
         task_name=task_name,
-        config=sandbox_env_config,
+        config=sandbox_env_config_by_os,
         metadata={},
     )
     default_env = envs_dict["default"]
     assert isinstance(default_env, ProxmoxSandboxEnvironment)
+
     yield default_env
+
     await ProxmoxSandboxEnvironment.sample_cleanup(
         task_name=task_name,
-        config=sandbox_env_config,
+        config=sandbox_env_config_by_os,
         environments=envs_dict,
         interrupted=False,
     )

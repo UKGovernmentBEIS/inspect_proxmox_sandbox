@@ -89,7 +89,7 @@ class AsyncProxmoxAPI:
             content_type = "application/json"
         async with httpx.AsyncClient(
             verify=self.verify_tls,
-            timeout=httpx.Timeout(connect=5, read=60, write=60, pool=60),
+            timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
             # Get a fresh ticket if we don't have one or it's approaching expiry
             if not self.ticket or self._ticket_near_expiry():
@@ -187,7 +187,7 @@ class AsyncProxmoxAPI:
 
         async with httpx.AsyncClient(
             verify=self.verify_tls,
-            timeout=httpx.Timeout(connect=5, read=60, write=60, pool=60),
+            timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
             # ping to refresh token if needed, so we don't have to do it in the stream
             await self._ping_qemu_agent(node, vm_id)

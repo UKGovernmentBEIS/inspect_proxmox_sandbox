@@ -1,0 +1,15 @@
+{
+  "instances": [
+    {
+      "instance_id": "test-1",
+      "pool_id": "default",
+      "host": "10.0.1.10",
+      "port": 8006,
+      "user": "root",
+      "user_realm": "pam",
+      "password": "test",
+      "node": "pve1",
+      "verify_tls": false
+    }
+  ]
+}

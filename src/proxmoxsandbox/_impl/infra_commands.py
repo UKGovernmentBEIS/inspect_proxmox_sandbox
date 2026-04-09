@@ -144,14 +144,18 @@ class InfraCommands(abc.ABC):
 
         ipam_mappings = []
 
+        # Create ALL IPAM mappings FIRST, before creating/starting any VMs.
+        # This prevents race conditions where a booting VM's DHCP request
+        # causes Proxmox to auto-allocate IPs that we wanted to reserve.
         for vm_config in vms_config:
-            # We have to create the IPAM entries before booting the VMs
-            # otherwise they will not get the defined static IPs.
             per_vm_ipam_mappings = await self.create_ipam_mappings(
                 vnet_aliases, vm_config, sdn_zone_id
             )
             ipam_mappings.extend(per_vm_ipam_mappings)
 
+        # Now create and start VMs
+        for i, vm_config in enumerate(vms_config):
+            self.logger.info(f"Creating VM {i+1}/{len(vms_config)}: {vm_config.name}")
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
                 vm_id = await self.qemu_commands.create_and_start_vm(
                     sdn_vnet_aliases=vnet_aliases,
@@ -163,10 +167,10 @@ class InfraCommands(abc.ABC):
 
         # TODO check for failed starts in the log somehow
 
-        for vm_configs_with_id in vm_configs_with_ids:
-            await self.qemu_commands.await_vm(
-                vm_configs_with_id[0], vm_configs_with_id[1].is_sandbox
-            )
+        for vm_id, vm_config in vm_configs_with_ids:
+            self.logger.info(f"Waiting for VM {vm_config.name} (ID={vm_id})")
+            await self.qemu_commands.await_vm(vm_id, vm_config.is_sandbox)
+            self.logger.info(f"VM {vm_config.name} is ready")
 
         return tuple(vm_configs_with_ids), sdn_zone_id, tuple(ipam_mappings)
 
@@ -254,7 +258,7 @@ class InfraCommands(abc.ABC):
         await self.qemu_commands.task_cleanup()
         await self.sdn_commands.task_cleanup()
 
-    async def cleanup_no_id(self) -> None:
+    async def cleanup_no_id(self, skip_confirmation=False) -> None:
         noticed_vnets = set()
         noticed_vms = list()
 
@@ -333,10 +337,13 @@ class InfraCommands(abc.ABC):
         is_interactive_shell = sys.stdin.isatty()
         is_ci = "CI" in os.environ
         is_pytest = "PYTEST_CURRENT_TEST" in os.environ
+        any_user = is_interactive_shell and not is_ci and not is_pytest
 
         self.logger.debug(f"{is_interactive_shell=}, {is_ci=}, {is_pytest=}")
 
-        if is_interactive_shell and not is_ci and not is_pytest:
+        should_ask_for_confirmation = any_user and not skip_confirmation
+
+        if should_ask_for_confirmation:
             if not Confirm.ask(
                 "Are you sure you want to delete ALL the above resources?",
             ):
