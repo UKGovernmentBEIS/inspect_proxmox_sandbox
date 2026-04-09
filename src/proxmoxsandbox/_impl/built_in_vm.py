@@ -39,8 +39,8 @@ UBUNTU_URL = (
 )
 UBUNTU_VMDK_FILENAME = "ubuntu-noble-24.04-cloudimg.vmdk"
 DEBIAN_13_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
-KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.3/kali-linux-2025.3-cloud-genericcloud-amd64.tar.xz"
-KALI_DISK_RENAMED = "kali-2025.3-genericcloud-amd64.raw"
+KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.4/kali-linux-2025.4-cloud-genericcloud-amd64.tar.xz"
+KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
 
 STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
 
@@ -60,14 +60,16 @@ class BuiltInVM(abc.ABC):
         async_proxmox: AsyncProxmoxAPI,
         node: str,
         image_storage: str,
+        task_wrapper: TaskWrapper,
+        qemu_commands: QemuCommands,
+        sdn_commands: SdnCommands,
+        storage_commands: LocalStorageCommands,
     ):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = TaskWrapper(async_proxmox)
-        self.qemu_commands = QemuCommands(
-            async_proxmox, node, image_storage=image_storage
-        )
-        self.sdn_commands = SdnCommands(async_proxmox)
-        self.storage_commands = LocalStorageCommands(async_proxmox, node)
+        self.task_wrapper = task_wrapper
+        self.qemu_commands = qemu_commands
+        self.sdn_commands = sdn_commands
+        self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
         self.cache_dir = platformdirs.user_cache_path(
@@ -338,7 +340,7 @@ runcmd:
                 built_in=built_in_name,
                 source_image_source_url=DEBIAN_13_URL,
             )
-        elif built_in_name == "kali2025.3":
+        elif built_in_name == "kali2025.4":
             await self.ensure_version(9)
             await self.ensure_exists_from_xz(
                 next_available_vm_id=next_available_vm_id,

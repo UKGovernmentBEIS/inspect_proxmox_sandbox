@@ -126,7 +126,7 @@ For example if the password was 'trustno1', submit 5fcfd41e547a12215b173ff47fdd3
                 vms_config=(
                     VmConfig(
                         vm_source_config=VmSourceConfig(
-                            built_in="kali2025.3",
+                            built_in="kali2025.4",
                         ),
                         name="agent",
                         nics=(VmNicConfig(vnet_alias="ctf4_net"),),

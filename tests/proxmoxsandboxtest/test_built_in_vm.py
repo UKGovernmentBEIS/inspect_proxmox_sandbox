@@ -11,7 +11,7 @@ async def test_debian(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> No
 
 
 async def test_kali(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
-    await _do_test_builtin(qemu_commands, built_in_vm, "kali2025.3")
+    await _do_test_builtin(qemu_commands, built_in_vm, "kali2025.4")
 
 
 async def _do_test_builtin(

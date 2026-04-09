@@ -97,7 +97,7 @@ class VmSourceConfig(BaseModel, frozen=True):
     # source.
     # From Proxmox 9.0 onwards, qcow2 and raw are also supported, allowing Debian 13,
     # Kali, and others.
-    built_in: Literal["ubuntu24.04", "debian13", "kali2025.3"] | None = None
+    built_in: Literal["ubuntu24.04", "debian13", "kali2025.4"] | None = None
 
     @model_validator(mode="after")
     def _validate_single_source(self) -> "VmSourceConfig":
