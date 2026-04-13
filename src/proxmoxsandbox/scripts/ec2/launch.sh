@@ -15,11 +15,15 @@
 #   LAUNCH_EXTRA_TAGS  - Comma-separated AWS CLI shorthand tags, e.g.
 #                        '{Key=team,Value=infra},{Key=env,Value=dev}'
 #                        (single-quote in shell to prevent brace expansion)
+#   EC2_PROXMOX_PORT   - Port for the Proxmox API/web UI (default: 8006).
+#                        Passed into the instance userdata; if non-default,
+#                        iptables rules redirect the custom port to pveproxy.
 set -euo pipefail
 
 REGION="${REGION:-us-east-1}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-m8i.2xlarge}"
 INSTANCE_NAME="${INSTANCE_NAME:-proxmox}"
+EC2_PROXMOX_PORT="${EC2_PROXMOX_PORT:-8006}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 for var in SUBNET_ID SECURITY_GROUP_ID; do
@@ -51,6 +55,11 @@ if [[ -n "${LAUNCH_EXTRA_TAGS:-}" ]]; then
     )
 fi
 
+# Substitute the Proxmox port into the userdata template
+USERDATA_FILE=$(mktemp)
+trap 'rm -f "$USERDATA_FILE"' EXIT
+sed "s/@@PROXMOX_PORT@@/$EC2_PROXMOX_PORT/g" "$SCRIPT_DIR/userdata.sh" > "$USERDATA_FILE"
+
 RUN_ARGS=(
     --region "$REGION"
     --image-id "$AMI"
@@ -60,7 +69,7 @@ RUN_ARGS=(
     --security-group-ids "$SECURITY_GROUP_ID"
     --block-device-mappings
         "DeviceName=/dev/xvda,Ebs={VolumeSize=1024,VolumeType=gp3,DeleteOnTermination=true}"
-    --user-data "file://$SCRIPT_DIR/userdata.sh"
+    --user-data "file://$USERDATA_FILE"
     --tag-specifications "${TAG_SPECS[@]}"
     --query 'Instances[0].InstanceId'
     --output text

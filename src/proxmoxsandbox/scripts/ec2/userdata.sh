@@ -7,6 +7,8 @@
 # with scripts/virtualized_proxmox/build_proxmox_auto.sh (the on-first-boot.sh
 # heredoc). If you change shared logic here, update that file too and vice versa.
 set -euxo pipefail
+# Port for the Proxmox API/web UI (substituted by launch.sh; default 8006)
+PROXMOX_PORT=@@PROXMOX_PORT@@
 # Log all output with timestamps to /root/install-proxmox.log for debugging
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
 
@@ -88,6 +90,7 @@ UNIT
 cat > /root/proxmox-install-stage2.sh << 'STAGE2'
 #!/bin/bash
 set -euxo pipefail
+PROXMOX_PORT=@@PROXMOX_PORT@@
 
 # --- Install Proxmox VE packages ---
 echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selections
@@ -196,6 +199,15 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
 iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE
 iptables -A FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT
 iptables -A FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# --- Redirect custom Proxmox port to pveproxy's default 8006 ---
+if [ "$PROXMOX_PORT" != "8006" ]; then
+    # External traffic (direct connections)
+    iptables -t nat -A PREROUTING -p tcp --dport "$PROXMOX_PORT" -j REDIRECT --to-port 8006
+    # Locally-generated traffic (SSH tunnels, sandbox provider on localhost)
+    iptables -t nat -A OUTPUT -d 127.0.0.1 -p tcp --dport "$PROXMOX_PORT" -j REDIRECT --to-port 8006
+fi
+
 netfilter-persistent save
 
 # --- Configure 'local' storage to accept all content types (including import) ---

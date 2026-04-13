@@ -10,6 +10,7 @@ fi
 
 INST="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EC2_PROXMOX_PORT="${EC2_PROXMOX_PORT:-8006}"
 
 echo "Waiting for SSM agent to come online..."
 for i in {1..30}; do
@@ -42,7 +43,7 @@ while true; do
                 echo ""
                 PASSWORD=$("$SCRIPT_DIR/run-on-host.sh" "$INST" "cat /root/root-password" 2>/dev/null || true)
                 if [ -n "$PASSWORD" ]; then
-                    echo "Proxmox web UI: https://localhost:8006"
+                    echo "Proxmox web UI: https://localhost:$EC2_PROXMOX_PORT"
                     echo "  Login: root / PAM"
                     echo "  Password: $PASSWORD"
                 fi

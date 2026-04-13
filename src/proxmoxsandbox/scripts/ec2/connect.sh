@@ -4,8 +4,9 @@
 # Usage: ./connect.sh <instance-id>
 #
 # Optional environment variables:
-#   SSH_KEY  - Path to SSH private key (default: ~/.ssh/id_ed25519)
-#   REGION   - AWS region (default: us-east-1)
+#   SSH_KEY           - Path to SSH private key (default: ~/.ssh/id_ed25519)
+#   REGION            - AWS region (default: us-east-1)
+#   EC2_PROXMOX_PORT  - Proxmox API/web UI port to forward (default: 8006)
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -18,6 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SSH_KEY="${SSH_KEY:-~/.ssh/id_ed25519}"
 SSH_PUBKEY="${SSH_KEY}.pub"
 REGION="${REGION:-us-east-1}"
+EC2_PROXMOX_PORT="${EC2_PROXMOX_PORT:-8006}"
 
 if [ ! -f "$SSH_PUBKEY" ]; then
     echo "Error: $SSH_PUBKEY not found (set SSH_KEY to override)" >&2
@@ -32,7 +34,7 @@ aws ec2-instance-connect send-ssh-public-key \
     --ssh-public-key "file://$SSH_PUBKEY"
 
 exec ssh -i "$SSH_KEY" \
-    -L 8006:localhost:8006 \
+    -L "$EC2_PROXMOX_PORT:localhost:$EC2_PROXMOX_PORT" \
     -o StrictHostKeyChecking=no \
     -o ProxyCommand="$SCRIPT_DIR/ssm-proxy.sh %h %p" \
     "admin@$INSTANCE_ID"
