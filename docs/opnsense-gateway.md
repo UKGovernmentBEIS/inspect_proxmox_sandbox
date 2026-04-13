@@ -323,24 +323,24 @@ Not tested. SCP the boot script to the host, run UFS2Tool + `qemu-img` there.
 
 ## Integration into inspect_proxmox_sandbox (implemented)
 
-OPNsense is integrated via `SubnetConfig(type="opnsense")` on a VNet's
-subnet. When a subnet has `type="opnsense"`, an OPNsense gateway VM is
+OPNsense is integrated via `SubnetConfig(vnet_type="opnsense")` on a VNet's
+subnet. When a subnet has `vnet_type="opnsense"`, an OPNsense gateway VM is
 **auto-generated** — the user only declares the SDN topology and agent VMs.
 Docker is needed only for the one-time base image build.
 
 ### Schema
 
 ```python
-# schema.py — SubnetConfig with type discriminator
+# schema.py — SubnetConfig with vnet_type discriminator
 class SubnetConfig(BaseModel, frozen=True):
     cidr: IPvAnyNetwork
     gateway: IPvAnyAddress
     snat: Optional[bool] = None
     dhcp_ranges: Tuple[DhcpRange, ...]
-    type: Literal["proxmox", "opnsense"] = "proxmox"
+    vnet_type: Literal["proxmox", "opnsense"] = "proxmox"
     domain_whitelist: Optional[Tuple[str, ...]] = None
-    # type="proxmox": snat required, domain_whitelist forbidden
-    # type="opnsense": snat forbidden, domain_whitelist required
+    # vnet_type="proxmox": snat required, domain_whitelist forbidden
+    # vnet_type="opnsense": snat forbidden, domain_whitelist required
 ```
 
 The OPNsense subnet is declared on the LAN VNet:
@@ -352,7 +352,7 @@ VnetConfig(
         SubnetConfig(
             cidr=ip_network("10.0.2.0/24"),
             gateway=ip_address("10.0.2.1"),
-            type="opnsense",
+            vnet_type="opnsense",
             domain_whitelist=("ifconfig.me", "api.ipify.org"),
             dhcp_ranges=(DhcpRange(...),),
         ),
@@ -373,7 +373,7 @@ See `src/proxmoxsandbox/experimental/opnsense_eval.py` for the full example.
 
 | Phase            | What happens                                                                            |
 | ---------------- | --------------------------------------------------------------------------------------- |
-| `task_init`      | Detect `SubnetConfig(type="opnsense")` in sdn_config → `ensure_template()`             |
+| `task_init`      | Detect `SubnetConfig(vnet_type="opnsense")` in sdn_config → `ensure_template()`        |
 |                  | Check for base template tagged `inspect;opnsense-base-{hash}`                           |
 |                  | If missing: create via Docker (inject boot script only), convert to template            |
 | `sample_init`    | Auto-generate OPNsense VM → clone base template → config ISO (pycdlib) → ide2 → start  |
@@ -414,7 +414,7 @@ stays as-is.
 
 | File                                                 | Purpose                                                                                     |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `src/proxmoxsandbox/schema.py`                       | `SubnetConfig` with `type="opnsense"` discriminator                                         |
+| `src/proxmoxsandbox/schema.py`                       | `SubnetConfig` with `vnet_type="opnsense"` discriminator                                    |
 | `src/proxmoxsandbox/_impl/opnsense.py`               | `OpnsenseTemplateManager`, config.xml/ISO generation, Unbound DNS whitelist, Docker base build |
 | `src/proxmoxsandbox/_impl/infra_commands.py`         | Auto-generates OPNsense VMs, config ISO hook, static map collection                         |
 | `src/proxmoxsandbox/_impl/qemu_commands.py`          | Generic `post_clone_hook` on `create_and_start_vm()` (no OPNsense knowledge)                |
@@ -423,7 +423,7 @@ stays as-is.
 
 ### LAN VNet: OPNsense-managed subnet
 
-The LAN VNet declares `SubnetConfig(type="opnsense")`. This subnet is
+The LAN VNet declares `SubnetConfig(vnet_type="opnsense")`. This subnet is
 **not created in Proxmox** (no dnsmasq or IPAM on the LAN bridge).
 OPNsense is the sole DHCP server, DNS resolver, and gateway on that VNet.
 
