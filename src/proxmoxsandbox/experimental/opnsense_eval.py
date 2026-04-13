@@ -102,7 +102,7 @@ Report each result as ALLOWED or BLOCKED.""",
                                 SubnetConfig(
                                     cidr=ip_network("10.0.2.0/24"),
                                     gateway=ip_address("10.0.2.1"),
-                                    type="opnsense",
+                                    vnet_type="opnsense",
                                     domain_whitelist=(
                                         "ifconfig.me",
                                         "api.ipify.org",

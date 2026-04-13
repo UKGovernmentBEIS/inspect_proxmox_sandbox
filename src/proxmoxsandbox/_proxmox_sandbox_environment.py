@@ -224,7 +224,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if isinstance(config.sdn_config, SdnConfig):
             for vnet in config.sdn_config.vnet_configs:
                 for subnet in vnet.subnets:
-                    if subnet.type == "opnsense":
+                    if subnet.vnet_type == "opnsense":
                         has_opnsense = True
                         break
                 if has_opnsense:

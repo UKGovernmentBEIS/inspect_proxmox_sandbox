@@ -442,7 +442,7 @@ def _opnsense_subnets_by_vnet(
 ) -> Dict[str, SubnetConfig]:
     """Map VNet alias → SubnetConfig for OPNsense-managed subnets.
 
-    Scans sdn_config for SubnetConfig(type="opnsense"). The VNet alias
+    Scans sdn_config for SubnetConfig(vnet_type="opnsense"). The VNet alias
     of the containing VnetConfig is the LAN alias.
     """
     result: Dict[str, SubnetConfig] = {}
@@ -450,7 +450,7 @@ def _opnsense_subnets_by_vnet(
         return result
     for vnet_config in sdn_config.vnet_configs:
         for subnet in vnet_config.subnets:
-            if subnet.type == "opnsense":
+            if subnet.vnet_type == "opnsense":
                 if vnet_config.alias is None:
                     raise ValueError(
                         "VNet with OPNsense subnet must have an alias"
@@ -465,7 +465,7 @@ def _find_wan_vnet_alias(sdn_config: SdnConfigType) -> str:
         raise ValueError("SdnConfig is required for OPNsense subnets")
     for vnet_config in sdn_config.vnet_configs:
         for subnet in vnet_config.subnets:
-            if subnet.type == "proxmox" and subnet.snat:
+            if subnet.vnet_type == "proxmox" and subnet.snat:
                 if vnet_config.alias is None:
                     raise ValueError(
                         "WAN VNet (with snat=True) must have an alias"

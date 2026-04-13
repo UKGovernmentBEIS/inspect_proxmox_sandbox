@@ -1,7 +1,7 @@
 """OPNsense gateway VM support for domain-based egress filtering.
 
 This module handles:
-- config.xml generation from SubnetConfig(type="opnsense") parameters
+- config.xml generation from SubnetConfig(vnet_type="opnsense") parameters
 - Unbound DNS whitelist generation
 - Static base template creation (one-time Docker + UFS2Tool to add rc.d script)
 - Per-eval config ISO generation (pycdlib) and attachment
@@ -134,7 +134,7 @@ def generate_config_xml(
     subnet: SubnetConfig,
     static_maps: Sequence[tuple[str, str, str | None]] = (),
 ) -> str:
-    """Generate an OPNsense config.xml from a SubnetConfig with type="opnsense".
+    """Generate an OPNsense config.xml from a SubnetConfig with vnet_type="opnsense".
 
     Args:
         subnet: The OPNsense-managed subnet configuration.
@@ -142,7 +142,7 @@ def generate_config_xml(
             static mappings on the LAN. Derived from VmNicConfig.mac/ipv4
             on VMs connected to the OPNsense LAN VNet.
     """
-    assert subnet.type == "opnsense"
+    assert subnet.vnet_type == "opnsense"
     assert subnet.domain_whitelist is not None
 
     reference_path = (

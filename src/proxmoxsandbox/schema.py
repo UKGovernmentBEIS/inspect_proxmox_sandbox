@@ -35,37 +35,41 @@ class SubnetConfig(BaseModel, frozen=True):
         cidr: The subnet in CIDR notation
         gateway: The gateway IP address for the subnet
         snat: Whether source NAT is enabled for this subnet.
-            Required when type="proxmox", must be None when type="opnsense".
+            Required when vnet_type="proxmox", must be None when
+            vnet_type="opnsense".
         dhcp_ranges: DHCP ranges configured for this subnet
-        type: "proxmox" (default) uses Proxmox dnsmasq for DHCP/gateway.
-            "opnsense" deploys an OPNsense gateway VM that provides
-            DHCP, DNS, NAT, and domain-based egress filtering.
+        vnet_type: "proxmox" (default) uses Proxmox dnsmasq for
+            DHCP/gateway. "opnsense" deploys an OPNsense gateway VM
+            that provides DHCP, DNS, NAT, and domain-based egress
+            filtering. Named ``vnet_type`` rather than ``type`` to
+            avoid collision with the Inspect log viewer's content-type
+            discriminator field.
         domain_whitelist: FQDNs permitted for egress. Only valid when
-            type="opnsense". When set, only outbound connections to
-            these domains are allowed; all other egress is dropped.
+            vnet_type="opnsense". When set, only outbound connections
+            to these domains are allowed; all other egress is dropped.
     """
 
     cidr: IPvAnyNetwork
     gateway: IPvAnyAddress
     snat: Optional[bool] = None
     dhcp_ranges: Tuple[DhcpRange, ...]
-    type: Literal["proxmox", "opnsense"] = "proxmox"
+    vnet_type: Literal["proxmox", "opnsense"] = "proxmox"
     domain_whitelist: Optional[Tuple[str, ...]] = None
 
     @model_validator(mode="after")
-    def _validate_type_constraints(self) -> "SubnetConfig":
-        if self.type == "proxmox":
+    def _validate_vnet_type_constraints(self) -> "SubnetConfig":
+        if self.vnet_type == "proxmox":
             if self.snat is None:
                 raise ValueError(
                     "snat must be explicitly set for Proxmox-managed "
-                    "subnets (type='proxmox')"
+                    "subnets (vnet_type='proxmox')"
                 )
             if self.domain_whitelist is not None:
                 raise ValueError(
                     "domain_whitelist is only supported with "
-                    "type='opnsense'"
+                    "vnet_type='opnsense'"
                 )
-        elif self.type == "opnsense":
+        elif self.vnet_type == "opnsense":
             if self.snat is not None:
                 raise ValueError(
                     "snat must not be set for OPNsense-managed subnets "
@@ -74,7 +78,7 @@ class SubnetConfig(BaseModel, frozen=True):
             if self.domain_whitelist is None:
                 raise ValueError(
                     "domain_whitelist is required for OPNsense-managed "
-                    "subnets (type='opnsense')"
+                    "subnets (vnet_type='opnsense')"
                 )
         return self
 

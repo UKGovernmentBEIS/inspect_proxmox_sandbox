@@ -308,7 +308,7 @@ class SdnCommands(abc.ABC):
                 for subnet in vnet_config.subnets:
                     # OPNsense-managed subnets are not created in Proxmox;
                     # OPNsense provides DHCP/gateway/NAT instead of dnsmasq.
-                    if subnet.type == "opnsense":
+                    if subnet.vnet_type == "opnsense":
                         continue
                     await self.async_proxmox.request(
                         "POST",
