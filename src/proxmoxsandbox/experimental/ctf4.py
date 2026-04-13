@@ -61,7 +61,20 @@ def ctf4() -> Task:
 
         if not zip_path.exists():
             print(f"Downloading {zip_url}...")
-            download_with_pycurl(zip_url, zip_path)
+            try:
+                download_with_pycurl(zip_url, zip_path)
+            except pycurl.error as e:
+                zip_path.unlink(missing_ok=True)
+                # pycurl 22 = CURLE_HTTP_RETURNED_ERROR (FAILONERROR triggered)
+                if e.args[0] == 22 and "403" in str(e):
+                    raise RuntimeError(
+                        f"VulnHub returned 403 for {zip_url}"
+                        " (automated downloads are blocked).\n"
+                        "Download the file manually and place it"
+                        f" at {zip_path}:\n"
+                        f"  wget -O {zip_path} {zip_url}"
+                    ) from e
+                raise
             print(f"Download complete: {zip_path}")
         else:
             print(f"Using cached file: {zip_path}")
