@@ -46,6 +46,16 @@ aws ec2 create-image --region "$REGION" \
 
 ## Everyday: launch from the AMI
 
+Find the AMI ID for the latest Proxmox AMI you built:
+
+```bash
+aws ec2 describe-images --region "$REGION" --owners self \
+    --filters 'Name=name,Values=proxmox-ami-*' \
+    --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text
+```
+
+Launch:
+
 ```bash
 aws ec2 run-instances --region "$REGION" \
     --image-id <ami-id> \
@@ -57,7 +67,27 @@ aws ec2 run-instances --region "$REGION" \
 ```
 
 Boots in ~1 min. Boot-time fixup services in the AMI regenerate the hostname
-and SSL certificates for the new private IP.
+and SSL certificates for the new private IP, and regenerate the root password
+on every fresh launch (detected by EC2 instance-id change). Read the password
+via SSM:
+
+```bash
+INSTANCE_ID=i-xxx
+
+CMD_ID=$(aws ssm send-command --region "$REGION" \
+    --instance-ids "$INSTANCE_ID" \
+    --document-name AWS-RunShellScript \
+    --parameters 'commands=["cat /root/root-password"]' \
+    --query 'Command.CommandId' --output text)
+aws ssm wait command-executed --region "$REGION" \
+    --command-id "$CMD_ID" --instance-id "$INSTANCE_ID"
+aws ssm get-command-invocation --region "$REGION" \
+    --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+    --query 'StandardOutputContent' --output text
+```
+
+To open the Proxmox web UI, use `experimental/connect.sh` to forward port 8006
+over SSM (no inbound SG rules required); see `experimental/README.md`.
 
 ## VM networking (inside the Proxmox host)
 
@@ -76,7 +106,7 @@ because EC2 only routes to IPs on attached ENIs.
 - IPAM patch so static-DHCP-by-MAC works
   (see <https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/>).
 - `/run/dnsmasq/resolv.conf` shim for SDN dnsmasq DNS forwarding.
-- AMI fixup services for hostname + SSL cert regeneration on every boot.
+- AMI fixup services for hostname + SSL cert + root password regeneration on every boot.
 
 ## Other scripts
 

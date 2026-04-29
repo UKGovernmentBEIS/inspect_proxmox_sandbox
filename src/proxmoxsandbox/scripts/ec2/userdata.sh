@@ -123,13 +123,10 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi 
 DEBIAN_FRONTEND=noninteractive apt-get remove -y linux-image-amd64 'linux-image-6.12*' os-prober
 update-grub
 
-# --- Set root password for web UI access ---
-( set +x
-  ROOT_PASSWORD=$(openssl rand -base64 18)
-  echo "root:$ROOT_PASSWORD" | chpasswd
-  echo "$ROOT_PASSWORD" > /root/root-password
-  chmod 600 /root/root-password
-)
+# --- Root password is generated/refreshed by proxmox-ami-fixup-password.service
+# on every boot where the EC2 instance-id has changed (i.e. on the build
+# instance's first boot, and on every subsequent launch from an AMI). See
+# below.
 
 # --- SDN dependencies ---
 # dnsmasq: needed for SDN DHCP/IPAM; disable the system service (PVE manages per-zone instances)
@@ -226,8 +223,10 @@ pvesm set local --content images,rootdir,vztmpl,backup,iso,snippets,import
 
 # --- AMI boot-time fixup services ---
 # When an AMI is launched with a new IP, EC2 changes the hostname to ip-x-x-x-x,
-# breaking Proxmox node identity, SSL certs, and pveproxy. These two services fix
-# that on every boot. Harmless on the original instance (just re-sets the same values).
+# breaking Proxmox node identity, SSL certs, and pveproxy. These services fix
+# that on every boot. The password fixup additionally detects fresh launches
+# (by EC2 instance-id) and regenerates the root password so credentials don't
+# leak across instances launched from the same AMI.
 NODE_NAME="proxmox"
 
 cat > /usr/local/bin/proxmox-ami-fixup-hostname.sh << 'FIXUP_HOSTNAME'
@@ -278,6 +277,47 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_CERTS_UNIT
 
+# Regenerate root password whenever the EC2 instance-id changes (i.e. on the
+# build instance's first boot, and on every fresh launch from an AMI). Without
+# this, every instance launched from a given AMI shares the password set during
+# the build run, which leaks across launches as soon as one of the saved
+# passwords is exposed.
+cat > /usr/local/bin/proxmox-ami-fixup-password.sh << 'FIXUP_PASSWORD'
+#!/bin/bash
+set -euo pipefail
+TOKEN=$(curl -sf -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+    http://169.254.169.254/latest/api/token)
+CURRENT_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
+    http://169.254.169.254/latest/meta-data/instance-id)
+SAVED_ID=$(cat /root/.last-instance-id 2>/dev/null || true)
+if [ "$CURRENT_ID" = "$SAVED_ID" ] && [ -s /root/root-password ]; then
+    exit 0
+fi
+( umask 077
+  PASSWORD=$(openssl rand -base64 18)
+  echo "root:$PASSWORD" | chpasswd
+  echo "$PASSWORD" > /root/root-password
+  echo "$CURRENT_ID" > /root/.last-instance-id
+)
+FIXUP_PASSWORD
+chmod +x /usr/local/bin/proxmox-ami-fixup-password.sh
+
+cat > /etc/systemd/system/proxmox-ami-fixup-password.service << 'FIXUP_PASSWORD_UNIT'
+[Unit]
+Description=Regenerate root password when EC2 instance-id changes
+After=network-online.target
+Wants=network-online.target
+Before=pveproxy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/proxmox-ami-fixup-password.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+FIXUP_PASSWORD_UNIT
+
 # Apply NAT/FORWARD rules at boot using the current management NIC.
 # The NIC name (e.g. enp39s0, ens5) depends on instance family, so we can't
 # bake it into persistent iptables rules at AMI build time.
@@ -317,6 +357,7 @@ systemctl daemon-reload
 systemctl enable proxmox-ami-fixup-hostname.service
 systemctl enable proxmox-ami-fixup-certs.service
 systemctl enable proxmox-ami-fixup-nat.service
+systemctl enable proxmox-ami-fixup-password.service
 
 echo "PROXMOX INSTALL COMPLETE: $(pveversion)"
 
