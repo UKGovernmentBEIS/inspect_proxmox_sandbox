@@ -120,6 +120,12 @@ def generate_unbound_whitelist_conf(subnet: SubnetConfig) -> str:
     """
     assert subnet.domain_whitelist is not None
     lines = ["server:"]
+    # Suppress resolver software/version/hostname disclosure via CHAOS-class
+    # queries (version.bind / hostname.bind / id.server). Without these,
+    # any LAN client can fingerprint the resolver as Unbound + version and
+    # the gateway hostname.
+    lines.append("    hide-identity: yes")
+    lines.append("    hide-version: yes")
     # Default policy: refuse all queries
     lines.append('    local-zone: "." refuse')
     # Allow resolution for each whitelisted domain
