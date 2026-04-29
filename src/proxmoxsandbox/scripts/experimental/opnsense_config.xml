@@ -212,19 +212,6 @@
       <descr>Float: block all UDP to OPNsense</descr>
     </rule>
     <!-- Interface rules: handle transit traffic (LAN → internet) -->
-    <rule uuid="a1000001-0000-0000-0000-000000000001">
-      <type>pass</type>
-      <interface>lan</interface>
-      <ipprotocol>inet</ipprotocol>
-      <protocol>icmp</protocol>
-      <source>
-        <network>lan</network>
-      </source>
-      <destination>
-        <any/>
-      </destination>
-      <descr>Allow ICMP from LAN (for diagnostics)</descr>
-    </rule>
     <rule uuid="a1000004-0000-0000-0000-000000000004">
       <type>pass</type>
       <interface>lan</interface>
