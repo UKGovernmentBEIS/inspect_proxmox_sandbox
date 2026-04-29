@@ -10,10 +10,12 @@ fi
 
 INST="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REGION="${REGION:-us-east-1}"
+export REGION
 
 echo "Waiting for SSM agent to come online..."
 for i in {1..30}; do
-    STATUS=$(aws ssm describe-instance-information --region us-east-1 \
+    STATUS=$(aws ssm describe-instance-information --region "$REGION" \
         --filters "Key=InstanceIds,Values=$INST" \
         --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)
     if [ "$STATUS" = "Online" ]; then
@@ -34,7 +36,7 @@ while true; do
         sleep 60
         # Wait for SSM to come back after final reboot
         for i in {1..12}; do
-            STATUS=$(aws ssm describe-instance-information --region us-east-1 \
+            STATUS=$(aws ssm describe-instance-information --region "$REGION" \
                 --filters "Key=InstanceIds,Values=$INST" \
                 --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)
             if [ "$STATUS" = "Online" ]; then

@@ -8,7 +8,10 @@ virtualization — a cheaper alternative to bare-metal instance types.
 - AWS CLI v2 (must support `--cpu-options NestedVirtualization=enabled`)
 - An EC2 subnet with outbound internet access (for apt and Proxmox repos)
 - A security group allowing your access pattern (SSM requires no inbound rules)
-- An IAM instance profile with `AmazonSSMManagedInstanceCore` (for SSM access)
+- SSM access for the instance, via either:
+  - An IAM instance profile with `AmazonSSMManagedInstanceCore` (set `INSTANCE_PROFILE`), or
+  - Default Host Management Configuration (DHMC) enabled in the account/region
+    (then `INSTANCE_PROFILE` can be omitted)
 
 ## Quick Start
 
@@ -16,7 +19,10 @@ virtualization — a cheaper alternative to bare-metal instance types.
 # 1. Set environment variables (see Configuration below)
 export SUBNET_ID=subnet-xxxx
 export SECURITY_GROUP_ID=sg-xxxx
-export INSTANCE_PROFILE=your-ssm-instance-profile
+# Optional — only set if not relying on DHMC
+# export INSTANCE_PROFILE=your-ssm-instance-profile
+# Optional — defaults to us-east-1; export the same value for all the helper scripts
+# export REGION=eu-west-2
 
 # 2. Launch (auto-resolves latest Debian 13 AMI)
 ./launch.sh
@@ -100,7 +106,7 @@ Environment variables for `launch.sh`:
 |---------------------|------|---------------|--------------------------------------------------------------------------|
 | `SUBNET_ID`         | yes  |               | EC2 subnet ID to launch into                                             |
 | `SECURITY_GROUP_ID` | yes  |               | Security group ID for the instance                                       |
-| `INSTANCE_PROFILE`  | yes  |               | IAM instance profile name (must include `AmazonSSMManagedInstanceCore`)  |
+| `INSTANCE_PROFILE`  | no   | *(none)*      | IAM instance profile name (must include `AmazonSSMManagedInstanceCore`). If unset, SSM access relies on DHMC being enabled in the account/region. |
 | `REGION`            | no   | `us-east-1`   | AWS region                                                               |
 | `INSTANCE_TYPE`     | no   | `m8i.2xlarge` | EC2 instance type (must support nested virtualization)                   |
 | `INSTANCE_NAME`     | no   | `proxmox`     | Name tag for the instance                                                |
@@ -115,6 +121,10 @@ For `connect.sh`:
 | `SSH_KEY` | no       | `~/.ssh/id_ed25519` | Path to SSH private key |
 | `REGION`  | no       | `us-east-1`         | AWS region              |
 
+`wait-for-install.sh`, `run-on-host.sh`, `run-script-on-host.sh`, and `ssm-proxy.sh`
+also honour the `REGION` env var (default `us-east-1`). Export `REGION` once in the
+shell you launch from to keep all the helper scripts pointed at the same region.
+
 ## EC2-Specific Workarounds
 
 Handled automatically by `userdata.sh`:
@@ -127,3 +137,10 @@ Handled automatically by `userdata.sh`:
 - **grub-pc** — preseed install device to avoid interactive prompt on NVMe instances.
 - **postfix** — preseed mailer type / mailname before `proxmox-ve` install.
 - **IPAM patch** — fixes static DHCP IP reservations by MAC address.
+- **amazon-guardduty-agent** — when AWS GuardDuty Runtime Monitoring with
+  EC2_AGENT_MANAGEMENT is enabled, SSM Distributor auto-pushes this package.
+  If its `dpkg -i` lands while our `systemctl reboot` is queued, the postinst's
+  `systemctl start` fails (`Transaction is destructive`); the package is left
+  half-configured, and a non-idempotent `configure.sh` then prevents apt's
+  later `dpkg --configure -a` from recovering. Stage 1 waits up to 3 min for
+  the agent to land cleanly before rebooting.

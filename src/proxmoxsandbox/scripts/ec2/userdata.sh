@@ -65,6 +65,31 @@ DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y
 echo "grub-pc grub-pc/install_devices string /dev/nvme0n1" | debconf-set-selections
 DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-default-kernel
 
+# --- Wait for amazon-guardduty-agent (if AWS GuardDuty Runtime Monitoring is
+# pushing it) to install BEFORE we reboot. If we reboot mid-install, the
+# postinst's `systemctl start` fails because systemd has reboot.target queued,
+# and combined with a non-idempotent configure.sh that wedges the package at
+# dpkg state `iF`, every later apt-get install in stage 2 exits non-zero.
+# In accounts without GuardDuty Runtime Monitoring, short-circuits after 30s.
+echo "Waiting up to 3 min for amazon-guardduty-agent to install before reboot..."
+state=""
+for i in $(seq 1 36); do
+    state=$(dpkg-query -f '${Status}' -W amazon-guardduty-agent 2>/dev/null || true)
+    if [ "$state" = "install ok installed" ]; then
+        break
+    fi
+    # Short-circuit: after 30s, if there's no sign GuardDuty Runtime Monitoring
+    # is pushing the agent, stop waiting (saves ~2.5 min in accounts where it
+    # isn't enabled).
+    if [ "$i" -ge 6 ] && \
+       [ ! -d /var/lib/amazon/ssm/packages/AmazonGuardDuty-RuntimeMonitoringSsmPlugin ] && \
+       ! grep -qF AmazonGuardDuty /var/log/amazon/ssm/amazon-ssm-agent.log 2>/dev/null; then
+        break
+    fi
+    sleep 5
+done
+echo "  amazon-guardduty-agent state: ${state:-not present}; proceeding"
+
 # --- Reboot into Proxmox kernel, then continue via systemd oneshot ---
 cat > /etc/systemd/system/proxmox-install-stage2.service << 'UNIT'
 [Unit]
