@@ -205,7 +205,6 @@ systemd-tmpfiles --create /etc/tmpfiles.d/dnsmasq-resolv.conf
 # VMs can't use IPs directly on the VPC subnet (EC2 only routes traffic to
 # IPs assigned to ENIs), so we give VMs a private 10.10.10.0/24 network and
 # NAT their traffic through the host's single NIC.
-MGMT_NIC=$(ip route show default | awk '{print $5}' | head -1)
 pvesh create /nodes/proxmox/network \
     --iface vmbr0 --type bridge \
     --autostart 1 \
@@ -214,14 +213,13 @@ pvesh create /nodes/proxmox/network \
 grep -qxF 'source /etc/network/interfaces.d/*' /etc/network/interfaces.new \
     || sed -i '1s|^|source /etc/network/interfaces.d/*\n\n|' /etc/network/interfaces.new
 
-# --- IP forwarding + NAT (persistent across reboots) ---
+# --- IP forwarding ---
+# NAT/FORWARD rules are applied at boot by proxmox-ami-fixup-nat.service below,
+# which resolves the management NIC name dynamically (it differs across EC2
+# instance families: enp39s0 on m8i, ens5 on m6i, etc., so it can't be baked
+# into the AMI).
 echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/99-vm-nat.conf
 sysctl -w net.ipv4.ip_forward=1
-DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
-iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE
-iptables -A FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT
-iptables -A FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-netfilter-persistent save
 
 # --- Configure 'local' storage to accept all content types (including import) ---
 pvesm set local --content images,rootdir,vztmpl,backup,iso,snippets,import
@@ -280,9 +278,45 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_CERTS_UNIT
 
+# Apply NAT/FORWARD rules at boot using the current management NIC.
+# The NIC name (e.g. enp39s0, ens5) depends on instance family, so we can't
+# bake it into persistent iptables rules at AMI build time.
+cat > /usr/local/bin/proxmox-ami-fixup-nat.sh << 'FIXUP_NAT'
+#!/bin/bash
+set -euo pipefail
+MGMT_NIC=$(ip route show default | awk '{print $5}' | head -1)
+if [ -z "$MGMT_NIC" ]; then
+    echo "ERROR: could not determine management NIC from default route" >&2
+    exit 1
+fi
+iptables -t nat -C POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE 2>/dev/null \
+    || iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE
+iptables -C FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT 2>/dev/null \
+    || iptables -A FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT
+iptables -C FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+    || iptables -A FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+FIXUP_NAT
+chmod +x /usr/local/bin/proxmox-ami-fixup-nat.sh
+
+cat > /etc/systemd/system/proxmox-ami-fixup-nat.service << 'FIXUP_NAT_UNIT'
+[Unit]
+Description=Apply NAT/FORWARD iptables rules with current management NIC
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/proxmox-ami-fixup-nat.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+FIXUP_NAT_UNIT
+
 systemctl daemon-reload
 systemctl enable proxmox-ami-fixup-hostname.service
 systemctl enable proxmox-ami-fixup-certs.service
+systemctl enable proxmox-ami-fixup-nat.service
 
 echo "PROXMOX INSTALL COMPLETE: $(pveversion)"
 
