@@ -1,146 +1,92 @@
 # Proxmox VE on EC2 (Nested Virtualization)
 
-Scripts for running Proxmox VE on AWS EC2 **m8i** instances with nested
-virtualization — a cheaper alternative to bare-metal instance types.
+Run Proxmox VE on AWS EC2 **m8i** instances with nested virtualization — a
+cheaper alternative to bare-metal instance types. The intended workflow is
+**build a Proxmox AMI once, then launch from it many times**.
 
 ## Prerequisites
 
 - AWS CLI v2 (must support `--cpu-options NestedVirtualization=enabled`)
-- An EC2 subnet with outbound internet access (for apt and Proxmox repos)
-- A security group allowing your access pattern (SSM requires no inbound rules)
-- SSM access for the instance, via either:
-  - An IAM instance profile with `AmazonSSMManagedInstanceCore` (set `INSTANCE_PROFILE`), or
+- `jq`
+- A subnet with outbound internet access (apt + Proxmox repos)
+- A security group (SSM requires no inbound rules)
+- SSM access for the build instance, via either:
+  - an IAM instance profile with `AmazonSSMManagedInstanceCore` (set `INSTANCE_PROFILE`), or
   - Default Host Management Configuration (DHMC) enabled in the account/region
-    (then `INSTANCE_PROFILE` can be omitted)
 
-## Quick Start
+## One-time: build the AMI
 
 ```bash
-# 1. Set environment variables (see Configuration below)
 export SUBNET_ID=subnet-xxxx
 export SECURITY_GROUP_ID=sg-xxxx
-# Optional — only set if not relying on DHMC
-# export INSTANCE_PROFILE=your-ssm-instance-profile
-# Optional — defaults to us-east-1; export the same value for all the helper scripts
-# export REGION=eu-west-2
+export REGION=eu-west-2                      # optional, default us-east-1
+# export INSTANCE_PROFILE=...                 # optional if DHMC enabled
 
-# 2. Launch (auto-resolves latest Debian 13 AMI)
+# Launches m8i.2xlarge, runs the full Proxmox install via user-data, and tails
+# the install log on the host until it reports complete (~15 min). Prints the
+# instance ID and root password when done.
 ./launch.sh
-
-# 3. Wait for install to complete (~15 min)
-./wait-for-install.sh <instance-id>
-
-# 4. Connect with port forwarding for Proxmox web UI
-./connect.sh <instance-id>
-# Then browse to https://localhost:8006
-# Login: root / PAM / <password from wait-for-install.sh output>
-
-# 5. Retrieve the root password (if you missed the wait-for-install.sh output)
-./run-on-host.sh <instance-id> "cat /root/root-password"
-
-# 6. Run a quick command on the host
-./run-on-host.sh <instance-id> "pveversion"
-
-# 7. Run a script on the host (e.g. create a test VM)
-./run-script-on-host.sh <instance-id> ./create-test-vm.sh
 ```
 
-## Installation
-
-Fully automated via `userdata.sh`, passed as EC2 user-data at launch:
-
-- **Stage 1**: SSM agent, EC2 Instance Connect, hostname, Proxmox repo,
-  full-upgrade, `proxmox-default-kernel`, then reboot.
-- **Stage 2** (automatic via systemd oneshot): `proxmox-ve`, SDN dependencies
-  (`dnsmasq`, `frr`), IPAM bug patch, `vmbr0` bridge on 10.10.10.1/24,
-  iptables NAT, then reboot.
-- **Stage 3** (automatic): `pvenetcommit.service` promotes network config.
-
-## VM Networking
-
-VMs use a private 10.10.10.0/24 network on `vmbr0` (host-only bridge). The host
-NATs VM traffic via iptables MASQUERADE for outbound internet access.
-
-- VM gateway: `10.10.10.1`
-- DNS: `169.254.169.253` (VPC resolver)
-
-## Scripts
-
-| Script                      | Purpose                                                                                                                                                            |
-|-----------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `launch.sh`                 | Resolves latest Debian 13 AMI and launches a Proxmox EC2 instance with nested virtualization.                                                                     |
-| `userdata.sh`               | EC2 user-data that fully automates the Proxmox installation across two reboots. Includes IPAM bug patch for static DHCP IP reservations.                          |
-| `wait-for-install.sh`       | Polls SSM until the instance is reachable, then tails the install log until `PROXMOX INSTALL COMPLETE` appears.                                                   |
-| `connect.sh`                | Pushes a temporary SSH key via EC2 Instance Connect, then opens an SSH session tunnelled through SSM with port 8006 forwarded.                                    |
-| `ssm-proxy.sh`              | SSH `ProxyCommand` helper used by `connect.sh`. Not intended for direct use.                                                                                      |
-| `run-on-host.sh`            | Runs a single shell command on the host via SSM `send-command`. Times out after 60s.                                                                              |
-| `run-script-on-host.sh`     | Uploads and executes a local script on the host via SSM. Times out after 10 min.                                                                                  |
-| `create-test-vm.sh`         | **(Run on host.)** Creates an SDN zone/vnet/subnet, boots an Ubuntu 24.04 cloud VM, and verifies DNS + HTTPS. Idempotent.                                         |
-
-## Creating a Proxmox AMI
-
-To skip the ~15 min install on future launches:
+Once the build instance reports complete, snapshot it:
 
 ```bash
-# 1. Create AMI from a running instance
-aws ec2 create-image --region us-east-1 \
+aws ec2 create-image --region "$REGION" \
     --instance-id <instance-id> \
     --name "proxmox-ami-$(date +%Y%m%d)" \
     --description "Proxmox VE pre-installed"
-
-# 2. Launch from AMI (no --user-data needed, boots in ~1 min)
-aws ec2 run-instances --region us-east-1 \
-    --image-id <ami-id> \
-    --instance-type m8i.2xlarge \
-    --iam-instance-profile Name=$INSTANCE_PROFILE \
-    --cpu-options "NestedVirtualization=enabled" \
-    --subnet-id $SUBNET_ID \
-    --security-group-ids $SECURITY_GROUP_ID
+# wait for the AMI to reach 'available', then terminate the build instance
 ```
 
-## Configuration
+## Everyday: launch from the AMI
 
-Environment variables for `launch.sh`:
+```bash
+aws ec2 run-instances --region "$REGION" \
+    --image-id <ami-id> \
+    --instance-type m8i.2xlarge \
+    --cpu-options "NestedVirtualization=enabled" \
+    --subnet-id "$SUBNET_ID" \
+    --security-group-ids "$SECURITY_GROUP_ID"
+```
+
+Boots in ~1 min. Boot-time fixup services in the AMI regenerate the hostname
+and SSL certificates for the new private IP.
+
+## Configuration (launch.sh env vars)
 
 | Variable            | Req? | Default       | Description                                                              |
 |---------------------|------|---------------|--------------------------------------------------------------------------|
 | `SUBNET_ID`         | yes  |               | EC2 subnet ID to launch into                                             |
 | `SECURITY_GROUP_ID` | yes  |               | Security group ID for the instance                                       |
-| `INSTANCE_PROFILE`  | no   | *(none)*      | IAM instance profile name (must include `AmazonSSMManagedInstanceCore`). If unset, SSM access relies on DHMC being enabled in the account/region. |
+| `INSTANCE_PROFILE`  | no   | *(none)*      | IAM instance profile name. If unset, SSM access relies on DHMC.          |
 | `REGION`            | no   | `us-east-1`   | AWS region                                                               |
 | `INSTANCE_TYPE`     | no   | `m8i.2xlarge` | EC2 instance type (must support nested virtualization)                   |
 | `INSTANCE_NAME`     | no   | `proxmox`     | Name tag for the instance                                                |
-| `LAUNCH_EXTRA_TAGS` | no   | *(none)*      | Extra tags in AWS CLI shorthand, e.g. `'{Key=team,Value=infra}'`.        |
+| `LAUNCH_EXTRA_TAGS` | no   | *(none)*      | Extra tags in AWS CLI shorthand, e.g. `'{Key=team,Value=infra}'`. Single-quote to prevent brace expansion. |
 
-`LAUNCH_EXTRA_TAGS` must be single-quoted in shell to prevent brace expansion.
+## VM networking (inside the Proxmox host)
 
-For `connect.sh`:
+VMs run on a private 10.10.10.0/24 bridge (`vmbr0`) with the host NATing
+outbound traffic via iptables MASQUERADE. VM gateway: `10.10.10.1`. DNS:
+`169.254.169.253` (VPC resolver). VMs can't bind directly to the VPC subnet
+because EC2 only routes to IPs on attached ENIs.
 
-| Variable  | Required | Default             | Description             |
-|-----------|----------|---------------------|-------------------------|
-| `SSH_KEY` | no       | `~/.ssh/id_ed25519` | Path to SSH private key |
-| `REGION`  | no       | `us-east-1`         | AWS region              |
+## Known issues
 
-`wait-for-install.sh`, `run-on-host.sh`, `run-script-on-host.sh`, and `ssm-proxy.sh`
-also honour the `REGION` env var (default `us-east-1`). Export `REGION` once in the
-shell you launch from to keep all the helper scripts pointed at the same region.
+## EC2-specific bits handled by `userdata.sh`
 
-## EC2-Specific Workarounds
+- SSM agent (not in Debian 13 by default) — installed in stage 1.
+- EC2 Instance Connect (no Debian 13 package) — sshd configured manually with
+  an `AuthorizedKeysCommand` that fetches keys from IMDS.
+- `grub-pc` install device preseeded for NVMe.
+- `postfix` mailer type / mailname preseeded before `proxmox-ve` installs.
+- IPAM patch so static-DHCP-by-MAC works
+  (see <https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/>).
+- `/run/dnsmasq/resolv.conf` shim for SDN dnsmasq DNS forwarding.
+- AMI fixup services for hostname + SSL cert regeneration on every boot.
 
-Handled automatically by `userdata.sh`:
+## Other scripts
 
-- **SDN dnsmasq DNS forwarding** — `/run/dnsmasq/resolv.conf` doesn't exist on
-  EC2; a `tmpfiles.d` drop-in creates it pointing at the VPC resolver.
-- **SSM agent** — not included in Debian 13; installed in Stage 1.
-- **EC2 Instance Connect** — package not in Debian 13 repos; sshd configured
-  manually with an `AuthorizedKeysCommand` that fetches temporary keys from IMDS.
-- **grub-pc** — preseed install device to avoid interactive prompt on NVMe instances.
-- **postfix** — preseed mailer type / mailname before `proxmox-ve` install.
-- **IPAM patch** — fixes static DHCP IP reservations by MAC address.
-- **amazon-guardduty-agent** — when AWS GuardDuty Runtime Monitoring with
-  EC2_AGENT_MANAGEMENT is enabled, SSM Distributor auto-pushes this package.
-  If its `dpkg -i` lands while our `systemctl reboot` is queued, the postinst's
-  `systemctl start` fails (`Transaction is destructive`); the package is left
-  half-configured, and a non-idempotent `configure.sh` then prevents apt's
-  later `dpkg --configure -a` from recovering. Stage 1 waits up to 3 min for
-  the agent to land cleanly before rebooting.
+`experimental/` — optional helpers for interacting with a running host
+(SSH-via-SSM tunnel for the Proxmox web UI, run-command-on-host, a test-VM
+bring-up). See `experimental/README.md`. Not needed for the build/launch flow.

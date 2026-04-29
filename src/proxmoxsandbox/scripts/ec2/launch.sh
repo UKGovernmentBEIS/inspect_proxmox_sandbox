@@ -1,5 +1,6 @@
 #!/bin/bash
-# Launch a Proxmox EC2 instance on an m8i type with nested virtualization.
+# Launch a Proxmox EC2 instance and wait for the unattended install to finish.
+# Prints the instance ID and Proxmox root password once done.
 #
 # Required environment variables:
 #   SUBNET_ID          - EC2 subnet ID to launch into
@@ -30,6 +31,7 @@ for var in SUBNET_ID SECURITY_GROUP_ID; do
     fi
 done
 
+# --- Resolve AMI and launch ---
 echo "Resolving AMI (latest Debian 13 amd64)..."
 AMI=$(aws ec2 describe-images \
     --region "$REGION" \
@@ -74,12 +76,79 @@ fi
 
 echo "Launching instance..."
 INSTANCE_ID=$(aws ec2 run-instances "${RUN_ARGS[@]}")
+echo "  Launched: $INSTANCE_ID"
 
-echo ""
-echo "Launched: $INSTANCE_ID"
-echo ""
-echo "Monitor install progress:"
-echo "  $SCRIPT_DIR/wait-for-install.sh $INSTANCE_ID"
-echo ""
-echo "Connect (once install complete):"
-echo "  $SCRIPT_DIR/connect.sh $INSTANCE_ID"
+# --- Wait for SSM agent to come online ---
+echo "Waiting for SSM agent to come online..."
+for i in {1..30}; do
+    STATUS=$(aws ssm describe-instance-information --region "$REGION" \
+        --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+        --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)
+    if [ "$STATUS" = "Online" ]; then
+        echo "  SSM agent online"
+        break
+    fi
+    sleep 10
+done
+
+# --- Run a shell command on the instance via SSM ---
+_run_on_host() {
+    local cmd="$1" timeout="${2:-60}"
+    local cmd_id status
+    cmd_id=$(aws ssm send-command \
+        --region "$REGION" \
+        --instance-ids "$INSTANCE_ID" \
+        --document-name "AWS-RunShellScript" \
+        --parameters "$(jq -nc --arg cmd "$cmd" '{commands:[$cmd]}')" \
+        --timeout-seconds "$timeout" \
+        --query 'Command.CommandId' --output text)
+    for _ in $(seq 1 $((timeout / 5 + 1))); do
+        status=$(aws ssm get-command-invocation --region "$REGION" \
+            --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+            --query 'Status' --output text 2>/dev/null || echo InProgress)
+        [[ "$status" != InProgress && "$status" != Pending ]] && break
+        sleep 5
+    done
+    aws ssm get-command-invocation --region "$REGION" \
+        --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+        --query 'StandardOutputContent' --output text
+}
+
+# --- Tail the install log on the instance until it reports complete ---
+echo "Tailing install log on host (checking every 30s; install takes ~15 min)..."
+while true; do
+    out=$(_run_on_host "tail -5 /root/install-proxmox.log 2>/dev/null || echo 'log not yet available'" || echo "SSM not ready")
+    echo "--- $(date +%H:%M:%S) ---"
+    echo "$out"
+    if echo "$out" | grep -q "PROXMOX INSTALL COMPLETE"; then
+        echo "Install complete; waiting for final reboot..."
+        sleep 60
+        break
+    fi
+    sleep 30
+done
+
+# --- Wait for SSM to come back after the final reboot ---
+for i in {1..12}; do
+    STATUS=$(aws ssm describe-instance-information --region "$REGION" \
+        --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+        --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)
+    if [ "$STATUS" = "Online" ]; then
+        break
+    fi
+    sleep 10
+done
+if [ "$STATUS" != "Online" ]; then
+    echo "Warning: SSM agent didn't come back after final reboot" >&2
+    exit 1
+fi
+
+# --- Print the password ---
+PASSWORD=$(_run_on_host "cat /root/root-password" || true)
+echo
+echo "Instance ready: $INSTANCE_ID"
+if [ -n "$PASSWORD" ]; then
+    echo "  Proxmox web UI: https://localhost:8006 (after port-forwarding via experimental/connect.sh)"
+    echo "  Login: root / PAM"
+    echo "  Password: $PASSWORD"
+fi
