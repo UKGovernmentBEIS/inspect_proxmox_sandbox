@@ -13,3 +13,8 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 
 All scripts honour `REGION` (default `us-east-1`). `connect.sh` also honours
 `SSH_KEY` (default `~/.ssh/id_ed25519`).
+
+> **Footgun**: `REGION` must be **exported**, not just set, since these are
+> separate scripts. If you `REGION=eu-west-2 ./run-on-host.sh ...`, the var
+> doesn't propagate; use `export REGION=eu-west-2` first. The visible
+> symptom is `InvalidInstanceId: Instances not in a valid state for account`.

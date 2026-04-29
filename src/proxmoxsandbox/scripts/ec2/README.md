@@ -12,7 +12,23 @@ cheaper alternative to bare-metal instance types. The intended workflow is
 - A security group (SSM requires no inbound rules)
 - SSM access for the build instance, via either:
   - an IAM instance profile with `AmazonSSMManagedInstanceCore` (set `INSTANCE_PROFILE`), or
-  - Default Host Management Configuration (DHMC) enabled in the account/region
+  - Default Host Management Configuration (DHMC) enabled in the account/region.
+    To check (DHMC is enabled if `SettingValue` is a role ARN, not `$None`):
+
+    ```bash
+    aws ssm get-service-setting --region "$REGION" \
+        --setting-id "arn:aws:ssm:$REGION:$(aws sts get-caller-identity --query Account --output text):servicesetting/ssm/managed-instance/default-ec2-instance-management-role" \
+        --query 'ServiceSetting.SettingValue' --output text
+    ```
+
+Each instance gets a 1024 GB gp3 EBS root volume (Proxmox needs space for VM
+images). Plan for that in your cost / quota budget.
+
+> **Region footgun**: every script in this directory falls back to
+> `us-east-1` if `REGION` is unset (or not exported across script
+> boundaries). If you work in another region, `export REGION=...` once at
+> the top of your shell and keep it for the whole flow — silent
+> wrong-region errors are easy to misdiagnose.
 
 ## One-time: build the AMI
 
@@ -29,8 +45,8 @@ export INSTANCE_NAME=proxmox                  # Name tag for the instance
 # export LAUNCH_EXTRA_TAGS='{Key=team,Value=infra}'   # AWS CLI shorthand; single-quote to prevent brace expansion
 
 # Launches m8i.2xlarge, runs the full Proxmox install via user-data, and tails
-# the install log on the host until it reports complete (~15 min). Prints the
-# instance ID and root password when done.
+# the install log on the host until it reports complete (~5-15 min). Prints
+# the instance ID and root password when done.
 ./launch.sh
 ```
 
@@ -41,7 +57,15 @@ aws ec2 create-image --region "$REGION" \
     --instance-id <instance-id> \
     --name "proxmox-ami-$(date +%Y%m%d)" \
     --description "Proxmox VE pre-installed"
-# wait for the AMI to reach 'available', then terminate the build instance
+```
+
+`create-image` returns immediately with an AMI ID; the snapshot itself takes
+~10–30 min to reach `available` (it's a 1024 GB EBS volume, mostly empty).
+Wait for it, then terminate the build instance:
+
+```bash
+aws ec2 wait image-available --region "$REGION" --image-ids <ami-id>
+aws ec2 terminate-instances --region "$REGION" --instance-ids <instance-id>
 ```
 
 ## Everyday: launch from the AMI
@@ -66,10 +90,11 @@ aws ec2 run-instances --region "$REGION" \
     # add --iam-instance-profile Name=<profile> if SSM access doesn't come from DHMC
 ```
 
-Boots in ~1 min. Boot-time fixup services in the AMI regenerate the hostname
-and SSL certificates for the new private IP, and regenerate the root password
-on every fresh launch (detected by EC2 instance-id change). Read the password
-via SSM:
+Boots in ~1 min, with SSM coming online ~1 min after that. Boot-time fixup
+services in the AMI regenerate the hostname and SSL certificates for the new
+private IP, and regenerate the root password on every fresh launch (detected
+by EC2 instance-id change). Read the password via SSM (the Proxmox web UI
+login is `root` against the `Linux PAM` realm with this password):
 
 ```bash
 INSTANCE_ID=i-xxx
