@@ -7,16 +7,16 @@ running within a [Proxmox](https://www.proxmox.com/products/proxmox-virtual-envi
 
 ## Installing
 
-Add this using [Poetry](https://python-poetry.org/)
-
-```
-poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
-```
-
-or in [uv](https://github.com/astral-sh/uv),
+Add this using [uv](https://github.com/astral-sh/uv),
 
 ```
 uv add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
+```
+
+or with [Poetry](https://python-poetry.org/),
+
+```
+poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
 ```
 
 ## Requirements
@@ -45,7 +45,7 @@ pvesh set /storage/local -content iso,vztmpl,backup,snippets,images,rootdir,impo
 
 SDN requires you to configure dnsmasq, see the [Proxmox SDN documentation](https://pve.proxmox.com/pve-docs/chapter-pvesdn.html#pvesdn_install_dhcp_ipam). Note, the commands on that page must be run on the Proxmox node, not your local machine.
 
-For details on how to set up a local Proxmox instance for testing, see [CONTRIBUTING.md](CONTRIBUTING.md#local-proxmox)
+If you don't already have a Proxmox instance, see [CONTRIBUTING.md](CONTRIBUTING.md#setting-up-a-proxmox-instance-for-testing) for supported setup paths (local Ubuntu 24.04 host, or EC2 with nested virtualization).
 
 ## Configuring
 
@@ -315,7 +315,6 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 
 ## Feature Roadmap
 
-- qcow disk image for Proxmox 9.0+
 - Proxmox server health and config check
 - Normalize having a pfSense VM as the default route for networking
 - Firewall off the SDN from the Proxmox server and from other SDNs
