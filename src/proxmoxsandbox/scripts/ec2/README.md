@@ -28,6 +28,18 @@ export REGION=eu-west-2                      # optional, default us-east-1
 ./launch.sh
 ```
 
+`launch.sh` env vars:
+
+| Variable            | Req? | Default       | Description                                                              |
+|---------------------|------|---------------|--------------------------------------------------------------------------|
+| `SUBNET_ID`         | yes  |               | EC2 subnet ID to launch into                                             |
+| `SECURITY_GROUP_ID` | yes  |               | Security group ID for the instance                                       |
+| `INSTANCE_PROFILE`  | no   | *(none)*      | IAM instance profile name. If unset, SSM access relies on DHMC.          |
+| `REGION`            | no   | `us-east-1`   | AWS region                                                               |
+| `INSTANCE_TYPE`     | no   | `m8i.2xlarge` | EC2 instance type (must support nested virtualization)                   |
+| `INSTANCE_NAME`     | no   | `proxmox`     | Name tag for the instance                                                |
+| `LAUNCH_EXTRA_TAGS` | no   | *(none)*      | Extra tags in AWS CLI shorthand, e.g. `'{Key=team,Value=infra}'`. Single-quote to prevent brace expansion. |
+
 Once the build instance reports complete, snapshot it:
 
 ```bash
@@ -52,18 +64,6 @@ aws ec2 run-instances --region "$REGION" \
 
 Boots in ~1 min. Boot-time fixup services in the AMI regenerate the hostname
 and SSL certificates for the new private IP.
-
-## Configuration (launch.sh env vars)
-
-| Variable            | Req? | Default       | Description                                                              |
-|---------------------|------|---------------|--------------------------------------------------------------------------|
-| `SUBNET_ID`         | yes  |               | EC2 subnet ID to launch into                                             |
-| `SECURITY_GROUP_ID` | yes  |               | Security group ID for the instance                                       |
-| `INSTANCE_PROFILE`  | no   | *(none)*      | IAM instance profile name. If unset, SSM access relies on DHMC.          |
-| `REGION`            | no   | `us-east-1`   | AWS region                                                               |
-| `INSTANCE_TYPE`     | no   | `m8i.2xlarge` | EC2 instance type (must support nested virtualization)                   |
-| `INSTANCE_NAME`     | no   | `proxmox`     | Name tag for the instance                                                |
-| `LAUNCH_EXTRA_TAGS` | no   | *(none)*      | Extra tags in AWS CLI shorthand, e.g. `'{Key=team,Value=infra}'`. Single-quote to prevent brace expansion. |
 
 ## VM networking (inside the Proxmox host)
 
