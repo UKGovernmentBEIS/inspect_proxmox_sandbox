@@ -17,28 +17,22 @@ cheaper alternative to bare-metal instance types. The intended workflow is
 ## One-time: build the AMI
 
 ```bash
+# Required:
 export SUBNET_ID=subnet-xxxx
 export SECURITY_GROUP_ID=sg-xxxx
-export REGION=eu-west-2                      # optional, default us-east-1
-# export INSTANCE_PROFILE=...                 # optional if DHMC enabled
+
+# Optional (defaults shown):
+export REGION=us-east-1
+export INSTANCE_TYPE=m8i.2xlarge              # must support nested virtualization
+export INSTANCE_NAME=proxmox                  # Name tag for the instance
+# export INSTANCE_PROFILE=...                 # required unless DHMC is enabled in this account/region
+# export LAUNCH_EXTRA_TAGS='{Key=team,Value=infra}'   # AWS CLI shorthand; single-quote to prevent brace expansion
 
 # Launches m8i.2xlarge, runs the full Proxmox install via user-data, and tails
 # the install log on the host until it reports complete (~15 min). Prints the
 # instance ID and root password when done.
 ./launch.sh
 ```
-
-`launch.sh` env vars:
-
-| Variable            | Req? | Default       | Description                                                              |
-|---------------------|------|---------------|--------------------------------------------------------------------------|
-| `SUBNET_ID`         | yes  |               | EC2 subnet ID to launch into                                             |
-| `SECURITY_GROUP_ID` | yes  |               | Security group ID for the instance                                       |
-| `INSTANCE_PROFILE`  | no   | *(none)*      | IAM instance profile name. If unset, SSM access relies on DHMC.          |
-| `REGION`            | no   | `us-east-1`   | AWS region                                                               |
-| `INSTANCE_TYPE`     | no   | `m8i.2xlarge` | EC2 instance type (must support nested virtualization)                   |
-| `INSTANCE_NAME`     | no   | `proxmox`     | Name tag for the instance                                                |
-| `LAUNCH_EXTRA_TAGS` | no   | *(none)*      | Extra tags in AWS CLI shorthand, e.g. `'{Key=team,Value=infra}'`. Single-quote to prevent brace expansion. |
 
 Once the build instance reports complete, snapshot it:
 
