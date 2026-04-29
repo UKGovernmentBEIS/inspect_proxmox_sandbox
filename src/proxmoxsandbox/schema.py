@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
@@ -9,6 +10,16 @@ from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
 from pydantic import BaseModel, Field, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
+
+# RFC 1035 hostname; accepts trailing dot; rejects wildcards, IPs,
+# whitespace, newlines, ports, schemes. Requires at least one dot
+# (so bare TLDs like "com" are rejected) and a non-numeric TLD label
+# (rejecting "1.2.3.4").
+_FQDN_RE = re.compile(
+    r"^(?=.{1,253}\.?$)"
+    r"([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
+    r"[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?$"
+)
 
 
 class DhcpRange(BaseModel, frozen=True):
@@ -66,8 +77,7 @@ class SubnetConfig(BaseModel, frozen=True):
                 )
             if self.domain_whitelist is not None:
                 raise ValueError(
-                    "domain_whitelist is only supported with "
-                    "vnet_type='opnsense'"
+                    "domain_whitelist is only supported with vnet_type='opnsense'"
                 )
         elif self.vnet_type == "opnsense":
             if self.snat is not None:
@@ -80,6 +90,13 @@ class SubnetConfig(BaseModel, frozen=True):
                     "domain_whitelist is required for OPNsense-managed "
                     "subnets (vnet_type='opnsense')"
                 )
+            for entry in self.domain_whitelist:
+                if not _FQDN_RE.match(entry):
+                    raise ValueError(
+                        f"domain_whitelist entry {entry!r} is not a valid "
+                        f"FQDN. Wildcards (*.example.com), IPs, URLs, ports, "
+                        f"and whitespace are not supported."
+                    )
         return self
 
 
@@ -99,6 +116,23 @@ class VnetConfig(BaseModel, frozen=True):
         Annotated[str, Field(pattern=r"[()-_.[a-z][A-Z][0-9]\s]{0,256}")]
     ] = None
     subnets: Tuple[SubnetConfig, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_subnet_types(self) -> "VnetConfig":
+        types = {s.vnet_type for s in self.subnets}
+        if len(types) > 1:
+            raise ValueError(
+                f"All subnets within a VnetConfig must share the same "
+                f"vnet_type; got mixed: {sorted(types)}. OPNsense and "
+                f"Proxmox-managed DHCP cannot coexist on the same bridge."
+            )
+        opnsense_count = sum(1 for s in self.subnets if s.vnet_type == "opnsense")
+        if opnsense_count > 1:
+            raise ValueError(
+                f"At most one OPNsense-managed subnet per VnetConfig "
+                f"is supported; got {opnsense_count}."
+            )
+        return self
 
 
 class SdnConfig(BaseModel, frozen=True):
@@ -191,7 +225,6 @@ class VmNicConfig(BaseModel, frozen=True):
                 + "DHCP static mapping"
             )
         return self
-
 
 
 # Proxmox QEMU OS types. See https://pve.proxmox.com/wiki/Manual:_qm.conf
