@@ -47,6 +47,7 @@ aws ec2 run-instances --region "$REGION" \
     --cpu-options "NestedVirtualization=enabled" \
     --subnet-id "$SUBNET_ID" \
     --security-group-ids "$SECURITY_GROUP_ID"
+    # add --iam-instance-profile Name=<profile> if SSM access doesn't come from DHMC
 ```
 
 Boots in ~1 min. Boot-time fixup services in the AMI regenerate the hostname
@@ -70,8 +71,6 @@ VMs run on a private 10.10.10.0/24 bridge (`vmbr0`) with the host NATing
 outbound traffic via iptables MASQUERADE. VM gateway: `10.10.10.1`. DNS:
 `169.254.169.253` (VPC resolver). VMs can't bind directly to the VPC subnet
 because EC2 only routes to IPs on attached ENIs.
-
-## Known issues
 
 ## EC2-specific bits handled by `userdata.sh`
 
