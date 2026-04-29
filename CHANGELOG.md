@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0 - 2026-04-08
+
+- Multi-instance pool-based allocation: run evals across multiple Proxmox servers
+  with automatic instance acquisition/release via `PROXMOX_CONFIG_FILE`
+- Windows VM support: exec, read_file, write_file via QEMU guest agent on Windows guests
+- Retry transient QEMU guest agent errors (500s from virtio-serial channel drops)
+- `firewall` field on `VmConfig` to enable per-NIC Proxmox firewall
+- Clean up partial infrastructure when `sample_init` fails
+- Per-instance failure isolation in `task_cleanup`
+- Dirty-instance detection before sample start
+
 ## 0.9.5 - 2025-11-28
 
 - Support static IPv4 allocation
@@ -58,7 +69,7 @@
 ## 0.5.1 - 2025-05-13
 
 - Fix sandbox_cleanup=False being ignored when sample setup fails
- 
+
 ## 0.5.0 - 2025-04-17
 
 - Add machine type option (Linux, Windows, etc.)
@@ -75,6 +86,6 @@
 - Create 250G root space by default
 - Scripts moved into src/proxmoxsandbox/scripts
 
-## 0.3.0 - 2025-03-31 
+## 0.3.0 - 2025-03-31
 
 Initial release

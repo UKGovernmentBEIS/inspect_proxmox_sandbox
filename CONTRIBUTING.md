@@ -43,7 +43,7 @@ The intended workflow is to build a Proxmox AMI once, then launch from it many t
 
 ## Tests
 
-To run the tests, you will need a proxmox instance and an .env file per README.md.
+To run the tests, you will need a Proxmox instance and an `.env` file per README.md.
 
 If running from the CLI, you'll need to run first `set -a; source .env; set +a`.
 
@@ -54,6 +54,23 @@ uv run pytest
 ```
 
 The tests require your Proxmox node to have at least 3 vCPUs available.
+
+### Windows VM Tests
+
+By default, tests run against Linux VMs using the built-in `ubuntu24.04` image.
+
+To also run tests against Windows VMs:
+
+1. Create a Windows VM on your Proxmox server with `qemu-guest-agent` installed and running
+2. Convert it to a template (right-click → Convert to Template)
+3. Add tags `inspect;<your-tag>` to the template (e.g., `inspect;windows-test`)
+4. Set the environment variable:
+
+```bash
+export PROXMOX_WINDOWS_TEMPLATE_TAG=<your-tag>
+```
+
+With this set, tests in `test_proxmox_sandbox_agent_commands.py` will run for both Linux and Windows.
 
 ### Debug logging
 

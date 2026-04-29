@@ -3,7 +3,7 @@
 ## Purpose
 
 This plugin for [Inspect](https://inspect.aisi.org.uk/) allows you to use virtual machines, 
-running within a [Proxmox](https://www.proxmox.com/products/proxmox-virtual-environment/overview) instance, as [sandboxes](https://inspect.aisi.org.uk/sandboxing.html).
+running within one or more [Proxmox](https://www.proxmox.com/products/proxmox-virtual-environment/overview) instances, as [sandboxes](https://inspect.aisi.org.uk/sandboxing.html).
 
 ## Installing
 
@@ -21,9 +21,22 @@ poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
 
 ## Requirements
 
-This plugin assumes you already have a Proxmox instance set up, and that you have admin access to it.
+This plugin assumes you already have one or more Proxmox instances set up, and that you have admin access to them.
 
-Set the following environment variables (e.g. in a [`.env`](https://dotenvx.com/docs/env-file) file)
+Your Proxmox instance(s) must allow additional storage types in `local` from the default.
+You can run this on your Proxmox node to configure them:
+
+```bash
+pvesh set /storage/local -content iso,vztmpl,backup,snippets,images,rootdir,import
+```
+
+SDN requires you to configure dnsmasq, see the [Proxmox SDN documentation](https://pve.proxmox.com/pve-docs/chapter-pvesdn.html#pvesdn_install_dhcp_ipam). Note, the commands on that page must be run on the Proxmox node, not your local machine.
+
+If you don't already have a Proxmox instance, see [CONTRIBUTING.md](CONTRIBUTING.md#setting-up-a-proxmox-instance-for-testing) for supported setup paths (local Ubuntu 24.04 host, or EC2 with nested virtualization).
+
+### Single Proxmox Instance
+
+Set the following environment variables (e.g. in a [`.env`](https://dotenvx.com/docs/env-file) file):
 
 ```
 PROXMOX_HOST=[IP address or domain name of the host]
@@ -36,16 +49,45 @@ PROXMOX_VERIFY_TLS=[1 = verify, 0 = do not verify]
 PROXMOX_IMAGE_STORAGE=[storage pool for VM disk images, usually 'local-lvm']
 ```
 
-Your Proxmox instance must allow additional storage types in `local` from the default.
-You can run this on your Proxmox node to configure them:
+### Multiple Proxmox Instances
+
+To run evals across multiple Proxmox servers, create a JSON config file and point to it with `PROXMOX_CONFIG_FILE`:
 
 ```bash
-pvesh set /storage/local -content iso,vztmpl,backup,snippets,images,rootdir,import
+export PROXMOX_CONFIG_FILE=/path/to/instances.json
 ```
 
-SDN requires you to configure dnsmasq, see the [Proxmox SDN documentation](https://pve.proxmox.com/pve-docs/chapter-pvesdn.html#pvesdn_install_dhcp_ipam). Note, the commands on that page must be run on the Proxmox node, not your local machine.
+**instances.json**:
+```json
+{
+  "instances": [
+    {
+      "instance_id": "proxmox-1",
+      "pool_id": "ubuntu-ami-123",
+      "host": "10.0.1.10",
+      "port": 8006,
+      "user": "root",
+      "user_realm": "pam",
+      "password": "secret",
+      "node": "pve1",
+      "verify_tls": false
+    },
+    {
+      "instance_id": "proxmox-2",
+      "pool_id": "ubuntu-ami-123",
+      "host": "10.0.1.11",
+      "port": 8006,
+      "user": "root",
+      "user_realm": "pam",
+      "password": "secret",
+      "node": "pve2",
+      "verify_tls": false
+    }
+  ]
+}
+```
 
-If you don't already have a Proxmox instance, see [CONTRIBUTING.md](CONTRIBUTING.md#setting-up-a-proxmox-instance-for-testing) for supported setup paths (local Ubuntu 24.04 host, or EC2 with nested virtualization).
+Instances with the same `pool_id` form a pool. Each eval sample acquires one instance from its pool, uses it exclusively, and releases it back when done. Concurrency is automatically limited to the total number of instances.
 
 ## Configuring
 
@@ -63,16 +105,14 @@ At least one VM in the configuration must be a sandbox.
 sandbox=SandboxEnvironmentSpec(
     "proxmox",
     ProxmoxSandboxEnvironmentConfig(
-        # These config items will be taken from environment variables, if not specified here
-        host=[IP address or domain name of the host]
-        port=[port, e.g 8006]
-        user=[user, usually 'root']
-        user_realm=[authentication realm, 'pam' unless you have configured custom auth]
-        password=[password]
-        node=[node name, usually 'proxmox']
-        verify_tls=[True: verify, False: do not verify]
-        image_storage=[storage pool for VM disk images, default 'local-lvm']
-        # End config from environment
+        # Storage pool for VM disk images. Defaults to PROXMOX_IMAGE_STORAGE env var
+        # or "local-lvm" if not set.
+        image_storage="local-lvm",
+
+        # When using PROXMOX_CONFIG_FILE with multiple instances, set this to select
+        # which pool to use (must match a pool_id in the config file).
+        # Not needed for single-instance setups.
+        # instance_pool_id="ubuntu-ami-123",
 
         vms_config=(
             VmConfig(
@@ -87,6 +127,7 @@ sandbox=SandboxEnvironmentSpec(
                 is_sandbox=False, # optional, default is True. A virtual machine that is not a sandbox; the qemu-guest-agent need not be installed.
                 disk_controller="scsi", # optional, default will be SCSI. Can also use "ide" for older VM images.
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
+                firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
                 # You can assign more than one, to give the VM more than one network interface.
                 # If you leave this blank, your VM will be assigned to the first VNet.
@@ -212,7 +253,7 @@ nics=(
 - The `ipv4` field requires a `mac` address to be specified (validation will fail otherwise)
 - The IP address must fall within one of the configured subnet CIDR ranges
 - `use_pve_ipam_dnsnmasq` must be `True` in the SDN config
-- The Proxmox server *must* be patched using the patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html 
+- The Proxmox server *must* be patched using the patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
 ### Using Existing Proxmox VNETs (Advanced/Not Recommended)
 
@@ -257,6 +298,28 @@ the same, you should manually delete it from the Proxmox server.
 
 These template VMs are *not* cleaned up because that needs to happen outside
 the lifecycle of an Inspect eval. You need to do this manually at the moment.
+
+## Windows VMs
+
+Windows VMs are supported via the QEMU guest agent. To use a Windows VM:
+
+1. Create a Windows VM template on your Proxmox server with the [QEMU guest agent](https://pve.proxmox.com/wiki/Qemu-guest-agent) installed and running
+2. Convert it to a template and tag it with `inspect;<your-tag>`
+3. Reference it in your eval config:
+
+```python
+VmConfig(
+    vm_source_config=VmSourceConfig(
+        existing_vm_template_tag="your-tag"
+    ),
+    os_type="win11",  # or "win10", "win8", etc. — see schema.py for all options
+    uefi_boot=True,
+    is_sandbox=True,
+    ram_mb=8192,
+)
+```
+
+The `os_type` field determines how commands are executed inside the VM. Windows types (any value starting with `w`) use batch scripts instead of shell scripts. The QEMU guest agent channel on Windows is less reliable than on Linux, so transient errors are automatically retried.
 
 ## Observing the VMs
 
@@ -308,6 +371,8 @@ will delete:
 
 - all VMs tagged `inspect` 
 - any SDN zones created with names matching the pattern above.
+
+When using `PROXMOX_CONFIG_FILE`, cleanup runs against every instance in the config file.
 
 ## Versioning
 
