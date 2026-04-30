@@ -11,25 +11,26 @@ set -euxo pipefail
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
 
 # --- IMDSv2 helper (also used by EIC and AMI fixup services below) ---
+# Named call-ec2-hypervisor since Proxmox is also a hypervisor on this host.
 apt-get update -y
 apt-get install -y wget curl
-cat > /usr/local/bin/call-hypervisor << 'CALL_HYPERVISOR'
+cat > /usr/local/bin/call-ec2-hypervisor << 'CALL_EC2_HYPERVISOR'
 #!/bin/bash
-# Fetch a value from EC2 IMDSv2.
-# Usage: call-hypervisor <metadata-path>
-#   call-hypervisor placement/region
-#   call-hypervisor instance-id
+# Fetch a path from EC2 IMDSv2 (the EC2 hypervisor's metadata service).
+# Usage: call-ec2-hypervisor <path>
+#   call-ec2-hypervisor latest/meta-data/placement/region
+#   call-ec2-hypervisor latest/meta-data/instance-id
 set -euo pipefail
 TOKEN=$(curl -sf -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
     http://169.254.169.254/latest/api/token)
 curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
-    "http://169.254.169.254/latest/meta-data/$1"
-CALL_HYPERVISOR
-chmod 755 /usr/local/bin/call-hypervisor
+    "http://169.254.169.254/$1"
+CALL_EC2_HYPERVISOR
+chmod 755 /usr/local/bin/call-ec2-hypervisor
 
 # --- SSM agent (needed for out-of-band access before Proxmox is up) ---
 # Pull from the in-region bucket so the build doesn't pay cross-region S3 egress.
-REGION=$(/usr/local/bin/call-hypervisor placement/region)
+REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
 wget -q "https://s3.${REGION}.amazonaws.com/amazon-ssm-${REGION}/latest/debian_amd64/amazon-ssm-agent.deb" \
     -O /tmp/amazon-ssm-agent.deb
 dpkg -i /tmp/amazon-ssm-agent.deb
@@ -40,7 +41,7 @@ systemctl start amazon-ssm-agent
 # Fetches temporary keys pushed by `aws ec2-instance-connect send-ssh-public-key` from IMDS.
 cat > /usr/local/bin/eic_authorized_keys << 'EICSCRIPT'
 #!/bin/bash
-exec /usr/local/bin/call-hypervisor "managed-ssh-keys/active-keys/${1}/"
+exec /usr/local/bin/call-ec2-hypervisor "latest/meta-data/managed-ssh-keys/active-keys/${1}/"
 EICSCRIPT
 chmod 755 /usr/local/bin/eic_authorized_keys
 cat >> /etc/ssh/sshd_config << 'SSHDCONF'
@@ -299,7 +300,7 @@ FIXUP_CERTS_UNIT
 cat > /usr/local/bin/proxmox-ami-fixup-password.sh << 'FIXUP_PASSWORD'
 #!/bin/bash
 set -euo pipefail
-CURRENT_ID=$(/usr/local/bin/call-hypervisor instance-id)
+CURRENT_ID=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/instance-id)
 SAVED_ID=$(cat /root/.last-instance-id 2>/dev/null || true)
 if [ "$CURRENT_ID" = "$SAVED_ID" ] && [ -s /root/root-password ]; then
     exit 0
