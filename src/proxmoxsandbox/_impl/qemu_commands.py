@@ -148,7 +148,7 @@ class QemuCommands(abc.ABC):
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(30),
+            stop=tenacity.stop_after_delay(300),
         )
         async def vm_deleted() -> None:
             current = await self.async_proxmox.request(
