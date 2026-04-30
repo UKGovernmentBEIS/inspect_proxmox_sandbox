@@ -2,11 +2,13 @@ import abc
 import os
 import re
 import sys
+from ipaddress import summarize_address_range
 from logging import getLogger
 from random import randint
 from typing import ClassVar, Collection, Dict, List, NamedTuple, Sequence, Set, Tuple
 
 from inspect_ai.util import trace_action
+from pydantic.networks import IPvAnyAddress
 from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
@@ -170,7 +172,7 @@ class InfraCommands(abc.ABC):
 
         # Collect static IP maps from user VMs on OPNsense LANs.
         # These are baked into config.xml before OPNsense boots.
-        static_maps_by_lan = _collect_static_maps(vms_config, opnsense_lan_aliases)
+        static_maps_by_lan = _collect_static_maps(vms_config, opnsense_subnets)
 
         # Create ALL IPAM mappings FIRST, before creating/starting any VMs.
         # This prevents race conditions where a booting VM's DHCP request
@@ -477,23 +479,55 @@ def _find_wan_vnet_alias(sdn_config: SdnConfigType) -> str:
     )
 
 
+def _validate_static_ip(
+    subnet: SubnetConfig, vm_name: str | None, ipv4: IPvAnyAddress
+) -> None:
+    """Reject static IPs that OPNsense would silently ignore or mis-assign.
+
+    OPNsense drops staticmap entries outside the LAN subnet without warning,
+    leaves the gateway unprotected from collisions, and treats addresses
+    inside the dynamic DHCP pool as conflicts. Catch all three at config
+    time so the failure is loud rather than a confused VM.
+    """
+    name = vm_name or "<unnamed>"
+    if ipv4 not in subnet.cidr:
+        raise ValueError(
+            f"VM {name!r}: static IP {ipv4} is outside LAN subnet {subnet.cidr}"
+        )
+    if ipv4 == subnet.gateway:
+        raise ValueError(
+            f"VM {name!r}: static IP {ipv4} collides with the OPNsense gateway IP"
+        )
+    for r in subnet.dhcp_ranges:
+        if any(ipv4 in net for net in summarize_address_range(r.start, r.end)):
+            raise ValueError(
+                f"VM {name!r}: static IP {ipv4} is inside the dynamic "
+                f"DHCP range {r.start}–{r.end}; choose an address "
+                f"outside the range"
+            )
+
+
 def _collect_static_maps(
     vms_config: Tuple[VmConfig, ...],
-    lan_aliases: Set[str],
+    opnsense_subnets: Dict[str, SubnetConfig],
 ) -> Dict[str, List[Tuple[str, str, str | None]]]:
     """Collect (mac, ipv4, hostname) tuples from VMs on OPNsense LANs.
 
     Returns a dict keyed by LAN alias. The tuples are baked into
     config.xml as <staticmap> entries before OPNsense boots.
+
+    Raises ValueError if any static IP is outside the LAN subnet, equal
+    to the gateway, or inside a DHCP range — see ``_validate_static_ip``.
     """
     result: Dict[str, List[Tuple[str, str, str | None]]] = {
-        alias: [] for alias in lan_aliases
+        alias: [] for alias in opnsense_subnets
     }
     for vm in vms_config:
         if not vm.nics:
             continue
         for nic in vm.nics:
-            if nic.mac and nic.ipv4 and nic.vnet_alias in lan_aliases:
+            if nic.mac and nic.ipv4 and nic.vnet_alias in opnsense_subnets:
+                _validate_static_ip(opnsense_subnets[nic.vnet_alias], vm.name, nic.ipv4)
                 result[nic.vnet_alias].append(
                     (str(nic.mac).upper(), str(nic.ipv4), vm.name)
                 )

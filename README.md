@@ -328,6 +328,12 @@ The `os_type` field determines how commands are executed inside the VM. Windows 
 
 Note, if you are having problems, then setting Inspect's `sandbox_cleanup=False` will be helpful.
 
+> **Footgun: `sandbox_cleanup=False` leaks pool instances.**
+>
+> Inspect skips its own per-sample cleanup hook entirely when `sandbox_cleanup=False`, and that hook is the only place this sandbox returns the acquired Proxmox instance to the pool queue. Net effect: an instance grabbed during the eval is **never released**. If you then run another eval (e.g. the next pytest test) against the same `instance_pool_id`, `acquire_instance` blocks forever on an empty queue — the symptom looks like a hang.
+>
+> Use `sandbox_cleanup=False` only for one-shot debugging on a single eval. For test suites or anything that runs more than one eval per process, leave `sandbox_cleanup=True`. With `sandbox_cleanup=True`, VMs are still preserved on Ctrl-C / timeout cancellation (Inspect sets `interrupted=True` and the sandbox skips destruction); on a normal exception or assertion failure, VMs are destroyed but the instance is released cleanly.
+
 ### Logging in
 
 If you want to log into a sandbox VM, the Proxmox UI lets you open a console window, but you might not know the password.

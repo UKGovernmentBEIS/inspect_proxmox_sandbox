@@ -351,7 +351,7 @@ def test_opnsense_escape() -> None:
         ),
         log_level="trace",
         display="plain",
-        sandbox_cleanup=False,
+        sandbox_cleanup=True,
     )
 
     assert len(eval_logs) == 1

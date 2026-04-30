@@ -119,8 +119,10 @@ def test_opnsense_domain_filtering() -> None:
                     tool_arguments={
                         "cmd": (
                             "for i in $(seq 1 30); do "
-                            "  result=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null); "
-                            "  if [ -n \"$result\" ]; then echo \"READY after $i attempts\"; exit 0; fi; "
+                            "  result=$(curl -s --connect-timeout 5 ifconfig.me"
+                            " 2>/dev/null); "
+                            '  if [ -n "$result" ]; '
+                            'then echo "READY after $i attempts"; exit 0; fi; '
                             "  sleep 5; "
                             "done; echo TIMEOUT"
                         )
@@ -139,7 +141,10 @@ def test_opnsense_domain_filtering() -> None:
                     model="mockllm/model",
                     tool_name="bash",
                     tool_arguments={
-                        "cmd": "curl -s --connect-timeout 10 https://google.com; echo EXIT_CODE=$?"
+                        "cmd": (
+                            "curl -s --connect-timeout 10 https://google.com;"
+                            " echo EXIT_CODE=$?"
+                        )
                     },
                 ),
                 # Test 3: curl another whitelisted domain
@@ -155,7 +160,10 @@ def test_opnsense_domain_filtering() -> None:
                     model="mockllm/model",
                     tool_name="bash",
                     tool_arguments={
-                        "cmd": "curl -s --connect-timeout 10 http://1.1.1.1; echo EXIT_CODE=$?"
+                        "cmd": (
+                            "curl -s --connect-timeout 10 http://1.1.1.1;"
+                            " echo EXIT_CODE=$?"
+                        )
                     },
                 ),
                 # Submit
@@ -168,7 +176,7 @@ def test_opnsense_domain_filtering() -> None:
         ),
         log_level="trace",
         display="plain",
-        sandbox_cleanup=False,
+        sandbox_cleanup=True,
     )
 
     assert len(eval_logs) == 1
@@ -178,7 +186,9 @@ def test_opnsense_domain_filtering() -> None:
     sample = log.samples[0]
 
     tool_calls = [x for x in sample.messages if x.role == "tool"]
-    assert len(tool_calls) >= 5, f"Expected at least 5 tool calls, got {len(tool_calls)}"
+    assert len(tool_calls) >= 5, (
+        f"Expected at least 5 tool calls, got {len(tool_calls)}"
+    )
 
     # Tool call 0: wait for OPNsense to be ready
     readiness_result = tool_calls[0].text
@@ -199,9 +209,12 @@ def test_opnsense_domain_filtering() -> None:
     print(f"google.com result: {google_result!r}")
     # curl exit code 6 = DNS resolution refused (Unbound whitelist),
     # 7 = connection refused, 28 = timeout
-    assert "EXIT_CODE=28" in google_result or "EXIT_CODE=7" in google_result or "EXIT_CODE=6" in google_result or "timed out" in google_result.lower(), (
-        f"Expected google.com to be blocked, got: {google_result}"
-    )
+    assert (
+        "EXIT_CODE=28" in google_result
+        or "EXIT_CODE=7" in google_result
+        or "EXIT_CODE=6" in google_result
+        or "timed out" in google_result.lower()
+    ), f"Expected google.com to be blocked, got: {google_result}"
 
     # Tool call 3: curl api.ipify.org — should return an IP
     ipify_result = tool_calls[3].text
@@ -213,6 +226,8 @@ def test_opnsense_domain_filtering() -> None:
     # Tool call 4: curl bare IP 1.1.1.1 — should be blocked
     bare_ip_result = tool_calls[4].text
     print(f"1.1.1.1 result: {bare_ip_result!r}")
-    assert "EXIT_CODE=28" in bare_ip_result or "EXIT_CODE=7" in bare_ip_result or "timed out" in bare_ip_result.lower(), (
-        f"Expected bare IP 1.1.1.1 to be blocked, got: {bare_ip_result}"
-    )
+    assert (
+        "EXIT_CODE=28" in bare_ip_result
+        or "EXIT_CODE=7" in bare_ip_result
+        or "timed out" in bare_ip_result.lower()
+    ), f"Expected bare IP 1.1.1.1 to be blocked, got: {bare_ip_result}"
