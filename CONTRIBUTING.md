@@ -24,13 +24,22 @@ source .venv/bin/activate
 
 or prefix your pytest (etc.) commands with `uv run ...`
 
-## Local Proxmox
+## Setting up a Proxmox instance for testing
 
-If you want to spin up a Proxmox instance locally, you can use the script `src/proxmoxsandbox/scripts/virtualized_proxmox/build_proxmox_auto.sh`.
-It has been tested on Ubuntu 24.04.
+You'll need a Proxmox instance to develop against. Two supported paths; both
+handle the extra configuration mentioned in this project's README, and apply the
+patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
-It will handle the extra configuration mentioned in this project's README, and apply the patch
-mentioned in https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
+### Local (Ubuntu 24.04 host)
+
+To spin up a Proxmox instance on a local Ubuntu 24.04 machine, use the script
+`src/proxmoxsandbox/scripts/virtualized_proxmox/build_proxmox_auto.sh`.
+
+### EC2
+
+You can run Proxmox on an EC2 `m8i` instance with nested virtualization.
+The intended workflow is to build a Proxmox AMI once, then launch from it many times. See
+[`src/proxmoxsandbox/scripts/ec2/README.md`](src/proxmoxsandbox/scripts/ec2/README.md).
 
 ## Tests
 
