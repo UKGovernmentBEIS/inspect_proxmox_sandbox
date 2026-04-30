@@ -300,7 +300,36 @@ class AsyncProxmoxAPI:
                 ],
             )
 
-            curl.perform()
+            # Stall-based timeouts: better than a flat TIMEOUT for multi-GB
+            # uploads — only fires when the transfer truly stops making progress.
+            curl.setopt(pycurl.CONNECTTIMEOUT, 30)
+            curl.setopt(pycurl.LOW_SPEED_LIMIT, 1024)
+            curl.setopt(pycurl.LOW_SPEED_TIME, 60)
+
+            upload_url = f"{self.api_base_url}/nodes/{node}/storage/{storage}/upload"
+            try:
+                file_size = file.stat().st_size
+            except OSError:
+                file_size = -1
+            self.logger.info(
+                "pycurl upload starting: url=%s file=%s size=%d",
+                upload_url,
+                actual_filename,
+                file_size,
+            )
+
+            try:
+                curl.perform()
+            except pycurl.error as e:
+                code = e.args[0] if e.args else None
+                curl.close()
+                if code in (pycurl.E_OPERATION_TIMEDOUT, pycurl.E_COULDNT_CONNECT):
+                    raise TimeoutError(
+                        f"pycurl upload stalled or failed to connect "
+                        f"(code={code}): url={upload_url} file={actual_filename} "
+                        f"size={file_size}: {e}"
+                    ) from e
+                raise
             status_code = curl.getinfo(pycurl.RESPONSE_CODE)
             curl.close()
 
