@@ -68,7 +68,9 @@ def _make_infra_mock(**overrides):
 def _patch_infra(infra_mock):
     """Return a context manager that patches InfraCommands classmethods."""
     return (
-        patch.object(InfraCommands, "get_instance", side_effect=LookupError("not found")),
+        patch.object(
+            InfraCommands, "get_instance", side_effect=LookupError("not found")
+        ),
         patch.object(InfraCommands, "build", return_value=infra_mock),
         patch.object(InfraCommands, "set_instance"),
     )
@@ -143,7 +145,9 @@ async def test_sample_init_no_cleanup_on_early_failure(
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     infra = _make_infra_mock(
-        find_proxmox_ids_start=AsyncMock(side_effect=Exception("API connection failed")),
+        find_proxmox_ids_start=AsyncMock(
+            side_effect=Exception("API connection failed")
+        ),
     )
     p1, p2, p3 = _patch_infra(infra)
 
@@ -189,7 +193,9 @@ async def test_sample_init_precheck_cleans_dirty_instance(
     )
     infra = _make_infra_mock(
         sdn_commands=sdn_mock,
-        find_proxmox_ids_start=AsyncMock(side_effect=Exception("Stopping after pre-check")),
+        find_proxmox_ids_start=AsyncMock(
+            side_effect=Exception("Stopping after pre-check")
+        ),
     )
     p1, p2, p3 = _patch_infra(infra)
 
@@ -233,8 +239,12 @@ async def test_sample_init_precheck_cleanup_fails_but_continues(
     )
     infra = _make_infra_mock(
         sdn_commands=sdn_mock,
-        cleanup_no_id=AsyncMock(side_effect=RuntimeError("Pre-check cleanup failed")),
-        find_proxmox_ids_start=AsyncMock(side_effect=Exception("Stopping after pre-check")),
+        cleanup_no_id=AsyncMock(
+            side_effect=RuntimeError("Pre-check cleanup failed")
+        ),
+        find_proxmox_ids_start=AsyncMock(
+            side_effect=Exception("Stopping after pre-check")
+        ),
     )
     p1, p2, p3 = _patch_infra(infra)
 
@@ -279,7 +289,9 @@ async def test_sample_init_precheck_read_vnets_fails_but_continues(
     )
     infra = _make_infra_mock(
         sdn_commands=sdn_mock,
-        find_proxmox_ids_start=AsyncMock(side_effect=Exception("Stopping after pre-check")),
+        find_proxmox_ids_start=AsyncMock(
+            side_effect=Exception("Stopping after pre-check")
+        ),
     )
     p1, p2, p3 = _patch_infra(infra)
 
@@ -321,8 +333,12 @@ async def test_sample_init_dirty_instance_not_returned_when_cleanup_fails(
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     infra = _make_infra_mock(
-        create_sdn_and_vms=AsyncMock(side_effect=ValueError("Duplicate IP ranges found")),
-        cleanup_no_id=AsyncMock(side_effect=RuntimeError("Cleanup failed: SDN zone locked")),
+        create_sdn_and_vms=AsyncMock(
+            side_effect=ValueError("Duplicate IP ranges found")
+        ),
+        cleanup_no_id=AsyncMock(
+            side_effect=RuntimeError("Cleanup failed: SDN zone locked")
+        ),
     )
     p1, p2, p3 = _patch_infra(infra)
 

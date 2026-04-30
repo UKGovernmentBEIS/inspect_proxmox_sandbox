@@ -6,14 +6,6 @@ from typing import AsyncGenerator
 
 import pytest
 
-# httpcore and httpx emit extremely verbose DEBUG logs (every TCP connect,
-# TLS handshake, header send/receive, body send/receive, etc.) that drown
-# out application-level debug output.  Rather than disabling DEBUG globally,
-# we raise the level on just these loggers so our own DEBUG messages remain
-# visible.
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
@@ -26,6 +18,14 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironmentConfig,
 )
 from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+
+# httpcore and httpx emit extremely verbose DEBUG logs (every TCP connect,
+# TLS handshake, header send/receive, body send/receive, etc.) that drown
+# out application-level debug output.  Rather than disabling DEBUG globally,
+# we raise the level on just these loggers so our own DEBUG messages remain
+# visible.
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Set PROXMOX_WINDOWS_TEMPLATE_TAG to run tests against a Windows VM.
 # The value should match the tag on an existing Proxmox VM template.
