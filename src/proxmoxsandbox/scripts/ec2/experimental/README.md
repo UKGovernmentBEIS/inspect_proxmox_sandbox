@@ -11,10 +11,10 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 | `run-script-on-host.sh` | Upload + run a local script on the host via SSM. 10 min timeout.                                          |
 | `create-test-vm.sh`     | Run *on the host* (via `run-script-on-host.sh`) to bring up an Ubuntu 24.04 cloud VM in an SDN zone and verify DNS + HTTPS. |
 
-All scripts honour `REGION` (default `us-east-1`). `connect.sh` also honours
+All scripts honour `REGION` (default `eu-west-2`). `connect.sh` also honours
 `SSH_KEY` (default `~/.ssh/id_ed25519`).
 
 > **Footgun**: `REGION` must be **exported**, not just set, since these are
-> separate scripts. If you `REGION=eu-west-2 ./run-on-host.sh ...`, the var
-> doesn't propagate; use `export REGION=eu-west-2` first. The visible
+> separate scripts. If you `REGION=us-east-1 ./run-on-host.sh ...`, the var
+> doesn't propagate; use `export REGION=us-east-1` first. The visible
 > symptom is `InvalidInstanceId: Instances not in a valid state for account`.

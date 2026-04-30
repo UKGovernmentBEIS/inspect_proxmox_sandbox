@@ -10,7 +10,7 @@
 #   INSTANCE_PROFILE   - IAM instance profile name. If omitted, the instance
 #                        relies on Default Host Management Configuration (DHMC)
 #                        for SSM access.
-#   REGION             - AWS region (default: us-east-1)
+#   REGION             - AWS region (default: eu-west-2)
 #   INSTANCE_TYPE      - EC2 instance type (default: m8i.2xlarge)
 #   INSTANCE_NAME      - Name tag for the instance (default: proxmox)
 #   LAUNCH_EXTRA_TAGS  - Comma-separated AWS CLI shorthand tags, e.g.
@@ -18,7 +18,7 @@
 #                        (single-quote in shell to prevent brace expansion)
 set -euo pipefail
 
-REGION="${REGION:-us-east-1}"
+REGION="${REGION:-eu-west-2}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-m8i.2xlarge}"
 INSTANCE_NAME="${INSTANCE_NAME:-proxmox}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

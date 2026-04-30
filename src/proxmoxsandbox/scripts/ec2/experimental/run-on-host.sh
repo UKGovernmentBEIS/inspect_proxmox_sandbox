@@ -12,7 +12,7 @@ fi
 INSTANCE_ID="$1"
 COMMAND="$2"
 TIMEOUT="${3:-60}"
-REGION="${REGION:-us-east-1}"
+REGION="${REGION:-eu-west-2}"
 
 PARAMS=$(jq -nc --arg cmd "$COMMAND" '{"commands":[$cmd]}')
 

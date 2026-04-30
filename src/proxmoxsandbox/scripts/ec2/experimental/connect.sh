@@ -5,7 +5,7 @@
 #
 # Optional environment variables:
 #   SSH_KEY  - Path to SSH private key (default: ~/.ssh/id_ed25519)
-#   REGION   - AWS region (default: us-east-1)
+#   REGION   - AWS region (default: eu-west-2)
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -17,7 +17,7 @@ INSTANCE_ID="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SSH_KEY="${SSH_KEY:-~/.ssh/id_ed25519}"
 SSH_PUBKEY="${SSH_KEY}.pub"
-REGION="${REGION:-us-east-1}"
+REGION="${REGION:-eu-west-2}"
 
 if [ ! -f "$SSH_PUBKEY" ]; then
     echo "Error: $SSH_PUBKEY not found (set SSH_KEY to override)" >&2

@@ -25,7 +25,7 @@ Each instance gets a 1024 GB gp3 EBS root volume (Proxmox needs space for VM
 images). Plan for that in your cost / quota budget.
 
 > **Region footgun**: every script in this directory falls back to
-> `us-east-1` if `REGION` is unset (or not exported across script
+> `eu-west-2` if `REGION` is unset (or not exported across script
 > boundaries). If you work in another region, `export REGION=...` once at
 > the top of your shell and keep it for the whole flow — silent
 > wrong-region errors are easy to misdiagnose.
@@ -38,7 +38,7 @@ export SUBNET_ID=subnet-xxxx
 export SECURITY_GROUP_ID=sg-xxxx
 
 # Optional (defaults shown):
-export REGION=us-east-1
+export REGION=eu-west-2
 export INSTANCE_TYPE=m8i.2xlarge              # must support nested virtualization
 export INSTANCE_NAME=proxmox                  # Name tag for the instance
 # export INSTANCE_PROFILE=...                 # required unless DHMC is enabled in this account/region
