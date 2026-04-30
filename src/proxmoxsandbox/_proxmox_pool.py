@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable
 from logging import getLogger
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
@@ -52,7 +52,9 @@ class ProxmoxPoolABC(ABC):
 
     @classmethod
     @abstractmethod
-    async def release_instance(cls, pool_id: str, instance: ProxmoxInstanceConfig) -> None:
+    async def release_instance(
+        cls, pool_id: str, instance: ProxmoxInstanceConfig
+    ) -> None:
         """Release an instance back to the pool.
 
         Args:
@@ -164,7 +166,8 @@ class QueueBasedProxmoxPool(ProxmoxPoolABC):
         """
         if pool_id not in cls._instance_pools:
             raise RuntimeError(
-                f"Pool '{pool_id}' not found. Available pools: {list(cls._instance_pools.keys())}"
+                f"Pool '{pool_id}' not found. "
+                f"Available pools: {list(cls._instance_pools.keys())}"
             )
 
         # This blocks if the queue is empty (all instances in use)
@@ -172,7 +175,9 @@ class QueueBasedProxmoxPool(ProxmoxPoolABC):
         return await instance_pool_queue.get()
 
     @classmethod
-    async def release_instance(cls, pool_id: str, instance: ProxmoxInstanceConfig) -> None:
+    async def release_instance(
+        cls, pool_id: str, instance: ProxmoxInstanceConfig
+    ) -> None:
         """Release an instance back to the queue.
 
         Args:

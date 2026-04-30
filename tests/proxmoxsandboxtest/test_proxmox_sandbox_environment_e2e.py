@@ -1,8 +1,8 @@
 from pathlib import Path
 from typing import Dict
 
-from inspect_ai.util import SandboxConnection, SandboxEnvironment
 import pytest
+from inspect_ai.util import SandboxConnection, SandboxEnvironment
 from pytest import raises
 
 from proxmoxsandbox._impl.qemu_commands import QemuCommands

@@ -56,9 +56,13 @@ def mock_proxmox_api():
 def mock_infra_commands():
     """Mock InfraCommands.get_instance and build classmethods."""
     infra = _make_mock_infra()
-    with patch.object(InfraCommands, 'get_instance', side_effect=LookupError("not found")), \
-         patch.object(InfraCommands, 'build', return_value=infra), \
-         patch.object(InfraCommands, 'set_instance'):
+    with (
+        patch.object(
+            InfraCommands, "get_instance", side_effect=LookupError("not found")
+        ),
+        patch.object(InfraCommands, "build", return_value=infra),
+        patch.object(InfraCommands, "set_instance"),
+    ):
         yield infra
 
 
@@ -242,8 +246,9 @@ async def test_two_pools_two_configs(
         # This creates ALL pools from PROXMOX_CONFIG_FILE
         await ProxmoxSandboxEnvironment.task_init("cyber_task", None)
 
-        # Step 2: Create two different sample configs (like two different samples in one task)
-        # In inspect_cyber, these would come from different samples in the dataset
+        # Step 2: Create two different sample configs (like two different samples
+        # in one task). In inspect_cyber, these would come from different samples
+        # in the dataset.
         config_ubuntu = ProxmoxSandboxEnvironmentConfig(
             instance_pool_id="ubuntu-pool",
             # Could have ubuntu-specific VMs here
@@ -261,8 +266,9 @@ async def test_two_pools_two_configs(
         assert "ubuntu-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
         assert "kali-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
 
-        ubuntu_pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["ubuntu-pool"]
-        kali_pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["kali-pool"]
+        pools = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
+        ubuntu_pool = pools["ubuntu-pool"]
+        kali_pool = pools["kali-pool"]
 
         assert ubuntu_pool.qsize() == 2  # 2 ubuntu instances
         assert kali_pool.qsize() == 1    # 1 kali instance
@@ -419,10 +425,13 @@ async def test_sample_error_releases_instance(
     infra = _make_mock_infra()
     infra.find_proxmox_ids_start.side_effect = Exception("Simulated error")
 
-    with patch.object(InfraCommands, 'get_instance', side_effect=LookupError("not found")), \
-         patch.object(InfraCommands, 'build', return_value=infra), \
-         patch.object(InfraCommands, 'set_instance'):
-
+    with (
+        patch.object(
+            InfraCommands, "get_instance", side_effect=LookupError("not found")
+        ),
+        patch.object(InfraCommands, "build", return_value=infra),
+        patch.object(InfraCommands, "set_instance"),
+    ):
         os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
 
         try:
@@ -498,8 +507,9 @@ async def test_concurrent_task_init_calls(multi_pool_config_file):
         assert "kali-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
 
         # Correct number of instances in each pool
-        assert ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["ubuntu-pool"].qsize() == 2
-        assert ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["kali-pool"].qsize() == 1
+        pools = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
+        assert pools["ubuntu-pool"].qsize() == 2
+        assert pools["kali-pool"].qsize() == 1
 
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:

@@ -33,7 +33,7 @@ from proxmoxsandbox.schema import (
     OsType,
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
-    SdnConfigType,
+    SdnConfig,
 )
 
 
@@ -163,7 +163,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         # Execute command with output redirection
         # Note: stdin piping in batch is limited, skip for now
-        lines.append(f'{cmd_str} > "{tmp_start}script.stdout" 2> "{tmp_start}script.stderr"')
+        lines.append(
+            f'{cmd_str} > "{tmp_start}script.stdout"'
+            f' 2> "{tmp_start}script.stderr"'
+        )
         lines.append(f'echo %ERRORLEVEL% > "{tmp_start}script.returncode"')
 
         return "\r\n".join(lines)
@@ -218,6 +221,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 built_in_names.add(vm_config.vm_source_config.built_in)
         for built_in_name in built_in_names:
             await infra_commands.built_in_vm.ensure_exists(built_in_name)
+
+        # Ensure OPNsense base template exists if any subnet uses OPNsense
+        has_opnsense = False
+        if isinstance(config.sdn_config, SdnConfig):
+            for vnet in config.sdn_config.vnet_configs:
+                for subnet in vnet.subnets:
+                    if subnet.vnet_type == "opnsense":
+                        has_opnsense = True
+                        break
+                if has_opnsense:
+                    break
+        if has_opnsense:
+            await infra_commands.opnsense_template_manager.ensure_template()
 
     @classmethod
     @override
@@ -477,7 +493,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 cls.logger.info(f"Pre-cleaned instance {instance_id}")
         except Exception as e:
             cls.logger.error(
-                f"Failed to check/clean instance {instance_id}: {type(e).__name__}: {e}. "
+                f"Failed to check/clean instance {instance_id}: "
+                f"{type(e).__name__}: {e}. "
                 f"Proceeding anyway - setup will fail if instance is dirty."
             )
 
@@ -835,9 +852,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # Create parent directory
         if is_windows:
             parent_dir = str(PureWindowsPath(file).parent)
-            await self.exec(
-                cmd=["cmd.exe", "/c", f'if not exist "{parent_dir}" mkdir "{parent_dir}"']
-            )
+            mkdir_cmd = f'if not exist "{parent_dir}" mkdir "{parent_dir}"'
+            await self.exec(cmd=["cmd.exe", "/c", mkdir_cmd])
         else:
             await self.exec(
                 cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())]
@@ -866,9 +882,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         try:
             if is_windows:
-                await self.exec(
-                    cmd=["cmd.exe", "/c", f'if not exist "{temp_dir}" mkdir "{temp_dir}"']
-                )
+                mkdir_cmd = f'if not exist "{temp_dir}" mkdir "{temp_dir}"'
+                await self.exec(cmd=["cmd.exe", "/c", mkdir_cmd])
             else:
                 await self.exec(cmd=["mkdir", "-p", "--", temp_dir])
 
@@ -888,14 +903,17 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     if i == 0:
                         combine_script += f'copy /b "{chunk_file}" "{file}"\r\n'
                     else:
-                        combine_script += f'copy /b "{file}"+"{chunk_file}" "{file}"\r\n'
+                        combine_script += (
+                            f'copy /b "{file}"+"{chunk_file}" "{file}"\r\n'
+                        )
                 combine_script_path = f"{temp_dir}\\combine.bat"
                 await self._write_file_only(combine_script_path, combine_script)
                 await self.exec(cmd=["cmd.exe", "/c", combine_script_path])
             else:
+                seq_fmt = f'"%0{padding_width}.0f"'
                 combine_script = (
                     f"rm -f {file}\n"
-                    f'for i in $(seq -f "%0{padding_width}.0f" 0 {len(chunks) - 1}); do\n'
+                    f"for i in $(seq -f {seq_fmt} 0 {len(chunks) - 1}); do\n"
                     f'  cat "{temp_dir}/chunk_$i" >> {file}\n'
                     f"done\n"
                 )

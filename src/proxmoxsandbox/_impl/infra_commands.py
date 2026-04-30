@@ -2,17 +2,20 @@ import abc
 import os
 import re
 import sys
+from ipaddress import summarize_address_range
 from logging import getLogger
 from random import randint
 from typing import ClassVar, Collection, Dict, List, NamedTuple, Sequence, Set, Tuple
 
 from inspect_ai.util import trace_action
+from pydantic.networks import IPvAnyAddress
 from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
+from proxmoxsandbox._impl.opnsense import OpnsenseTemplateManager
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import (
     ZONE_REGEX,
@@ -23,8 +26,12 @@ from proxmoxsandbox._impl.sdn_commands import (
 from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
+    SdnConfig,
     SdnConfigType,
+    SubnetConfig,
     VmConfig,
+    VmNicConfig,
+    VmSourceConfig,
 )
 
 
@@ -55,6 +62,7 @@ class InfraCommands(abc.ABC):
     sdn_commands: SdnCommands
     qemu_commands: QemuCommands
     built_in_vm: BuiltInVM
+    opnsense_template_manager: OpnsenseTemplateManager
     node: str
 
     def __init__(
@@ -65,6 +73,7 @@ class InfraCommands(abc.ABC):
         sdn_commands: SdnCommands,
         qemu_commands: QemuCommands,
         built_in_vm: BuiltInVM,
+        opnsense_template_manager: OpnsenseTemplateManager,
     ):
         """Prefer InfraCommands.build() unless injecting collaborators for testing."""
         self.async_proxmox = async_proxmox
@@ -72,6 +81,7 @@ class InfraCommands(abc.ABC):
         self.sdn_commands = sdn_commands
         self.qemu_commands = qemu_commands
         self.built_in_vm = built_in_vm
+        self.opnsense_template_manager = opnsense_template_manager
         self.node = node
 
     @classmethod
@@ -123,8 +133,22 @@ class InfraCommands(abc.ABC):
             sdn_commands,
             storage_commands,
         )
+        opnsense_template_manager = OpnsenseTemplateManager(
+            async_proxmox=async_proxmox,
+            node=node,
+            image_storage=image_storage,
+            task_wrapper=task_wrapper,
+            qemu_commands=qemu_commands,
+            storage_commands=storage_commands,
+        )
         return cls(
-            async_proxmox, node, task_wrapper, sdn_commands, qemu_commands, built_in_vm
+            async_proxmox,
+            node,
+            task_wrapper,
+            sdn_commands,
+            qemu_commands,
+            built_in_vm,
+            opnsense_template_manager,
         )
 
     async def create_sdn_and_vms(
@@ -133,7 +157,7 @@ class InfraCommands(abc.ABC):
         sdn_config: SdnConfigType,
         vms_config: Tuple[VmConfig, ...],
     ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
-        vm_configs_with_ids = []
+        vm_configs_with_ids: List[Tuple[int, VmConfig]] = []
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config
         )
@@ -142,18 +166,66 @@ class InfraCommands(abc.ABC):
 
         known_builtins = await self.built_in_vm.known_builtins()
 
-        ipam_mappings = []
+        # Detect OPNsense-managed subnets from sdn_config.
+        opnsense_subnets = _opnsense_subnets_by_vnet(sdn_config)
+        opnsense_lan_aliases = set(opnsense_subnets.keys())
+
+        # Collect static IP maps from user VMs on OPNsense LANs.
+        # These are baked into config.xml before OPNsense boots.
+        static_maps_by_lan = _collect_static_maps(vms_config, opnsense_subnets)
 
         # Create ALL IPAM mappings FIRST, before creating/starting any VMs.
         # This prevents race conditions where a booting VM's DHCP request
         # causes Proxmox to auto-allocate IPs that we wanted to reserve.
+        ipam_mappings: List[IpamMapping] = []
         for vm_config in vms_config:
             per_vm_ipam_mappings = await self.create_ipam_mappings(
-                vnet_aliases, vm_config, sdn_zone_id
+                vnet_aliases, vm_config, sdn_zone_id, opnsense_lan_aliases
             )
             ipam_mappings.extend(per_vm_ipam_mappings)
 
-        # Now create and start VMs
+        # Create OPNsense VMs first — they must boot before agent VMs
+        # so DHCP/DNS is available. Auto-generated from
+        # SubnetConfig(vnet_type="opnsense").
+        if opnsense_subnets:
+            wan_alias = _find_wan_vnet_alias(sdn_config)
+            opnsense_tag = (
+                self.opnsense_template_manager.find_base_template_tag()
+            )
+
+            for lan_alias, subnet in opnsense_subnets.items():
+                opnsense_vm = VmConfig(
+                    vm_source_config=VmSourceConfig(
+                        existing_vm_template_tag=opnsense_tag,
+                    ),
+                    name=f"opnsense-{lan_alias}",
+                    is_sandbox=False,
+                    nics=(
+                        VmNicConfig(vnet_alias=wan_alias),
+                        VmNicConfig(vnet_alias=lan_alias),
+                    ),
+                )
+                static_maps = static_maps_by_lan.get(lan_alias, [])
+                mgr = self.opnsense_template_manager
+                iso_path = mgr.generate_config_iso(
+                    subnet, static_maps,
+                )
+
+                with trace_action(
+                    self.logger,
+                    self.TRACE_NAME,
+                    f"create OPNsense VM for LAN {lan_alias}",
+                ):
+                    vm_id = await self.qemu_commands.create_and_start_vm(
+                        sdn_vnet_aliases=vnet_aliases,
+                        vm_config=opnsense_vm,
+                        built_in_vm_ids=known_builtins,
+                        attach_cdrom=iso_path,
+                    )
+                    self.qemu_commands.register_vm(vm_id)
+                    vm_configs_with_ids.append((vm_id, opnsense_vm))
+
+        # Now create and start user VMs
         for i, vm_config in enumerate(vms_config):
             self.logger.info(f"Creating VM {i+1}/{len(vms_config)}: {vm_config.name}")
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
@@ -192,13 +264,18 @@ class InfraCommands(abc.ABC):
         sdn_vnet_aliases: VnetAliases,
         vm_config: VmConfig,
         sdn_zone_id: str | None,
+        opnsense_lan_aliases: Collection[str] = frozenset(),
     ) -> List[IpamMapping]:
         # `sdn_zone_id` _might_ be None, see my comment in `sdn_commands` about this.
         # As such, the static-ip IPAM allocation is incompatible with the predefined
         # VNET functionality, unless we add logic to grab the zone id the alias belongs
         # to here.
         if not sdn_zone_id:
-            if vm_config.nics and any(nic.ipv4 for nic in vm_config.nics):
+            if vm_config.nics and any(
+                nic.ipv4
+                for nic in vm_config.nics
+                if nic.vnet_alias not in opnsense_lan_aliases
+            ):
                 raise ValueError(
                     "Static IP configuration requires SDN configuration to be present."
                 )
@@ -212,6 +289,11 @@ class InfraCommands(abc.ABC):
 
         for nic in vm_config.nics:
             if not (nic.mac and nic.ipv4):
+                continue
+
+            # NICs on OPNsense-managed LANs get their static IPs from
+            # OPNsense DHCP (<staticmap> in config.xml), not Proxmox IPAM.
+            if nic.vnet_alias in opnsense_lan_aliases:
                 continue
 
             if nic.vnet_alias in alias_mapping:
@@ -368,3 +450,98 @@ class InfraCommands(abc.ABC):
         await self.sdn_commands.tear_down_sdn_zones_and_vnets(
             zones_to_delete, noticed_ipam_mappings
         )
+
+
+def _opnsense_subnets_by_vnet(
+    sdn_config: SdnConfigType,
+) -> Dict[str, SubnetConfig]:
+    """Map VNet alias → SubnetConfig for OPNsense-managed subnets.
+
+    Scans sdn_config for SubnetConfig(vnet_type="opnsense"). The VNet alias
+    of the containing VnetConfig is the LAN alias.
+    """
+    result: Dict[str, SubnetConfig] = {}
+    if not isinstance(sdn_config, SdnConfig):
+        return result
+    for vnet_config in sdn_config.vnet_configs:
+        for subnet in vnet_config.subnets:
+            if subnet.vnet_type == "opnsense":
+                if vnet_config.alias is None:
+                    raise ValueError(
+                        "VNet with OPNsense subnet must have an alias"
+                    )
+                result[vnet_config.alias] = subnet
+    return result
+
+
+def _find_wan_vnet_alias(sdn_config: SdnConfigType) -> str:
+    """Find the WAN VNet alias — the first VNet with a SNAT-enabled Proxmox subnet."""
+    if not isinstance(sdn_config, SdnConfig):
+        raise ValueError("SdnConfig is required for OPNsense subnets")
+    for vnet_config in sdn_config.vnet_configs:
+        for subnet in vnet_config.subnets:
+            if subnet.vnet_type == "proxmox" and subnet.snat:
+                if vnet_config.alias is None:
+                    raise ValueError(
+                        "WAN VNet (with snat=True) must have an alias"
+                    )
+                return vnet_config.alias
+    raise ValueError(
+        "No WAN VNet found: OPNsense requires a VNet with a "
+        "Proxmox-managed subnet with snat=True for internet access"
+    )
+
+
+def _validate_static_ip(
+    subnet: SubnetConfig, vm_name: str | None, ipv4: IPvAnyAddress
+) -> None:
+    """Reject static IPs that OPNsense would silently ignore or mis-assign.
+
+    OPNsense drops staticmap entries outside the LAN subnet without warning,
+    leaves the gateway unprotected from collisions, and treats addresses
+    inside the dynamic DHCP pool as conflicts. Catch all three at config
+    time so the failure is loud rather than a confused VM.
+    """
+    name = vm_name or "<unnamed>"
+    if ipv4 not in subnet.cidr:
+        raise ValueError(
+            f"VM {name!r}: static IP {ipv4} is outside LAN subnet {subnet.cidr}"
+        )
+    if ipv4 == subnet.gateway:
+        raise ValueError(
+            f"VM {name!r}: static IP {ipv4} collides with the OPNsense gateway IP"
+        )
+    for r in subnet.dhcp_ranges:
+        if any(ipv4 in net for net in summarize_address_range(r.start, r.end)):
+            raise ValueError(
+                f"VM {name!r}: static IP {ipv4} is inside the dynamic "
+                f"DHCP range {r.start}–{r.end}; choose an address "
+                f"outside the range"
+            )
+
+
+def _collect_static_maps(
+    vms_config: Tuple[VmConfig, ...],
+    opnsense_subnets: Dict[str, SubnetConfig],
+) -> Dict[str, List[Tuple[str, str, str | None]]]:
+    """Collect (mac, ipv4, hostname) tuples from VMs on OPNsense LANs.
+
+    Returns a dict keyed by LAN alias. The tuples are baked into
+    config.xml as <staticmap> entries before OPNsense boots.
+
+    Raises ValueError if any static IP is outside the LAN subnet, equal
+    to the gateway, or inside a DHCP range — see ``_validate_static_ip``.
+    """
+    result: Dict[str, List[Tuple[str, str, str | None]]] = {
+        alias: [] for alias in opnsense_subnets
+    }
+    for vm in vms_config:
+        if not vm.nics:
+            continue
+        for nic in vm.nics:
+            if nic.mac and nic.ipv4 and nic.vnet_alias in opnsense_subnets:
+                _validate_static_ip(opnsense_subnets[nic.vnet_alias], vm.name, nic.ipv4)
+                result[nic.vnet_alias].append(
+                    (str(nic.mac).upper(), str(nic.ipv4), vm.name)
+                )
+    return result
