@@ -34,6 +34,10 @@ SDN requires you to configure dnsmasq, see the [Proxmox SDN documentation](https
 
 For details on how to set up a local Proxmox instance for testing, see [CONTRIBUTING.md](CONTRIBUTING.md#local-proxmox)
 
+### OPNsense gateway prerequisites (controller machine)
+
+If your eval uses `vnet_type="opnsense"` (see [docs/opnsense-gateway.md](docs/opnsense-gateway.md)), the machine running Inspect needs these binaries on PATH for the one-time base-template build: `qemu-img`, `bunzip2`, `wget`, `docker`. On Debian/Ubuntu: `sudo apt install qemu-utils bzip2 docker.io wget`. After the base template is built (cached to `~/.cache/opnsense-injector/`), only `docker` is reused — and even that only if the cache is invalidated.
+
 ### Single Proxmox Instance
 
 Set the following environment variables (e.g. in a [`.env`](https://dotenvx.com/docs/env-file) file):
