@@ -278,14 +278,27 @@ class InfraCommands(abc.ABC):
                         noticed_vnets.add(bridge)
                 noticed_vms.append(vm)
 
-        zones_to_delete = await self.find_all_zones(noticed_vnets)
+        # Only zones matching the provider's ephemeral-zone naming convention
+        # are eligible for sweep — `create_sdn` enforces this convention at
+        # creation (sdn_commands.create_sdn). Pre-existing user zones
+        # (referenced via sdn_config=None) and the intentionally-permanent
+        # static `inspvm*` SDN do not match, and must not be deleted even
+        # when an `inspect`-tagged VM is plugged into one of their VNETs.
+        def _is_provider_zone(zone_id: str) -> bool:
+            return bool(re.match(ZONE_REGEX, zone_id))
 
-        # We probably already have all the SDN zones already.
-        # But in case there were no VMs in a particular SDN zone
-        # (which can happen if the task setup failed)
-        # we need to check for orphans.
+        # Zones that VMs we created are plugged into. Filtered to provider
+        # zones only, so attaching a sandbox VM to a user-pre-existing VNET
+        # does not drag the user's zone into the deletion set.
+        zones_to_delete = {
+            z for z in await self.find_all_zones(noticed_vnets)
+            if _is_provider_zone(z)
+        }
+
+        # Also catch orphan provider zones with no VMs in them
+        # (e.g. when task setup failed before VMs were created).
         for zone in await self.sdn_commands.list_sdn_zones():
-            if re.match(ZONE_REGEX, zone["zone"]):
+            if _is_provider_zone(zone["zone"]):
                 zones_to_delete.add(zone["zone"])
 
         noticed_ipam_mappings = [

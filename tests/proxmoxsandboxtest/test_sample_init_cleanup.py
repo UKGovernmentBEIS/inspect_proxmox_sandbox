@@ -175,17 +175,26 @@ async def test_sample_init_precheck_cleans_dirty_instance(
     simple_config_file,
     mock_proxmox_api,
 ):
-    """Test that pre-check detects and cleans leftover VNETs.
+    """Test that pre-check detects and cleans leftover provider VNETs.
 
     When an instance has leftover VNETs from a failed previous cleanup,
     the pre-check should detect them and call cleanup_no_id before proceeding.
+
+    Leftover VNETs must live in a zone matching the provider's ephemeral
+    zone naming convention (ZONE_REGEX); pre-existing user VNETs are
+    intentionally ignored — see test_sample_init_precheck_ignores_pre_existing_vnets.
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     sdn_mock = MagicMock()
+    # Both vnets live in a zone whose name matches ZONE_REGEX
+    # (3 chars + 3 digits + "z"), simulating an orphaned ephemeral zone.
     sdn_mock.read_all_vnets = AsyncMock(
-        return_value=[{"vnet": "leftover1"}, {"vnet": "leftover2"}]
+        return_value=[
+            {"vnet": "tlo123v0", "zone": "tlo123z"},
+            {"vnet": "tlo123v1", "zone": "tlo123z"},
+        ]
     )
     infra = _make_infra_mock(
         sdn_commands=sdn_mock,
@@ -215,6 +224,56 @@ async def test_sample_init_precheck_cleans_dirty_instance(
 
 
 @pytest.mark.asyncio
+async def test_sample_init_precheck_ignores_pre_existing_vnets(
+    simple_config_file,
+    mock_proxmox_api,
+):
+    """Test that pre-check does NOT trigger cleanup for pre-existing user VNETs.
+
+    When sdn_config=None, samples plug into pre-existing VNETs that the user
+    manages. Those zones do not match the provider's ephemeral zone naming
+    convention (ZONE_REGEX), and the pre-check must leave them alone so it
+    doesn't risk wiping user state via cleanup_no_id.
+    """
+    os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+
+    sdn_mock = MagicMock()
+    # Pre-existing user vnets in user-named zones; neither matches ZONE_REGEX.
+    # Also include the static built-in SDN, which is intentionally permanent.
+    sdn_mock.read_all_vnets = AsyncMock(
+        return_value=[
+            {"vnet": "monitor", "zone": "a254c5f5"},
+            {"vnet": "inspvmv0", "zone": "inspvmz"},
+        ]
+    )
+    infra = _make_infra_mock(
+        sdn_commands=sdn_mock,
+        find_proxmox_ids_start=AsyncMock(side_effect=Exception("Stopping after pre-check")),
+    )
+    p1, p2, p3 = _patch_infra(infra)
+
+    with p1, p2, p3:
+        try:
+            await ProxmoxSandboxEnvironment.task_init("test_task", None)
+
+            config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="default")
+
+            with pytest.raises(Exception, match="Stopping after pre-check"):
+                await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
+
+            assert not infra.cleanup_no_id.called, (
+                "Pre-check must NOT call cleanup_no_id when only pre-existing "
+                "user VNETs (or the static inspvm* SDN) are present."
+            )
+
+        finally:
+            if "PROXMOX_CONFIG_FILE" in os.environ:
+                del os.environ["PROXMOX_CONFIG_FILE"]
+            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+
+
+@pytest.mark.asyncio
 async def test_sample_init_precheck_cleanup_fails_but_continues(
     simple_config_file,
     mock_proxmox_api,
@@ -229,7 +288,7 @@ async def test_sample_init_precheck_cleanup_fails_but_continues(
 
     sdn_mock = MagicMock()
     sdn_mock.read_all_vnets = AsyncMock(
-        return_value=[{"vnet": "leftover1"}]
+        return_value=[{"vnet": "tlo123v0", "zone": "tlo123z"}]
     )
     infra = _make_infra_mock(
         sdn_commands=sdn_mock,
