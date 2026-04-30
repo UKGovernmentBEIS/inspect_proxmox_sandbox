@@ -14,18 +14,24 @@ import pytest
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.built_in_vm import BuiltInVM
-from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
-from proxmoxsandbox._impl.qemu_commands import QemuCommands, VnetAliases
-from proxmoxsandbox._impl.sdn_commands import SdnCommands
-from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
-from proxmoxsandbox._proxmox_sandbox_environment import (
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI  # noqa: E402
+from proxmoxsandbox._impl.built_in_vm import BuiltInVM  # noqa: E402
+from proxmoxsandbox._impl.infra_commands import (  # noqa: E402
+    InfraCommands,
+    ProxmoxTarget,
+)
+from proxmoxsandbox._impl.qemu_commands import (  # noqa: E402
+    QemuCommands,
+    VnetAliases,
+)
+from proxmoxsandbox._impl.sdn_commands import SdnCommands  # noqa: E402
+from proxmoxsandbox._impl.storage_commands import LocalStorageCommands  # noqa: E402
+from proxmoxsandbox._impl.task_wrapper import TaskWrapper  # noqa: E402
+from proxmoxsandbox._proxmox_sandbox_environment import (  # noqa: E402
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
-from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig  # noqa: E402
 
 # Set PROXMOX_WINDOWS_TEMPLATE_TAG to run tests against a Windows VM.
 # The value should match the tag on an existing Proxmox VM template.
