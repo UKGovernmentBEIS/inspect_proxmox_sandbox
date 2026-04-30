@@ -49,13 +49,12 @@ class TaskWrapper(abc.ABC):
     async def new_incomplete_tasks(self, pre_existing_incomplete_tasks):
         current_tasks = await self.async_proxmox.request("GET", "/cluster/tasks")
 
+        # A task is truly incomplete (still running) if it has no endtime.
+        # Completed tasks (success or failure) have endtime set.
         current_incomplete_tasks = [
             current_task
             for current_task in current_tasks
-            if (
-                ("status" in current_task and current_task["status"] != "OK")
-                or "status" not in current_task
-            )
+            if not current_task.get("endtime")
         ]
 
         new_tasks = [

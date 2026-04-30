@@ -191,6 +191,9 @@ class VmConfig(BaseModel, frozen=True):
             This is required for proper VM isolation. Defaults to False.
         os_type: The OS type. If unset, defaults to "l26". Only for OVA. See
             https://pve.proxmox.com/wiki/Manual:_qm.conf for more details
+        cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
+            defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
+            panic on nested virtualization with "host"; use "qemu64" for those.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -213,6 +216,7 @@ class VmConfig(BaseModel, frozen=True):
     nic_controller: Optional[Literal["virtio", "e1000"]] = None
     firewall: bool = False
     os_type: Optional[OsType] = "l26"
+    cpu: Optional[str] = None
 
 
 class ProxmoxInstanceConfig(BaseModel, frozen=True):

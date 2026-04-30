@@ -272,11 +272,12 @@ class QemuCommands(abc.ABC):
 
                     json_for_create: ProxmoxJsonDataType = {
                         "node": self.node,
-                        "cpu": "host",
-                        "ostype": vm_config.os_type,
+                        "cpu": vm_config.cpu if vm_config.cpu else "host",
                         "scsihw": "virtio-scsi-single",
                         "start": False,
                     }
+                    if vm_config.os_type is not None:
+                        json_for_create["ostype"] = vm_config.os_type
 
                     disk_prefix = (
                         "scsi"

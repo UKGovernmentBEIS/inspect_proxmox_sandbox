@@ -127,6 +127,7 @@ sandbox=SandboxEnvironmentSpec(
                 is_sandbox=False, # optional, default is True. A virtual machine that is not a sandbox; the qemu-guest-agent need not be installed.
                 disk_controller="scsi", # optional, default will be SCSI. Can also use "ide" for older VM images.
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
+                cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
                 firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
                 # You can assign more than one, to give the VM more than one network interface.
