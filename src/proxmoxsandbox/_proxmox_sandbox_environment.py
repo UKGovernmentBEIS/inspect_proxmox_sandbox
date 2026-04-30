@@ -26,7 +26,7 @@ from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
-from proxmoxsandbox._impl.sdn_commands import IpamMapping
+from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, IpamMapping
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
 from proxmoxsandbox.schema import (
@@ -296,7 +296,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 InfraCommands.set_instance(target, infra_commands)
 
             # The pool guarantees one sample per instance at a time, so any
-            # leftover VNETs here are orphans from a previous failed cleanup.
+            # leftover provider-managed VNETs here are orphans from a previous
+            # failed cleanup. User pre-existing VNETs are ignored by this check.
             await cls._ensure_instance_clean(infra_commands, instance.instance_id)
 
             task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
@@ -448,17 +449,28 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     async def _ensure_instance_clean(
         cls, infra_commands: InfraCommands, instance_id: str
     ) -> None:
-        """Ensure instance has no leftover VNETs. Clean up if needed.
+        """Ensure instance has no leftover provider-managed ephemeral VNETs.
+
+        Only VNETs in zones matching the provider's ephemeral-zone naming
+        convention are considered leftovers. Pre-existing user VNETs
+        (referenced via sdn_config=None) and the static `inspvm*` SDN are
+        deliberately ignored — they are expected to persist across samples.
 
         Logs errors but does not raise - if the instance is dirty,
         the subsequent setup will fail and the error handler will deal with it.
         """
         try:
             vnets = await infra_commands.sdn_commands.read_all_vnets()
+            leftover_vnets = [
+                v
+                for v in vnets
+                if "zone" in v and re.match(ZONE_REGEX, v["zone"])
+            ]
 
-            if vnets:
+            if leftover_vnets:
                 cls.logger.warning(
-                    f"Instance {instance_id} has {len(vnets)} leftover VNETs! "
+                    f"Instance {instance_id} has {len(leftover_vnets)} "
+                    f"leftover provider-managed VNETs! "
                     f"Cleaning up before proceeding..."
                 )
                 await infra_commands.cleanup_no_id(skip_confirmation=True)
