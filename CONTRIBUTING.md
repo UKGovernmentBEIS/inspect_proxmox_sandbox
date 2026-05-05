@@ -41,6 +41,8 @@ You can run Proxmox on an EC2 `m8i` instance with nested virtualization.
 The intended workflow is to build a Proxmox AMI once, then launch from it many times. See
 [`src/proxmoxsandbox/scripts/ec2/README.md`](src/proxmoxsandbox/scripts/ec2/README.md).
 
+Such proxmox servers require `PROXMOX_IMAGE_STORAGE=local` as they have no lvm storage.
+
 ## Tests
 
 To run the tests, you will need a Proxmox instance and an `.env` file per README.md.

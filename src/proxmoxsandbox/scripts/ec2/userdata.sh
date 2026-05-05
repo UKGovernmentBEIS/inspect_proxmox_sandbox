@@ -365,6 +365,8 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_NAT_UNIT
 
+rm -vf /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
+
 systemctl daemon-reload
 systemctl enable proxmox-ami-fixup-hostname.service
 systemctl enable proxmox-ami-fixup-certs.service
