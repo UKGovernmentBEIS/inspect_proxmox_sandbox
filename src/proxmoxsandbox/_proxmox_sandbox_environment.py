@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import errno
 import re
@@ -872,13 +873,27 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 await self.exec(cmd=["mkdir", "-p", "--", temp_dir])
 
-            # Write chunks to temp files with zero-padded numbers
-            for i, chunk in enumerate(chunks):
+            # Write chunks concurrently (bounded). Each call is hard-capped
+            # at ~40 KiB by the Proxmox API (PVE Agent.pm enforces a 60 KiB
+            # `content` ceiling, leaving ~40 KiB after base64), so the only
+            # way to make a multi-MB write significantly faster is to have
+            # more calls in flight. Higher values speed up further but
+            # increase the chance of transient QGA / storage IOPS pressure
+            # under multi-VM load — 8 was a reliable trade-off in testing.
+            MAX_CONCURRENT_WRITES = 8
+            sem = asyncio.Semaphore(MAX_CONCURRENT_WRITES)
+
+            async def write_one(i: int, chunk: bytes) -> None:
                 if is_windows:
                     chunk_file = f"{temp_dir}\\chunk_{i:0{padding_width}d}"
                 else:
                     chunk_file = f"{temp_dir}/chunk_{i:0{padding_width}d}"
-                await self._write_file_only(chunk_file, chunk)
+                async with sem:
+                    await self._write_file_only(chunk_file, chunk)
+
+            await asyncio.gather(
+                *(write_one(i, chunk) for i, chunk in enumerate(chunks))
+            )
 
             if is_windows:
                 # Batch script to combine chunks using copy /b
