@@ -25,6 +25,7 @@ from typing_extensions import override
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
+from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, IpamMapping
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
@@ -817,6 +818,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 raise ex
 
+    # Size at which the ISO hot-plug path takes over from chunked QGA writes.
+    # Below this, QGA single-shot or a handful of chunks is faster than the
+    # fixed ISO-build/upload/attach/mount overhead. Linux only — Windows still
+    # uses chunking until that path is implemented.
+    ISO_WRITE_THRESHOLD_BYTES = 1 * 1024 * 1024
+
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
         # Writes contents to file, handling large files by splitting them into chunks
@@ -847,6 +854,26 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if len(contents) <= CHUNK_SIZE:
             await self._write_file_only(file, contents)
             return
+
+        # Linux large-file fast path: hot-plug ISO instead of chunked QGA
+        if not is_windows and len(contents) >= self.ISO_WRITE_THRESHOLD_BYTES:
+            try:
+                content_bytes = (
+                    contents if isinstance(contents, bytes) else contents.encode("utf-8")
+                )
+                iso_writer = IsoWriter(
+                    async_proxmox=self.infra_commands.async_proxmox,
+                    agent_commands=self.agent_commands,
+                    storage_commands=self.qemu_commands.storage_commands,
+                    node=self.infra_commands.node,
+                )
+                await iso_writer.write_file(self.vm_id, file, content_bytes)
+                return
+            except Exception as ex:
+                self.logger.warning(
+                    f"iso_write fast path failed for vm {self.vm_id} target {file}; "
+                    f"falling back to chunked QGA: {ex}"
+                )
 
         # For large contents, split into chunks
         chunks = [
