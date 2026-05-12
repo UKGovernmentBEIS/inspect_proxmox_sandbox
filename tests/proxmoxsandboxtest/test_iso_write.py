@@ -1,22 +1,17 @@
 """Unit tests for iso_write module.
 
-These tests cover the pure-logic bits (ISO build/round-trip, slot
-selection, per-VM locking) without needing a real Proxmox instance.
-The end-to-end ISO hot-plug path is exercised incidentally by
-test_write_file_large with a >1 MiB payload.
+Covers the pure-logic bits (ISO build/round-trip, per-VM locking) without
+needing a real Proxmox instance. The end-to-end ISO path is exercised
+incidentally by test_write_file_large with a >1 MiB payload.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
-
 import pycdlib
-import pytest
 
 from proxmoxsandbox._impl.iso_write import (
-    _ATTACH_SLOTS,
     _ISO_PAYLOAD_NAME,
-    IsoWriter,
+    _WRITE_SLOT,
     _build_iso,
     _vm_lock,
     _vm_locks,
@@ -83,59 +78,7 @@ class TestVmLock:
         assert _vm_lock(1) is not _vm_lock(2)
 
 
-class TestPickFreeSlot:
-    @pytest.fixture
-    def writer(self):
-        async_proxmox = MagicMock()
-        async_proxmox.request = AsyncMock()
-        return IsoWriter(
-            async_proxmox=async_proxmox,
-            agent_commands=MagicMock(),
-            storage_commands=MagicMock(),
-            node="pve",
-        )
-
-    @pytest.mark.asyncio
-    async def test_picks_ide2_when_all_free(self, writer):
-        # Empty config = no IDE slots in use at all.
-        writer.async_proxmox.request.return_value = {}
-        slot = await writer._pick_free_slot(100)
-        # _ATTACH_SLOTS preference order: ide2 first.
-        assert slot == _ATTACH_SLOTS[0] == "ide2"
-
-    @pytest.mark.asyncio
-    async def test_empty_cdrom_form_is_free(self, writer):
-        # The canonical "empty CD drive" form left after detach.
-        writer.async_proxmox.request.return_value = {"ide2": "none,media=cdrom"}
-        slot = await writer._pick_free_slot(100)
-        assert slot == "ide2"
-
-    @pytest.mark.asyncio
-    async def test_skips_busy_slot(self, writer):
-        # ide2 is genuinely in use (cloud-init drive backed by storage).
-        writer.async_proxmox.request.return_value = {
-            "ide2": "local:iso/some.iso,media=cdrom",
-        }
-        slot = await writer._pick_free_slot(100)
-        # Falls through to next preference: ide1.
-        assert slot == "ide1"
-
-    @pytest.mark.asyncio
-    async def test_raises_when_all_slots_busy(self, writer):
-        writer.async_proxmox.request.return_value = {
-            slot: "local:iso/x.iso,media=cdrom" for slot in _ATTACH_SLOTS
-        }
-        with pytest.raises(RuntimeError, match="no free IDE slot"):
-            await writer._pick_free_slot(100)
-
-    @pytest.mark.asyncio
-    async def test_non_ide_keys_ignored(self, writer):
-        # Real VM configs contain dozens of unrelated keys.
-        writer.async_proxmox.request.return_value = {
-            "name": "vm-foo",
-            "cores": 2,
-            "scsi0": "local-lvm:vm-100-disk-0",
-            "ide2": "none,media=cdrom",
-        }
-        slot = await writer._pick_free_slot(100)
-        assert slot == "ide2"
+def test_write_slot_is_sata5():
+    # qemu_commands.other_config_json cold-adds this exact slot on every
+    # is_sandbox VM. Keep the constant in sync with that.
+    assert _WRITE_SLOT == "sata5"

@@ -839,23 +839,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         is_windows = self._is_windows()
 
-        # Create parent directory
-        if is_windows:
-            parent_dir = str(PureWindowsPath(file).parent)
-            await self.exec(
-                cmd=["cmd.exe", "/c", f'if not exist "{parent_dir}" mkdir "{parent_dir}"']
-            )
-        else:
-            await self.exec(
-                cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())]
-            )
-
-        # If content is small enough, write directly
-        if len(contents) <= CHUNK_SIZE:
-            await self._write_file_only(file, contents)
-            return
-
-        # Linux large-file fast path: hot-plug ISO instead of chunked QGA
+        # Linux large-file fast path: hot-plug ISO instead of chunked QGA.
+        # Skips the parent-mkdir round-trip below — the in-guest ISO script
+        # does its own `mkdir -p -- "$(dirname target)"`, so doing it here
+        # too is one whole env.exec() (~2s of QGA round-trips) wasted.
         if not is_windows and len(contents) >= self.ISO_WRITE_THRESHOLD_BYTES:
             try:
                 content_bytes = (
@@ -876,6 +863,22 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     f"iso_write fast path failed for vm {self.vm_id} target {file}; "
                     f"falling back to chunked QGA: {ex}"
                 )
+
+        # Create parent directory
+        if is_windows:
+            parent_dir = str(PureWindowsPath(file).parent)
+            await self.exec(
+                cmd=["cmd.exe", "/c", f'if not exist "{parent_dir}" mkdir "{parent_dir}"']
+            )
+        else:
+            await self.exec(
+                cmd=["mkdir", "-p", "--", str(Path(file).parent.as_posix())]
+            )
+
+        # If content is small enough, write directly
+        if len(contents) <= CHUNK_SIZE:
+            await self._write_file_only(file, contents)
+            return
 
         # For large contents, split into chunks
         chunks = [

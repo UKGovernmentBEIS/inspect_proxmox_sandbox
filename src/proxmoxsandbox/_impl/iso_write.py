@@ -39,14 +39,12 @@ _ISO_PAYLOAD_NAME = "payload"
 _ISO_PAYLOAD_JOLIET = "/PAYLOAD"
 _ISO_PAYLOAD_ISO9660 = "/PAYLOAD.;1"
 
-# Preferred attach slots. ide2 is the cloud-init slot kept around as
-# `none,media=cdrom` by the built-in VM template — swapping media into an
-# existing CDROM slot triggers a QEMU monitor `change` command, which the
-# guest kernel sees as a media-change event. Hot-*adding* a brand-new IDE
-# slot (e.g. ide3 that wasn't in the original VM config) does not trigger
-# a rescan, so the guest never sees /dev/sr1 even though Proxmox accepts
-# the config update.
-_ATTACH_SLOTS = ("ide2", "ide1", "ide0", "ide3")
+# Dedicated CD-ROM slot, cold-added to every is_sandbox VM in
+# qemu_commands.other_config_json. We always media-change this slot; never
+# attach a new one. Hot-attach of a previously-absent sataN/ideN is silently
+# dropped by Proxmox regardless of machine type, so the slot must exist at
+# boot for QEMU to enumerate the AHCI controller.
+_WRITE_SLOT = "sata5"
 
 # Per-VM serialization. ISO attach uses a single IDE slot; concurrent writes
 # to the same VM would clobber each other otherwise. Module-level so all
@@ -115,79 +113,96 @@ class IsoWriter:
     ) -> None:
         local_iso: Path | None = None
         iso_volid: str | None = None
-        slot: str | None = None
+        attached = False
+        timings: dict[str, float] = {}
+        t_start = time.monotonic()
         try:
+            t0 = time.monotonic()
             local_iso = await asyncio.to_thread(_build_iso, contents)
+            timings["build"] = time.monotonic() - t0
+
+            t0 = time.monotonic()
             iso_name = f"wf-{vm_id}-{time.time_ns()}-{_rand()}.iso"
-            await self.storage_commands.upload_file_to_storage(
-                file=local_iso, content_type="iso", filename=iso_name
+            # Bypass storage_commands.upload_file_to_storage to skip the
+            # task_wrapper wait. For a new random-named ISO, the curl POST
+            # returns when the file is on disk; we don't need to wait for
+            # Proxmox's content reindex task to complete before we can
+            # reference it as a volid.
+            await self.async_proxmox.upload_file_with_curl(
+                self.node, LOCAL_STORAGE, local_iso, "iso", filename=iso_name
             )
             iso_volid = f"{LOCAL_STORAGE}:iso/{iso_name}"
+            timings["upload"] = time.monotonic() - t0
 
-            slot = await self._pick_free_slot(vm_id)
-            await self._attach(vm_id, slot, iso_volid)
-
-            await self._copy_in_guest(vm_id, filepath)
-        finally:
-            if slot is not None:
+            # On a freshly-booted VM the kernel sometimes refuses every
+            # open() on /dev/sr* after the first media-change ("Can't open
+            # blockdev"). Detaching and re-attaching emits a fresh
+            # media-change event which the kernel then handles cleanly.
+            t0 = time.monotonic()
+            for attempt in range(2):
+                await self._attach(vm_id, iso_volid)
+                attached = True
                 try:
-                    await self._detach(vm_id, slot)
-                except Exception as ex:
+                    await self._copy_in_guest(vm_id, filepath)
+                    break
+                except IOError as ex:
+                    if attempt == 1:
+                        raise
                     logger.warning(
-                        f"detach {slot} on vm {vm_id} failed: {ex}"
+                        f"iso_write copy failed (attempt {attempt + 1}/2) "
+                        f"on vm {vm_id}; re-attaching: {ex}"
                     )
+                    await self._detach(vm_id)
+                    attached = False
+            timings["attach_copy"] = time.monotonic() - t0
+        finally:
+            if attached:
+                t0 = time.monotonic()
+                try:
+                    await self._detach(vm_id)
+                except Exception as ex:
+                    logger.warning(f"detach on vm {vm_id} failed: {ex}")
+                timings["detach"] = time.monotonic() - t0
             if iso_volid is not None:
+                t0 = time.monotonic()
                 try:
                     await self._delete_iso(iso_volid)
                 except Exception as ex:
                     logger.warning(f"delete iso {iso_volid} failed: {ex}")
+                timings["delete"] = time.monotonic() - t0
             if local_iso is not None and local_iso.exists():
                 try:
                     os.unlink(local_iso)
                 except OSError as ex:
                     logger.warning(f"unlink {local_iso} failed: {ex}")
+            total = time.monotonic() - t_start
+            parts = " ".join(f"{k}={v:.2f}s" for k, v in timings.items())
+            logger.info(
+                f"iso_write vm={vm_id} size={len(contents)} "
+                f"total={total:.2f}s {parts}"
+            )
 
-    async def _pick_free_slot(self, vm_id: int) -> str:
-        config = await self.async_proxmox.request(
-            "GET", f"/nodes/{self.node}/qemu/{vm_id}/config"
-        )
-        for slot in _ATTACH_SLOTS:
-            value = config.get(slot)
-            if value is None:
-                return slot
-            # `none,media=cdrom` is the canonical "empty CD drive" form left
-            # behind after detach — treat it as free.
-            if isinstance(value, str) and value.startswith("none,"):
-                return slot
-        raise RuntimeError(
-            f"VM {vm_id} has no free IDE slot for write_file ISO attach; "
-            f"existing config keys: {sorted(k for k in config if k.startswith('ide'))}"
+    @tenacity.retry(
+        wait=tenacity.wait_exponential(min=0.5, exp_base=1.5),
+        stop=tenacity.stop_after_delay(30),
+    )
+    async def _attach(self, vm_id: int, iso_volid: str) -> None:
+        await self.async_proxmox.request(
+            "POST",
+            f"/nodes/{self.node}/qemu/{vm_id}/config",
+            json={_WRITE_SLOT: f"{iso_volid},media=cdrom"},
         )
 
     @tenacity.retry(
         wait=tenacity.wait_exponential(min=0.5, exp_base=1.5),
         stop=tenacity.stop_after_delay(30),
     )
-    async def _attach(self, vm_id: int, slot: str, iso_volid: str) -> None:
+    async def _detach(self, vm_id: int) -> None:
+        # Set back to empty; leaves the device in place for next write.
         await self.async_proxmox.request(
             "POST",
             f"/nodes/{self.node}/qemu/{vm_id}/config",
-            json={slot: f"{iso_volid},media=cdrom"},
-        )
-
-    @tenacity.retry(
-        wait=tenacity.wait_exponential(min=0.5, exp_base=1.5),
-        stop=tenacity.stop_after_delay(30),
-    )
-    async def _detach(self, vm_id: int, slot: str) -> None:
-        # Setting `none,media=cdrom` leaves the empty drive in place rather
-        # than removing the device altogether — matches what the built-in
-        # template code does post-install and avoids QEMU rejecting a hot
-        # device removal if the guest hasn't released it yet.
-        await self.async_proxmox.request(
-            "POST",
-            f"/nodes/{self.node}/qemu/{vm_id}/config",
-            json={slot: "none,media=cdrom"},
+            json={_WRITE_SLOT: "none,media=cdrom"},
         )
 
     async def _delete_iso(self, iso_volid: str) -> None:
@@ -213,25 +228,23 @@ class IsoWriter:
         mount_q = shlex.quote(mount_dir)
         payload_q = shlex.quote(_ISO_PAYLOAD_NAME)
 
-        # Wait for the kernel to notice the hot-plugged CDROM (sr0 is
-        # conventional; on busier setups it might be sr1+ — match any sr*).
-        # We try a brief loop because the device file may not appear for a
-        # second or two after the API attach call returns.
+        # Wait for the kernel to notice the hot-plugged CDROM. 3s budget:
+        # if the mount succeeds, it's usually first try (~50ms). If it
+        # keeps failing, we're in the "Can't open blockdev" failure mode
+        # and waiting longer won't help — the caller re-attaches and
+        # tries again, which clears the failure.
         script = f"""set -e
 mkdir -p -- "$(dirname -- {target_q})"
 mkdir -p {mount_q}
 dev=
-for i in $(seq 1 60); do
+for i in $(seq 1 6); do
   for cand in /dev/sr0 /dev/sr1 /dev/sr2 /dev/sr3; do
-    if [ -b "$cand" ]; then
-      # Probe whether THIS device has our payload file before committing.
-      if mount -o ro "$cand" {mount_q} 2>/dev/null; then
-        if [ -f {mount_q}/{payload_q} ]; then
-          dev="$cand"
-          break 2
-        fi
-        umount {mount_q} 2>/dev/null || true
+    if [ -b "$cand" ] && mount -o ro "$cand" {mount_q} 2>/dev/null; then
+      if [ -f {mount_q}/{payload_q} ]; then
+        dev="$cand"
+        break 2
       fi
+      umount {mount_q} 2>/dev/null || true
     fi
   done
   sleep 0.5
