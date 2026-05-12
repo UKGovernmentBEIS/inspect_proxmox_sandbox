@@ -859,7 +859,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if not is_windows and len(contents) >= self.ISO_WRITE_THRESHOLD_BYTES:
             try:
                 content_bytes = (
-                    contents if isinstance(contents, bytes) else contents.encode("utf-8")
+                    contents
+                    if isinstance(contents, bytes)
+                    else contents.encode("utf-8")
                 )
                 iso_writer = IsoWriter(
                     async_proxmox=self.infra_commands.async_proxmox,
