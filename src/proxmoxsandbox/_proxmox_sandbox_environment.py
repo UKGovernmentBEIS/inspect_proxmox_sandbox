@@ -875,9 +875,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 # subsequent large write.
                 self._iso_fast_path_disabled = True
                 self.logger.warning(
-                    f"iso_write fast path failed for vm {self.vm_id} target {file}; "
-                    f"disabling fast path for this VM and falling back to "
-                    f"chunked QGA: {ex}"
+                    "iso_write fast path disabled for VM %s (writing %s); "
+                    "subsequent large writes on this VM will use the slower "
+                    "chunked-QGA fallback. See README "
+                    "'Large write_file fast path > When the fast path is "
+                    "disabled' for things to check. "
+                    "Underlying error: %s",
+                    self.vm_id, file, ex,
                 )
 
         # Create parent directory
