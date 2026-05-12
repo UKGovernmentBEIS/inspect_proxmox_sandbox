@@ -7,7 +7,10 @@ incidentally by test_write_file_large with a >1 MiB payload.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pycdlib
+import pytest
 
 from proxmoxsandbox._impl.iso_write import (
     _ISO_PAYLOAD_NAME,
@@ -16,6 +19,7 @@ from proxmoxsandbox._impl.iso_write import (
     _vm_lock,
     _vm_locks,
 )
+from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
 
 class TestBuildIso:
@@ -82,3 +86,66 @@ def test_write_slot_is_sata5():
     # qemu_commands.other_config_json cold-adds this exact slot on every
     # is_sandbox VM. Keep the constant in sync with that.
     assert _WRITE_SLOT == "sata5"
+
+
+def _make_env() -> ProxmoxSandboxEnvironment:
+    """Build a minimal env with mocked collaborators.
+
+    Just enough to drive write_file's branching logic in unit tests.
+    """
+    infra = MagicMock()
+    return ProxmoxSandboxEnvironment(
+        infra_commands=infra,
+        agent_commands=MagicMock(),
+        ipam_mappings=(),
+        vm_id=100,
+        all_vm_ids=(100,),
+        sdn_zone_id=None,
+        instance=None,
+        pool_id=None,
+        os_type="l26",
+    )
+
+
+class TestFastPathMemoisation:
+    """Memoise iso_write fast-path failures per VM.
+
+    Once the fast path fails on a VM, subsequent calls should skip
+    straight to chunked QGA without re-trying the ISO path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fast_path_disabled_after_first_failure(self):
+        env = _make_env()
+        # ISO_WRITE_THRESHOLD_BYTES = 1 MiB; use 2 MiB so we hit the branch.
+        payload = b"x" * (2 * 1024 * 1024)
+
+        # Stub out the chunked-QGA fallback's exec/_write_file_only so the
+        # test focuses purely on the ISO branch's gating behaviour.
+        env.exec = AsyncMock(return_value=MagicMock(returncode=0))
+        env._write_file_only = AsyncMock()
+
+        assert env._iso_fast_path_disabled is False
+
+        # First call: IsoWriter raises → flag flips, fallback runs.
+        with patch(
+            "proxmoxsandbox._proxmox_sandbox_environment.IsoWriter"
+        ) as mock_iso_writer_cls:
+            mock_iso_writer_cls.return_value.write_file = AsyncMock(
+                side_effect=RuntimeError("fast path broken")
+            )
+            await env.write_file("/tmp/x", payload)
+            assert mock_iso_writer_cls.called, (
+                "IsoWriter should be tried on the first call"
+            )
+
+        assert env._iso_fast_path_disabled is True
+
+        # Second call: IsoWriter must NOT be touched.
+        with patch(
+            "proxmoxsandbox._proxmox_sandbox_environment.IsoWriter"
+        ) as mock_iso_writer_cls:
+            await env.write_file("/tmp/y", payload)
+            assert not mock_iso_writer_cls.called, (
+                "IsoWriter should be skipped once the flag is set"
+            )

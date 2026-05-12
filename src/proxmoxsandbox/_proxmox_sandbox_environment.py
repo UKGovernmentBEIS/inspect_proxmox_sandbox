@@ -86,6 +86,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.instance = instance
         self.pool_id = pool_id
         self.os_type = os_type
+        # Set to True after the ISO write_file fast path fails on this VM.
+        # Subsequent large writes go straight to chunked QGA instead of
+        # paying the ~3 s of ISO build+upload+attach before falling back.
+        self._iso_fast_path_disabled = False
 
     # originally from k8s sandbox
     def _pipe_user_input(self, stdin: str | bytes) -> str:
@@ -843,7 +847,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # Skips the parent-mkdir round-trip below — the in-guest ISO script
         # does its own `mkdir -p -- "$(dirname target)"`, so doing it here
         # too is one whole env.exec() (~2s of QGA round-trips) wasted.
-        if not is_windows and len(contents) >= self.ISO_WRITE_THRESHOLD_BYTES:
+        if (
+            not is_windows
+            and len(contents) >= self.ISO_WRITE_THRESHOLD_BYTES
+            and not self._iso_fast_path_disabled
+        ):
             try:
                 content_bytes = (
                     contents
@@ -859,9 +867,17 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 await iso_writer.write_file(self.vm_id, file, content_bytes)
                 return
             except Exception as ex:
+                # Disable for the rest of this VM's lifetime. iso_write
+                # already retries once internally (detach + re-attach for
+                # the "Can't open blockdev" first-call race), so if we
+                # got here the failure is persistent — no point burning
+                # another ~3 s of ISO build+upload+attach on every
+                # subsequent large write.
+                self._iso_fast_path_disabled = True
                 self.logger.warning(
                     f"iso_write fast path failed for vm {self.vm_id} target {file}; "
-                    f"falling back to chunked QGA: {ex}"
+                    f"disabling fast path for this VM and falling back to "
+                    f"chunked QGA: {ex}"
                 )
 
         # Create parent directory
