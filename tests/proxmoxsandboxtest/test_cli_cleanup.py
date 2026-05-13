@@ -59,7 +59,7 @@ def multi_instance_config_file():
         ]
     }
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -84,10 +84,9 @@ async def test_cli_cleanup_all_instances(multi_instance_config_file):
 
     try:
         with (
-            patch('proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI'),
-            patch.object(InfraCommands, 'build', side_effect=create_mock_infra),
+            patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"),
+            patch.object(InfraCommands, "build", side_effect=create_mock_infra),
         ):
-
             await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
 
             # Verify InfraCommands.build was called for each instance
@@ -111,7 +110,7 @@ async def test_cli_cleanup_all_instances(multi_instance_config_file):
 async def test_cli_cleanup_with_id_not_implemented():
     """Test that cli_cleanup with id parameter prints not implemented message."""
     # Mock print to capture output
-    with patch('builtins.print') as mock_print:
+    with patch("builtins.print") as mock_print:
         await ProxmoxSandboxEnvironment.cli_cleanup(id="some-id")
 
         # Verify the not implemented message was printed
@@ -126,7 +125,7 @@ async def test_cli_cleanup_empty_config():
     """Test cli_cleanup handles empty instance list gracefully."""
     config_data = {"instances": []}
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -134,10 +133,9 @@ async def test_cli_cleanup_empty_config():
         os.environ["PROXMOX_CONFIG_FILE"] = temp_path
 
         with (
-            patch('proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI'),
-            patch.object(InfraCommands, 'build'),
+            patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"),
+            patch.object(InfraCommands, "build"),
         ):
-
             # Should not crash with empty instances
             await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
 
@@ -178,7 +176,7 @@ async def test_cli_cleanup_handles_cleanup_error():
         ]
     }
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -200,10 +198,9 @@ async def test_cli_cleanup_handles_cleanup_error():
             return mock_infra
 
         with (
-            patch('proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI'),
-            patch.object(InfraCommands, 'build', side_effect=create_failing_infra),
+            patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"),
+            patch.object(InfraCommands, "build", side_effect=create_failing_infra),
         ):
-
             # Should raise the exception from the first cleanup
             with pytest.raises(Exception, match="Cleanup failed on first instance"):
                 await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
@@ -249,7 +246,7 @@ async def test_cli_cleanup_pools_created_correctly():
         ]
     }
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -262,10 +259,9 @@ async def test_cli_cleanup_pools_created_correctly():
             return mock_infra
 
         with (
-            patch('proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI'),
-            patch.object(InfraCommands, 'build', side_effect=create_mock_infra),
+            patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"),
+            patch.object(InfraCommands, "build", side_effect=create_mock_infra),
         ):
-
             # Pools should not exist before cleanup
             assert len(ProxmoxSandboxEnvironment.proxmox_pool._instance_pools) == 0
 

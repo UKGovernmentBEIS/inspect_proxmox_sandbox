@@ -33,7 +33,6 @@ from proxmoxsandbox.schema import (
     OsType,
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
-    SdnConfigType,
 )
 
 
@@ -163,7 +162,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         # Execute command with output redirection
         # Note: stdin piping in batch is limited, skip for now
-        lines.append(f'{cmd_str} > "{tmp_start}script.stdout" 2> "{tmp_start}script.stderr"')
+        lines.append(
+            f'{cmd_str} > "{tmp_start}script.stdout" 2> "{tmp_start}script.stderr"'
+        )
         lines.append(f'echo %ERRORLEVEL% > "{tmp_start}script.returncode"')
 
         return "\r\n".join(lines)
@@ -462,9 +463,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         try:
             vnets = await infra_commands.sdn_commands.read_all_vnets()
             leftover_vnets = [
-                v
-                for v in vnets
-                if "zone" in v and re.match(ZONE_REGEX, v["zone"])
+                v for v in vnets if "zone" in v and re.match(ZONE_REGEX, v["zone"])
             ]
 
             if leftover_vnets:
@@ -477,7 +476,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 cls.logger.info(f"Pre-cleaned instance {instance_id}")
         except Exception as e:
             cls.logger.error(
-                f"Failed to check/clean instance {instance_id}: {type(e).__name__}: {e}. "
+                f"Failed to check/clean instance {instance_id}: "
+                f"{type(e).__name__}: {e}. "
                 f"Proceeding anyway - setup will fail if instance is dirty."
             )
 
@@ -572,9 +572,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     cls.logger.debug(f"task_cleanup for {target}")
                     await infra_commands.task_cleanup()
                 except Exception as e:
-                    cls.logger.warning(
-                        f"task_cleanup failed for {target}: {e}"
-                    )
+                    cls.logger.warning(f"task_cleanup failed for {target}: {e}")
         else:
             print(
                 "\nCleanup all sandbox releases with: "
@@ -692,9 +690,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         exec_response_pid = exec_post_response["pid"]
 
         assert isinstance(exec_response_pid, int)
-        self.logger.debug(
-            f"VM {self.vm_id} exec pid={exec_response_pid}: {cmd[:100]}"
-        )
+        self.logger.debug(f"VM {self.vm_id} exec pid={exec_response_pid}: {cmd[:100]}")
 
         with trace_action(
             self.logger,
@@ -836,7 +832,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if is_windows:
             parent_dir = str(PureWindowsPath(file).parent)
             await self.exec(
-                cmd=["cmd.exe", "/c", f'if not exist "{parent_dir}" mkdir "{parent_dir}"']
+                cmd=[
+                    "cmd.exe",
+                    "/c",
+                    f'if not exist "{parent_dir}" mkdir "{parent_dir}"',
+                ]
             )
         else:
             await self.exec(
@@ -867,7 +867,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         try:
             if is_windows:
                 await self.exec(
-                    cmd=["cmd.exe", "/c", f'if not exist "{temp_dir}" mkdir "{temp_dir}"']
+                    cmd=[
+                        "cmd.exe",
+                        "/c",
+                        f'if not exist "{temp_dir}" mkdir "{temp_dir}"',
+                    ]
                 )
             else:
                 await self.exec(cmd=["mkdir", "-p", "--", temp_dir])
@@ -888,14 +892,17 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     if i == 0:
                         combine_script += f'copy /b "{chunk_file}" "{file}"\r\n'
                     else:
-                        combine_script += f'copy /b "{file}"+"{chunk_file}" "{file}"\r\n'
+                        combine_script += (
+                            f'copy /b "{file}"+"{chunk_file}" "{file}"\r\n'
+                        )
                 combine_script_path = f"{temp_dir}\\combine.bat"
                 await self._write_file_only(combine_script_path, combine_script)
                 await self.exec(cmd=["cmd.exe", "/c", combine_script_path])
             else:
+                seq_fmt = f"%0{padding_width}.0f"
                 combine_script = (
                     f"rm -f {file}\n"
-                    f'for i in $(seq -f "%0{padding_width}.0f" 0 {len(chunks) - 1}); do\n'
+                    f'for i in $(seq -f "{seq_fmt}" 0 {len(chunks) - 1}); do\n'
                     f'  cat "{temp_dir}/chunk_$i" >> {file}\n'
                     f"done\n"
                 )

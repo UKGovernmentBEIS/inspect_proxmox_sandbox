@@ -151,7 +151,6 @@ class VmNicConfig(BaseModel, frozen=True):
         return self
 
 
-
 # Proxmox QEMU OS types. See https://pve.proxmox.com/wiki/Manual:_qm.conf
 OsType: TypeAlias = Literal[
     "l24",  # Linux 2.4 kernel

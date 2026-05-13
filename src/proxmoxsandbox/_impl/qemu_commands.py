@@ -92,7 +92,10 @@ class QemuCommands(abc.ABC):
             )
             current_status = vm_status["status"]
             if current_status != status_for_wait:
-                self.logger.debug(f"VM {vm_id} status is {current_status}, waiting for {status_for_wait}")
+                self.logger.debug(
+                    f"VM {vm_id} status is {current_status}, "
+                    f"waiting for {status_for_wait}"
+                )
                 raise ValueError(f"vm {vm_id} not {status_for_wait}")
 
         with trace_action(
@@ -112,14 +115,18 @@ class QemuCommands(abc.ABC):
             async def qemu_agent_reachable() -> None:
                 attempt_count[0] += 1
                 if attempt_count[0] % 10 == 1:  # Log every 10 attempts
-                    self.logger.info(f"VM {vm_id} QEMU agent ping attempt {attempt_count[0]}")
+                    self.logger.info(
+                        f"VM {vm_id} QEMU agent ping attempt {attempt_count[0]}"
+                    )
                 await self.ping_qemu_agent(vm_id)
 
             with trace_action(
                 self.logger, self.TRACE_NAME, f"await VM {vm_id} QEMU agent"
             ):
                 await qemu_agent_reachable()
-            self.logger.info(f"VM {vm_id} QEMU agent responded after {attempt_count[0]} attempts")
+            self.logger.info(
+                f"VM {vm_id} QEMU agent responded after {attempt_count[0]} attempts"
+            )
 
     async def destroy_vm(self, vm_id: int) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"stop VM {vm_id}"):
@@ -259,11 +266,13 @@ class QemuCommands(abc.ABC):
                         and ova_tag in existing_vm["tags"].split(";")
                     ):
                         found_existing_template = existing_vm["vmid"]
-                        self.logger.info(f"Found existing template: vmid={found_existing_template}")
+                        self.logger.info(
+                            f"Found existing template: vmid={found_existing_template}"
+                        )
                         break
 
                 if found_existing_template is None:
-                    self.logger.info(f"No existing template found, importing from OVA")
+                    self.logger.info("No existing template found, importing from OVA")
                     await self.storage_commands.upload_file_to_storage(
                         file=vm_config.vm_source_config.ova,
                         content_type="import",
