@@ -25,6 +25,7 @@ from typing_extensions import override
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
+from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, IpamMapping
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
@@ -84,6 +85,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.instance = instance
         self.pool_id = pool_id
         self.os_type = os_type
+        # Set to True after the ISO write_file fast path fails on this VM.
+        # Subsequent large writes go straight to chunked QGA instead of
+        # paying the ~3 s of ISO build+upload+attach before falling back.
+        self._iso_fast_path_disabled = False
 
     # originally from k8s sandbox
     def _pipe_user_input(self, stdin: str | bytes) -> str:
@@ -813,6 +818,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 raise ex
 
+    # Size at which the ISO hot-plug path takes over from chunked QGA writes.
+    # Below this, QGA single-shot or a handful of chunks is faster than the
+    # fixed ISO-build/upload/attach/mount overhead. Linux only — Windows still
+    # uses chunking until that path is implemented.
+    ISO_WRITE_THRESHOLD_BYTES = 1 * 1024 * 1024
+
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
         # Writes contents to file, handling large files by splitting them into chunks
@@ -827,6 +838,47 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # version number to ensure backward compatibility.
 
         is_windows = self._is_windows()
+
+        # Linux large-file fast path: hot-plug ISO instead of chunked QGA.
+        # Skips the parent-mkdir round-trip below — the in-guest ISO script
+        # does its own `mkdir -p -- "$(dirname target)"`, so doing it here
+        # too is one whole env.exec() (~2s of QGA round-trips) wasted.
+        if (
+            not is_windows
+            and len(contents) >= self.ISO_WRITE_THRESHOLD_BYTES
+            and not self._iso_fast_path_disabled
+        ):
+            try:
+                content_bytes = (
+                    contents
+                    if isinstance(contents, bytes)
+                    else contents.encode("utf-8")
+                )
+                iso_writer = IsoWriter(
+                    async_proxmox=self.infra_commands.async_proxmox,
+                    agent_commands=self.agent_commands,
+                    storage_commands=self.qemu_commands.storage_commands,
+                    node=self.infra_commands.node,
+                )
+                await iso_writer.write_file(self.vm_id, file, content_bytes)
+                return
+            except Exception as ex:
+                # Disable for the rest of this VM's lifetime. iso_write
+                # already retries once internally (detach + re-attach for
+                # the "Can't open blockdev" first-call race), so if we
+                # got here the failure is persistent — no point burning
+                # another ~3 s of ISO build+upload+attach on every
+                # subsequent large write.
+                self._iso_fast_path_disabled = True
+                self.logger.warning(
+                    "iso_write fast path disabled for VM %s (writing %s); "
+                    "subsequent large writes on this VM will use the slower "
+                    "chunked-QGA fallback. See README "
+                    "'Large write_file fast path > When the fast path is "
+                    "disabled' for things to check. "
+                    "Underlying error: %s",
+                    self.vm_id, file, ex,
+                )
 
         # Create parent directory
         if is_windows:
