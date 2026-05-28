@@ -246,6 +246,36 @@ class ProxmoxInstanceConfig(BaseModel, frozen=True):
     verify_tls: bool
 
 
+class HostIsolation(BaseModel, frozen=True):
+    """Configures the Proxmox host firewall to wall sandbox VMs off from the host.
+
+    Without this, a sandbox VM can curl the Proxmox API (pveproxy:8006),
+    SSH (:22), and other host services at the SDN gateway, the host's VPC
+    ENI, and any other IP the host owns.
+
+    The configuration is applied idempotently the first time the framework
+    talks to a given Proxmox host, and persists across runs. Rules added by
+    the framework are tagged so subsequent runs can recognise them and
+    refuse to overwrite a host that another process has configured
+    differently.
+
+    Attributes:
+        enabled: When True (default), enable the cluster + node firewall and
+            add the managed DNS/DHCP allow rules. When False the framework
+            does not touch the host firewall at all; any existing isolation
+            is left in place. Disabling is NOT RECOMMENDED — it re-exposes
+            the Proxmox API to sandbox VMs.
+        extra_management_cidrs: Additional CIDRs added to Proxmox's
+            ``management`` ipset alongside the framework's auto-detected
+            caller subnet, so traffic from these CIDRs retains access to
+            the Proxmox API. Useful when the API is reached from networks
+            the auto-detect helper cannot infer.
+    """
+
+    enabled: bool = True
+    extra_management_cidrs: Tuple[IPvAnyNetwork, ...] = ()
+
+
 def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
     """
     Load Proxmox instance configurations from file or environment variables.
@@ -299,6 +329,10 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
             normally.
         sdn_config: Software-defined networking configuration
         vms_config: Configurations for virtual machines
+        host_isolation: Host-firewall isolation config. Defaults to enabled,
+            which blocks sandbox VMs from reaching pveproxy / SSH / other
+            services on the Proxmox host. See ``HostIsolation`` for details
+            on opting out and on widening the management ipset.
         host: The hostname or IP address of the Proxmox server
         port: The port number for the Proxmox API, usually 8006
         user: The username for Proxmox authentication
@@ -316,6 +350,7 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
     vms_config: Tuple[VmConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
+    host_isolation: HostIsolation = HostIsolation()
 
     # Single-instance fields (used when configuring via environment variables)
     host: str = Field(default_factory=lambda: getenv("PROXMOX_HOST", "localhost"))
