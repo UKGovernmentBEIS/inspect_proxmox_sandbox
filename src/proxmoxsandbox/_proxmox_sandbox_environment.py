@@ -35,6 +35,12 @@ from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
 )
 
+# Above this many raw stdin bytes, exec() writes stdin to a file and redirects
+# from it instead of inlining base64 into the shell script — see exec() below.
+# Empirically ~34 KiB raw stdin saturates the script-write API limit (see exec
+# for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
+_INLINE_STDIN_LIMIT = 30 * 1024
+
 
 @sandboxenv(name="proxmox")
 class ProxmoxSandboxEnvironment(SandboxEnvironment):
@@ -180,6 +186,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         env: dict[str, str],
         user: str | None,
         timeout: int | None,
+        stdin_file: str | None = None,
     ) -> str:
         def generate() -> Generator[str, None, None]:
             yield (
@@ -196,8 +203,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 yield f"export {shlex.quote(key)}={shlex.quote(value)}\n"
             if stdin is not None:
                 yield self._pipe_user_input(stdin)
+            cmd_line = f"{self._prefix_timeout(timeout)}{shlex.join(command)}"
+            if stdin_file is not None:
+                cmd_line += f" <{shlex.quote(stdin_file)}"
             yield (
-                f"{self._prefix_timeout(timeout)}{shlex.join(command)}"
+                cmd_line
                 + f" >{tmp_start}script.stdout"
                 + f" 2>{tmp_start}script.stderr\n"
                 + 'echo -n "$?" >'
@@ -673,14 +683,39 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 vm_id=self.vm_id, command=["cmd.exe", "/c", script_path]
             )
         else:
+            # Inlined stdin is base64-encoded into the script, which itself
+            # gets base64-encoded into the agent/file-write `content` field.
+            # That field is hard-capped at 61440 chars by PVE validation, so
+            # stdin > ~34 KiB raw fails (empirically: 32 KiB OK, 45 KiB → HTTP
+            # 400 "value may only be 61440 characters long"). At much larger
+            # sizes (>~380 KiB raw stdin) the request also exceeds the
+            # pveproxy POST cap (512 KiB on PVE 8.4+) and the connection is
+            # closed without an HTTP response, surfacing as httpx ReadError('')
+            # — that's the failure mode the 1 MiB self_check.test_exec_input_large
+            # hits. For larger inputs, write stdin to a separate file (chunked
+            # via self.write_file) and have the script redirect from it.
+            # See https://forum.proxmox.com/threads/166200 and
+            # https://forum.proxmox.com/threads/105556
+            stdin_for_script: str | bytes | None = input
+            stdin_file: str | None = None
+            if input is not None:
+                input_bytes = (
+                    input if isinstance(input, bytes) else input.encode("utf-8")
+                )
+                if len(input_bytes) > _INLINE_STDIN_LIMIT:
+                    stdin_file = f"{tmp_start}stdin"
+                    await self.write_file(stdin_file, input_bytes)
+                    stdin_for_script = None
+
             script = self._build_shell_script(
                 tmp_start=tmp_start,
                 command=cmd,
-                stdin=input,
+                stdin=stdin_for_script,
                 cwd=cwd,
                 env=env or {},
                 user=user,
                 timeout=timeout,
+                stdin_file=stdin_file,
             )
             await self._write_file_only(f"{tmp_start}script.sh", script)
             exec_post_response = await self.agent_commands.exec_command(
