@@ -47,7 +47,7 @@ def test_inspect_eval() -> None:
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="bash",
-                    tool_arguments={"cmd": "uname -a"},
+                    tool_arguments={"command": "uname -a"},
                 ),
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
