@@ -62,6 +62,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     pool_id: str | None
     # OS type for Windows support
     os_type: OsType | None
+    # Set to True after the ISO write_file fast path fails on this VM.
+    # Subsequent large writes go straight to chunked QGA instead of paying
+    # the ~3 s of ISO build+upload+attach before falling back.
+    _iso_fast_path_disabled: bool
+    # Serialises concurrent ISO writes to this VM: they share the single
+    # cold-added sata5 slot and would clobber each other's media-change.
+    _iso_write_lock: asyncio.Lock
 
     def __init__(
         self,
@@ -86,12 +93,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.instance = instance
         self.pool_id = pool_id
         self.os_type = os_type
-        # Set to True after the ISO write_file fast path fails on this VM.
-        # Subsequent large writes go straight to chunked QGA instead of
-        # paying the ~3 s of ISO build+upload+attach before falling back.
         self._iso_fast_path_disabled = False
-        # Serialises concurrent ISO writes to this VM: they share the single
-        # cold-added sata5 slot and would clobber each other's media-change.
         self._iso_write_lock = asyncio.Lock()
 
     # originally from k8s sandbox
