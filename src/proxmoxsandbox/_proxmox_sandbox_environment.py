@@ -92,10 +92,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self._iso_fast_path_disabled = False
         # Serialises concurrent ISO writes to this VM: they share the single
         # cold-added sata5 slot and would clobber each other's media-change.
-        # Lives on the env (one per VM) rather than a module-level dict keyed
-        # on vm_id — VM IDs are only unique within one singleton Proxmox host,
-        # so a shared dict would falsely serialise VM 100 on host A against
-        # VM 100 on host B.
         self._iso_write_lock = asyncio.Lock()
 
     # originally from k8s sandbox
