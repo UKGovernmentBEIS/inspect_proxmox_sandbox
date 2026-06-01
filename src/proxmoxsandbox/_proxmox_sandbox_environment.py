@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import errno
 import re
@@ -89,6 +90,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # Subsequent large writes go straight to chunked QGA instead of
         # paying the ~3 s of ISO build+upload+attach before falling back.
         self._iso_fast_path_disabled = False
+        # Serialises concurrent ISO writes to this VM: they share the single
+        # cold-added sata5 slot and would clobber each other's media-change.
+        # Lives on the env (one per VM) rather than a module-level dict keyed
+        # on vm_id — VM IDs are only unique within one singleton Proxmox host,
+        # so a shared dict would falsely serialise VM 100 on host A against
+        # VM 100 on host B.
+        self._iso_write_lock = asyncio.Lock()
 
     # originally from k8s sandbox
     def _pipe_user_input(self, stdin: str | bytes) -> str:
@@ -848,37 +856,46 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             and len(contents) >= self.ISO_WRITE_THRESHOLD_BYTES
             and not self._iso_fast_path_disabled
         ):
-            try:
-                content_bytes = (
-                    contents
-                    if isinstance(contents, bytes)
-                    else contents.encode("utf-8")
-                )
-                iso_writer = IsoWriter(
-                    async_proxmox=self.infra_commands.async_proxmox,
-                    agent_commands=self.agent_commands,
-                    storage_commands=self.qemu_commands.storage_commands,
-                    node=self.infra_commands.node,
-                )
-                await iso_writer.write_file(self.vm_id, file, content_bytes)
-                return
-            except Exception as ex:
-                # Disable for the rest of this VM's lifetime. iso_write
-                # already retries once internally (detach + re-attach for
-                # the "Can't open blockdev" first-call race), so if we
-                # got here the failure is persistent — no point burning
-                # another ~3 s of ISO build+upload+attach on every
-                # subsequent large write.
-                self._iso_fast_path_disabled = True
-                self.logger.warning(
-                    "iso_write fast path disabled for VM %s (writing %s); "
-                    "subsequent large writes on this VM will use the slower "
-                    "chunked-QGA fallback. See README "
-                    "'Large write_file fast path > When the fast path is "
-                    "disabled' for things to check. "
-                    "Underlying error: %s",
-                    self.vm_id, file, ex,
-                )
+            # Hold the per-VM lock for the whole attach/copy/detach: it's a
+            # single shared sata5 slot, so concurrent writes must serialise.
+            async with self._iso_write_lock:
+                # Re-check under the lock: a write we queued behind may have
+                # already tripped the failure and disabled the fast path,
+                # in which case fall straight through to chunked QGA.
+                if not self._iso_fast_path_disabled:
+                    try:
+                        content_bytes = (
+                            contents
+                            if isinstance(contents, bytes)
+                            else contents.encode("utf-8")
+                        )
+                        iso_writer = IsoWriter(
+                            async_proxmox=self.infra_commands.async_proxmox,
+                            agent_commands=self.agent_commands,
+                            storage_commands=self.qemu_commands.storage_commands,
+                            node=self.infra_commands.node,
+                        )
+                        await iso_writer.write_file(self.vm_id, file, content_bytes)
+                        return
+                    except Exception as ex:
+                        # Disable for the rest of this VM's lifetime.
+                        # iso_write already retries once internally (detach
+                        # + re-attach for the "Can't open blockdev"
+                        # first-call race), so if we got here the failure is
+                        # persistent — no point burning another ~3 s of ISO
+                        # build+upload+attach on every subsequent large write.
+                        self._iso_fast_path_disabled = True
+                        self.logger.warning(
+                            "iso_write fast path disabled for VM %s "
+                            "(writing %s); subsequent large writes on this "
+                            "VM will use the slower chunked-QGA fallback. "
+                            "See README 'Large write_file fast path > When "
+                            "the fast path is disabled' for things to check. "
+                            "Underlying error: %s",
+                            self.vm_id,
+                            file,
+                            ex,
+                        )
 
         # Create parent directory
         if is_windows:

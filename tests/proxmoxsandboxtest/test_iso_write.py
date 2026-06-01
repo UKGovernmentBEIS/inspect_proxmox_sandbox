@@ -16,8 +16,6 @@ from proxmoxsandbox._impl.iso_write import (
     _ISO_PAYLOAD_NAME,
     _WRITE_SLOT,
     _build_iso,
-    _vm_lock,
-    _vm_locks,
 )
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
@@ -69,19 +67,6 @@ class TestBuildIso:
             iso_path.unlink(missing_ok=True)
 
 
-class TestVmLock:
-    def setup_method(self):
-        _vm_locks.clear()
-
-    def test_same_vm_returns_same_lock(self):
-        lock_a = _vm_lock(42)
-        lock_b = _vm_lock(42)
-        assert lock_a is lock_b
-
-    def test_different_vms_return_different_locks(self):
-        assert _vm_lock(1) is not _vm_lock(2)
-
-
 def test_write_slot_is_sata5():
     # qemu_commands.other_config_json cold-adds this exact slot on every
     # is_sandbox VM. Keep the constant in sync with that.
@@ -105,6 +90,26 @@ def _make_env() -> ProxmoxSandboxEnvironment:
         pool_id=None,
         os_type="l26",
     )
+
+
+class TestPerEnvWriteLock:
+    """The ISO write lock is per-env (per-VM), not module-level per-vm_id."""
+
+    def test_lock_is_an_asyncio_lock(self):
+        import asyncio
+
+        assert isinstance(_make_env()._iso_write_lock, asyncio.Lock)
+
+    def test_two_envs_sharing_a_vm_id_have_distinct_locks(self):
+        # Regression: VM IDs are only unique within one singleton Proxmox
+        # host (each starts numbering ~100), so two envs that share a vm_id
+        # represent two different machines on two different hosts. They must
+        # NOT share a write lock — a module-level dict keyed on bare vm_id
+        # would falsely serialise them.
+        env_a = _make_env()
+        env_b = _make_env()
+        assert env_a.vm_id == env_b.vm_id == 100
+        assert env_a._iso_write_lock is not env_b._iso_write_lock
 
 
 class TestFastPathMemoisation:

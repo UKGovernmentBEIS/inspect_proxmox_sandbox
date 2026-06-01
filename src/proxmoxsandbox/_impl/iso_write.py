@@ -46,19 +46,6 @@ _ISO_PAYLOAD_ISO9660 = "/PAYLOAD.;1"
 # boot for QEMU to enumerate the AHCI controller.
 _WRITE_SLOT = "sata5"
 
-# Per-VM serialization. ISO attach uses a single IDE slot; concurrent writes
-# to the same VM would clobber each other otherwise. Module-level so all
-# IsoWriter instances share locks per vm_id.
-_vm_locks: dict[int, asyncio.Lock] = {}
-
-
-def _vm_lock(vm_id: int) -> asyncio.Lock:
-    lock = _vm_locks.get(vm_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _vm_locks[vm_id] = lock
-    return lock
-
 
 def _rand(n: int = 8) -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
@@ -96,21 +83,22 @@ class IsoWriter:
         self.storage_commands = storage_commands
         self.node = node
 
-    async def write_file(
-        self, vm_id: int, filepath: str, contents: bytes
-    ) -> None:
-        """Write `contents` to `filepath` inside the guest VM."""
-        async with _vm_lock(vm_id):
-            with trace_action(
-                logger,
-                "iso_write_file",
-                f"vm={vm_id} target={filepath} size={len(contents)}",
-            ):
-                await self._do_write(vm_id, filepath, contents)
+    async def write_file(self, vm_id: int, filepath: str, contents: bytes) -> None:
+        """Write `contents` to `filepath` inside the guest VM.
 
-    async def _do_write(
-        self, vm_id: int, filepath: str, contents: bytes
-    ) -> None:
+        Not internally serialised: the single shared sata5 slot means
+        concurrent writes to the same VM must not overlap, but that lock
+        lives on the owning ProxmoxSandboxEnvironment (one per VM) rather
+        than here, since IsoWriter is rebuilt per call.
+        """
+        with trace_action(
+            logger,
+            "iso_write_file",
+            f"vm={vm_id} target={filepath} size={len(contents)}",
+        ):
+            await self._do_write(vm_id, filepath, contents)
+
+    async def _do_write(self, vm_id: int, filepath: str, contents: bytes) -> None:
         local_iso: Path | None = None
         iso_volid: str | None = None
         attached = False
@@ -178,8 +166,7 @@ class IsoWriter:
             total = time.monotonic() - t_start
             parts = " ".join(f"{k}={v:.2f}s" for k, v in timings.items())
             logger.info(
-                f"iso_write vm={vm_id} size={len(contents)} "
-                f"total={total:.2f}s {parts}"
+                f"iso_write vm={vm_id} size={len(contents)} total={total:.2f}s {parts}"
             )
 
     @tenacity.retry(
