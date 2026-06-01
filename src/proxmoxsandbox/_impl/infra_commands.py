@@ -155,7 +155,7 @@ class InfraCommands(abc.ABC):
 
         # Now create and start VMs
         for i, vm_config in enumerate(vms_config):
-            self.logger.info(f"Creating VM {i+1}/{len(vms_config)}: {vm_config.name}")
+            self.logger.info(f"Creating VM {i + 1}/{len(vms_config)}: {vm_config.name}")
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
                 vm_id = await self.qemu_commands.create_and_start_vm(
                     sdn_vnet_aliases=vnet_aliases,
@@ -291,8 +291,7 @@ class InfraCommands(abc.ABC):
         # zones only, so attaching a sandbox VM to a user-pre-existing VNET
         # does not drag the user's zone into the deletion set.
         zones_to_delete = {
-            z for z in await self.find_all_zones(noticed_vnets)
-            if _is_provider_zone(z)
+            z for z in await self.find_all_zones(noticed_vnets) if _is_provider_zone(z)
         }
 
         # Also catch orphan provider zones with no VMs in them

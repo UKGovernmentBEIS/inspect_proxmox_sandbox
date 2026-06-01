@@ -43,9 +43,7 @@ def test_load_instances_from_file():
         ]
     }
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -167,9 +165,7 @@ def test_config_file_takes_priority_over_env_vars():
         ]
     }
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -198,9 +194,7 @@ def test_config_file_takes_priority_over_env_vars():
 
 def test_invalid_json_in_config_file():
     """Test that invalid JSON in config file raises appropriate error."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         f.write("{invalid json")
         temp_path = f.name
 
@@ -236,9 +230,7 @@ def test_missing_required_fields_in_instance():
         ]
     }
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -269,9 +261,7 @@ def test_sandbox_config_defaults():
 
 def test_sandbox_config_explicit_pool_id():
     """Test ProxmoxSandboxEnvironmentConfig with explicit pool_id."""
-    config = ProxmoxSandboxEnvironmentConfig(
-        instance_pool_id="custom-pool"
-    )
+    config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="custom-pool")
 
     assert config.instance_pool_id == "custom-pool"
 
@@ -318,9 +308,7 @@ def test_default_concurrency_with_config_file():
         ]
     }
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 

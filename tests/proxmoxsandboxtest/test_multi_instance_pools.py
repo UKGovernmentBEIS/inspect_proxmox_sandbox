@@ -20,11 +20,13 @@ def _make_mock_infra():
     vm_config_mock.is_sandbox = True
     vm_config_mock.name = None
     vm_config_mock.os_type = None
-    infra.create_sdn_and_vms = AsyncMock(return_value=(
-        [(101, vm_config_mock)],  # vm_configs_with_ids
-        "zone1",  # sdn_zone_id
-        (),  # ipam_mappings
-    ))
+    infra.create_sdn_and_vms = AsyncMock(
+        return_value=(
+            [(101, vm_config_mock)],  # vm_configs_with_ids
+            "zone1",  # sdn_zone_id
+            (),  # ipam_mappings
+        )
+    )
     infra.delete_sdn_and_vms = AsyncMock()
     infra.deregister_resources = MagicMock()
     infra.task_cleanup = AsyncMock()
@@ -45,7 +47,7 @@ def _make_mock_infra():
 @pytest.fixture
 def mock_proxmox_api():
     """Mock AsyncProxmoxAPI."""
-    with patch('proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI') as mock:
+    with patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI") as mock:
         api_instance = AsyncMock()
         api_instance.get.return_value = {"version": "8.0"}
         mock.return_value = api_instance
@@ -56,9 +58,13 @@ def mock_proxmox_api():
 def mock_infra_commands():
     """Mock InfraCommands.get_instance and build classmethods."""
     infra = _make_mock_infra()
-    with patch.object(InfraCommands, 'get_instance', side_effect=LookupError("not found")), \
-         patch.object(InfraCommands, 'build', return_value=infra), \
-         patch.object(InfraCommands, 'set_instance'):
+    with (
+        patch.object(
+            InfraCommands, "get_instance", side_effect=LookupError("not found")
+        ),
+        patch.object(InfraCommands, "build", return_value=infra),
+        patch.object(InfraCommands, "set_instance"),
+    ):
         yield infra
 
 
@@ -88,7 +94,7 @@ def simple_config_file():
         ]
     }
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -98,9 +104,7 @@ def simple_config_file():
 
 @pytest.mark.asyncio
 async def test_single_instance_single_sample(
-    simple_config_file,
-    mock_proxmox_api,
-    mock_infra_commands
+    simple_config_file, mock_proxmox_api, mock_infra_commands
 ):
     """
     Mainline test: One instance, one sample, full lifecycle.
@@ -153,9 +157,7 @@ async def test_single_instance_single_sample(
         assert pool.qsize() == 1
 
         # Step 5: task_cleanup (Inspect calls at end, config may be None)
-        await ProxmoxSandboxEnvironment.task_cleanup(
-            "test_task", None, cleanup=True
-        )
+        await ProxmoxSandboxEnvironment.task_cleanup("test_task", None, cleanup=True)
 
         # Test passed!
 
@@ -208,7 +210,7 @@ def multi_pool_config_file():
         ]
     }
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -218,9 +220,7 @@ def multi_pool_config_file():
 
 @pytest.mark.asyncio
 async def test_two_pools_two_configs(
-    multi_pool_config_file,
-    mock_proxmox_api,
-    mock_infra_commands
+    multi_pool_config_file, mock_proxmox_api, mock_infra_commands
 ):
     """
     Test with two pools and two samples with different configs.
@@ -242,8 +242,8 @@ async def test_two_pools_two_configs(
         # This creates ALL pools from PROXMOX_CONFIG_FILE
         await ProxmoxSandboxEnvironment.task_init("cyber_task", None)
 
-        # Step 2: Create two different sample configs (like two different samples in one task)
-        # In inspect_cyber, these would come from different samples in the dataset
+        # Step 2: Create two different sample configs (mimicking two samples in one
+        # task). In inspect_cyber, these would come from different dataset samples.
         config_ubuntu = ProxmoxSandboxEnvironmentConfig(
             instance_pool_id="ubuntu-pool",
             # Could have ubuntu-specific VMs here
@@ -261,11 +261,12 @@ async def test_two_pools_two_configs(
         assert "ubuntu-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
         assert "kali-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
 
-        ubuntu_pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["ubuntu-pool"]
-        kali_pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["kali-pool"]
+        pools = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
+        ubuntu_pool = pools["ubuntu-pool"]
+        kali_pool = pools["kali-pool"]
 
         assert ubuntu_pool.qsize() == 2  # 2 ubuntu instances
-        assert kali_pool.qsize() == 1    # 1 kali instance
+        assert kali_pool.qsize() == 1  # 1 kali instance
 
         # Step 3: Run first sample (using ubuntu pool)
         ubuntu_envs = await ProxmoxSandboxEnvironment.sample_init(
@@ -275,7 +276,7 @@ async def test_two_pools_two_configs(
         # Verify: Ubuntu instance acquired, kali pool untouched
         assert "default" in ubuntu_envs
         assert ubuntu_pool.qsize() == 1  # One ubuntu instance taken
-        assert kali_pool.qsize() == 1    # Kali pool unchanged
+        assert kali_pool.qsize() == 1  # Kali pool unchanged
 
         # Verify the acquired instance is from ubuntu pool
         ubuntu_env = ubuntu_envs["default"]
@@ -290,7 +291,7 @@ async def test_two_pools_two_configs(
         # Verify: Kali instance acquired
         assert "default" in kali_envs
         assert ubuntu_pool.qsize() == 1  # Ubuntu pool unchanged
-        assert kali_pool.qsize() == 0    # Kali instance taken
+        assert kali_pool.qsize() == 0  # Kali instance taken
 
         # Verify the acquired instance is from kali pool
         kali_env = kali_envs["default"]
@@ -304,7 +305,7 @@ async def test_two_pools_two_configs(
 
         # Verify: Ubuntu instance returned
         assert ubuntu_pool.qsize() == 2  # Ubuntu instance returned
-        assert kali_pool.qsize() == 0    # Kali still in use
+        assert kali_pool.qsize() == 0  # Kali still in use
 
         # Step 6: Cleanup second sample (kali)
         await ProxmoxSandboxEnvironment.sample_cleanup(
@@ -313,12 +314,10 @@ async def test_two_pools_two_configs(
 
         # Verify: Kali instance returned
         assert ubuntu_pool.qsize() == 2  # Ubuntu pool full
-        assert kali_pool.qsize() == 1    # Kali instance returned
+        assert kali_pool.qsize() == 1  # Kali instance returned
 
         # Step 7: task_cleanup (called once at end)
-        await ProxmoxSandboxEnvironment.task_cleanup(
-            "cyber_task", None, cleanup=True
-        )
+        await ProxmoxSandboxEnvironment.task_cleanup("cyber_task", None, cleanup=True)
 
         # Test passed!
 
@@ -331,9 +330,7 @@ async def test_two_pools_two_configs(
 
 @pytest.mark.asyncio
 async def test_wrong_pool_id_raises_error(
-    simple_config_file,
-    mock_proxmox_api,
-    mock_infra_commands
+    simple_config_file, mock_proxmox_api, mock_infra_commands
 ):
     """Test that requesting non-existent pool raises clear error."""
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
@@ -342,15 +339,11 @@ async def test_wrong_pool_id_raises_error(
         await ProxmoxSandboxEnvironment.task_init("test_task", None)
 
         # Create config requesting non-existent pool
-        config = ProxmoxSandboxEnvironmentConfig(
-            instance_pool_id="nonexistent-pool"
-        )
+        config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="nonexistent-pool")
 
         # Should raise error with clear message
         with pytest.raises(RuntimeError) as exc_info:
-            await ProxmoxSandboxEnvironment.sample_init(
-                "test_task", config, {}
-            )
+            await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
 
         assert "Pool 'nonexistent-pool' not found" in str(exc_info.value)
         assert "default" in str(exc_info.value)  # Shows available pools
@@ -363,9 +356,7 @@ async def test_wrong_pool_id_raises_error(
 
 @pytest.mark.asyncio
 async def test_pool_exhaustion_blocks(
-    simple_config_file,
-    mock_proxmox_api,
-    mock_infra_commands
+    simple_config_file, mock_proxmox_api, mock_infra_commands
 ):
     """Test that acquiring from exhausted pool blocks until instance available."""
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
@@ -376,21 +367,18 @@ async def test_pool_exhaustion_blocks(
         config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="default")
 
         # Acquire the only instance
-        env1 = await ProxmoxSandboxEnvironment.sample_init(
-            "test_task", config, {}
-        )
+        env1 = await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
 
         pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["default"]
         assert pool.qsize() == 0  # Pool exhausted
 
         # Try to acquire second instance - should timeout
         import asyncio
+
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(
-                ProxmoxSandboxEnvironment.sample_init(
-                    "test_task", config, {}
-                ),
-                timeout=0.1  # 100ms timeout
+                ProxmoxSandboxEnvironment.sample_init("test_task", config, {}),
+                timeout=0.1,  # 100ms timeout
             )
 
         # Pool should still be empty
@@ -419,10 +407,13 @@ async def test_sample_error_releases_instance(
     infra = _make_mock_infra()
     infra.find_proxmox_ids_start.side_effect = Exception("Simulated error")
 
-    with patch.object(InfraCommands, 'get_instance', side_effect=LookupError("not found")), \
-         patch.object(InfraCommands, 'build', return_value=infra), \
-         patch.object(InfraCommands, 'set_instance'):
-
+    with (
+        patch.object(
+            InfraCommands, "get_instance", side_effect=LookupError("not found")
+        ),
+        patch.object(InfraCommands, "build", return_value=infra),
+        patch.object(InfraCommands, "set_instance"),
+    ):
         os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
 
         try:
@@ -435,9 +426,7 @@ async def test_sample_error_releases_instance(
 
             # sample_init should fail and return instance to pool
             with pytest.raises(Exception, match="Simulated error"):
-                await ProxmoxSandboxEnvironment.sample_init(
-                    "test_task", config, {}
-                )
+                await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
 
             # Instance should be back in pool
             assert pool.qsize() == 1
@@ -453,7 +442,7 @@ async def test_empty_instances_list():
     """Test behavior when instances list is empty."""
     config_data = {"instances": []}
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_data, f)
         temp_path = f.name
 
@@ -469,9 +458,7 @@ async def test_empty_instances_list():
         config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="default")
 
         with pytest.raises(RuntimeError, match="Pool 'default' not found"):
-            await ProxmoxSandboxEnvironment.sample_init(
-                "test_task", config, {}
-            )
+            await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
 
     finally:
         os.unlink(temp_path)
@@ -498,8 +485,9 @@ async def test_concurrent_task_init_calls(multi_pool_config_file):
         assert "kali-pool" in ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
 
         # Correct number of instances in each pool
-        assert ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["ubuntu-pool"].qsize() == 2
-        assert ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["kali-pool"].qsize() == 1
+        pools = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools
+        assert pools["ubuntu-pool"].qsize() == 2
+        assert pools["kali-pool"].qsize() == 1
 
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
@@ -509,9 +497,7 @@ async def test_concurrent_task_init_calls(multi_pool_config_file):
 
 @pytest.mark.asyncio
 async def test_cleanup_with_interrupted_flag(
-    simple_config_file,
-    mock_proxmox_api,
-    mock_infra_commands
+    simple_config_file, mock_proxmox_api, mock_infra_commands
 ):
     """Test that instance is returned to pool when interrupted=True.
 
@@ -528,9 +514,7 @@ async def test_cleanup_with_interrupted_flag(
         pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["default"]
 
         # Acquire instance
-        envs = await ProxmoxSandboxEnvironment.sample_init(
-            "test_task", config, {}
-        )
+        envs = await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
         assert pool.qsize() == 0
 
         # Cleanup with interrupted=True (simulating ctrl-c or timeout)

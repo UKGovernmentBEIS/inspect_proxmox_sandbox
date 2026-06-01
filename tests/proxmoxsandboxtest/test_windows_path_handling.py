@@ -54,7 +54,7 @@ class TestIsWindows:
 
 
 class TestWriteFileWindowsPaths:
-    """Verify that write_file uses PureWindowsPath (not Path) for Windows VMs.
+    r"""Verify that write_file uses PureWindowsPath (not Path) for Windows VMs.
 
     On a Linux host, pathlib.Path treats backslashes as literal characters,
     so Path("C:\\Users\\test\\file.txt").parent returns "." instead of
@@ -105,13 +105,16 @@ class TestSampleCleanupWarningMessage:
     """Verify the warning message in sample_cleanup is correctly formatted."""
 
     def test_warning_fstring_has_no_missing_separator(self):
-        """Regression test: the f-string in sample_cleanup's warning
+        """Sample_cleanup warning must separate pool_id and cleanup_succeeded.
+
+        Regression test: the f-string in sample_cleanup's warning
         must not concatenate pool_id and cleanup_succeeded without a
         newline between them.
         """
         # Grep the actual source to verify the f-string lines are
         # separated by a newline, rather than duplicating the format here.
         import inspect
+
         source = inspect.getsource(ProxmoxSandboxEnvironment.sample_cleanup)
 
         # The buggy pattern was two adjacent f-string lines:

@@ -1,23 +1,20 @@
 # tests/conftest.py
-import logging
 import os
 import random
 from typing import AsyncGenerator
 
 import pytest
 
-# httpcore and httpx emit extremely verbose DEBUG logs (every TCP connect,
-# TLS handshake, header send/receive, body send/receive, etc.) that drown
-# out application-level debug output.  Rather than disabling DEBUG globally,
-# we raise the level on just these loggers so our own DEBUG messages remain
-# visible.
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
-from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
-from proxmoxsandbox._impl.qemu_commands import QemuCommands, VnetAliases
+from proxmoxsandbox._impl.infra_commands import (
+    InfraCommands,
+    ProxmoxTarget,
+)
+from proxmoxsandbox._impl.qemu_commands import (
+    QemuCommands,
+    VnetAliases,
+)
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
 from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper

@@ -56,8 +56,11 @@ def _make_infra(
 
 @pytest.mark.asyncio
 async def test_cleanup_skips_pre_existing_zone_even_with_attached_inspect_vm():
-    """A non-template inspect VM plugged into a pre-existing user vnet
-    must NOT cause that vnet's zone to be deleted."""
+    """Pre-existing user zone is not deleted when an inspect VM is attached.
+
+    A non-template inspect VM plugged into a pre-existing user vnet
+    must NOT cause that vnet's zone to be deleted.
+    """
     infra = _make_infra(
         vms=[
             {
@@ -89,8 +92,11 @@ async def test_cleanup_skips_pre_existing_zone_even_with_attached_inspect_vm():
 
 @pytest.mark.asyncio
 async def test_cleanup_targets_provider_zone_via_regex():
-    """An ephemeral zone matching ZONE_REGEX must be targeted for deletion
-    even when no inspect VMs are still plugged into it."""
+    """Ephemeral provider zones are targeted for deletion via ZONE_REGEX.
+
+    An ephemeral zone matching ZONE_REGEX must be targeted for deletion
+    even when no inspect VMs are still plugged into it.
+    """
     infra = _make_infra(
         vms=[],
         zones=[
@@ -111,8 +117,11 @@ async def test_cleanup_targets_provider_zone_via_regex():
 
 @pytest.mark.asyncio
 async def test_cleanup_skips_static_inspvm_zone():
-    """The static `inspvm*` SDN is intentionally permanent and must not be
-    swept by cleanup_no_id, even though the provider created it."""
+    """Static `inspvm*` SDN is not swept by cleanup_no_id.
+
+    The static `inspvm*` SDN is intentionally permanent and must not be
+    swept by cleanup_no_id, even though the provider created it.
+    """
     infra = _make_infra(
         vms=[],
         zones=[{"zone": "inspvmz", "type": "simple"}],
@@ -129,8 +138,11 @@ async def test_cleanup_skips_static_inspvm_zone():
 
 @pytest.mark.asyncio
 async def test_cleanup_mixed_case_protects_pre_existing_only():
-    """With both an orphan provider zone and a pre-existing user zone present,
-    only the provider zone is targeted; the user zone is left alone."""
+    """Orphan provider zone is deleted; pre-existing user zone is left alone.
+
+    With both an orphan provider zone and a pre-existing user zone present,
+    only the provider zone is targeted; the user zone is left alone.
+    """
     infra = _make_infra(
         vms=[
             {
