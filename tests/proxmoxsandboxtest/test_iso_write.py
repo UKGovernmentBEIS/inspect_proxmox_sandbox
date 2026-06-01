@@ -122,8 +122,8 @@ class TestFastPathMemoisation:
     @pytest.mark.asyncio
     async def test_fast_path_disabled_after_first_failure(self):
         env = _make_env()
-        # ISO_WRITE_THRESHOLD_BYTES = 1 MiB; use 2 MiB so we hit the branch.
-        payload = b"x" * (2 * 1024 * 1024)
+        # Comfortably above ISO_WRITE_THRESHOLD_BYTES so we hit the fast path.
+        payload = b"x" * (env.ISO_WRITE_THRESHOLD_BYTES + 1024)
 
         # Stub out the chunked-QGA fallback's exec/_write_file_only so the
         # test focuses purely on the ISO branch's gating behaviour.

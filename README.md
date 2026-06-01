@@ -381,20 +381,12 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 
 ## Large `write_file` fast path
 
-For Linux guests, `write_file` payloads larger than 1 MiB use an ISO9660 hot-plug fast path that sidesteps the QEMU guest-agent ~60 KiB per-call write cap. The payload is packed into an ISO, uploaded to Proxmox storage, attached to a dedicated `sata5` CD-ROM slot (cold-added at clone time on every `is_sandbox` VM), then mounted and copied inside the guest. Falls back unconditionally to chunked QGA on any failure, so this is a pure optimisation.
+For Linux guests, `write_file` payloads larger than 128 KiB are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot, sidestepping the QEMU guest-agent's ~60 KiB per-call write cap. On any failure it falls back to the chunked-QGA path, so it can only speed writes up, never break them. Windows always uses chunked QGA.
 
-### When the fast path is disabled
+Two things worth knowing:
 
-If a `write_file` call's fast path fails for any reason, the sandbox emits a `WARNING` log and disables the fast path **for that VM** for the rest of the sample. Subsequent large writes on the same VM go straight to the slower chunked-QGA path. Other VMs in the same sample are unaffected.
-
-If you see this warning, things to check:
-
-1. **VM config**: the fast path needs `sata5` populated as `none,media=cdrom`. If your VM template (`existing_vm_template_tag` path) already uses `sata5` for something else, the cold-add at clone time overwrites it — and if your eval relies on that pre-existing `sata5` content, you'll want to either move it to a different slot (`sata0`–`sata4`) or disable the fast path globally.
-2. **Guest dmesg**: look for AHCI errors or `Can't open blockdev` messages. The kernel sometimes refuses optical-device opens after the first media-change; the fast path includes one host-side re-attach retry, so if you're hitting this warning it means the retry didn't recover either.
-3. **Proxmox storage**: a full `local` storage pool will cause ISO upload to fail. Free space and retry.
-4. **OS type**: the fast path is Linux only. Windows VMs always use chunked QGA.
-
-To disable the fast path globally, set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` to a value larger than your largest payload. To re-enable for a VM mid-sample, set `env._iso_fast_path_disabled = False` (rarely useful — if it failed once, it'll usually fail again).
+- **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it — move that content to `sata0`–`sata4`, or disable the fast path.
+- **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. On failure it also disables itself for the affected VM and logs a `WARNING`; the warning site in the code lists what to check.
 
 ## Feature Roadmap
 

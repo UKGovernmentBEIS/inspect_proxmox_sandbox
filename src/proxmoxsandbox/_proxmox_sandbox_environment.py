@@ -826,11 +826,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 raise ex
 
-    # Size at which the ISO hot-plug path takes over from chunked QGA writes.
-    # Below this, QGA single-shot or a handful of chunks is faster than the
-    # fixed ISO-build/upload/attach/mount overhead. Linux only — Windows still
-    # uses chunking until that path is implemented.
-    ISO_WRITE_THRESHOLD_BYTES = 1 * 1024 * 1024
+    # Above this size, write_file uses the ISO fast path; below it, chunked
+    # QGA. Not a true crossover: benchmarking (live ubuntu24.04) found ISO
+    # wins down to ~8 KiB — it collapses to one in-guest exec, beating even
+    # QGA's separate mkdir+write round-trips. Set deliberately above the
+    # crossover so trivially-small writes stay on the simpler QGA path (no
+    # storage upload, smaller failure surface) and keep that fallback path
+    # exercised on the normal route. Linux only — Windows always chunks.
+    ISO_WRITE_THRESHOLD_BYTES = 128 * 1024
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
@@ -878,20 +881,20 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                         await iso_writer.write_file(self.vm_id, file, content_bytes)
                         return
                     except Exception as ex:
-                        # Disable for the rest of this VM's lifetime.
-                        # iso_write already retries once internally (detach
-                        # + re-attach for the "Can't open blockdev"
-                        # first-call race), so if we got here the failure is
-                        # persistent — no point burning another ~3 s of ISO
-                        # build+upload+attach on every subsequent large write.
+                        # Persistent failure (iso_write already retried the
+                        # first-call "Can't open blockdev" race internally via
+                        # detach + re-attach). Usual causes: the VM template
+                        # repurposed the sata5 slot; full `local` storage so
+                        # the ISO upload fails; or the guest kernel refusing
+                        # optical opens (dmesg shows AHCI / "Can't open
+                        # blockdev"). Disable for this VM's lifetime so we
+                        # don't re-pay ~3 s of ISO build+upload+attach on every
+                        # subsequent large write; fall through to chunked QGA.
                         self._iso_fast_path_disabled = True
                         self.logger.warning(
-                            "iso_write fast path disabled for VM %s "
-                            "(writing %s); subsequent large writes on this "
-                            "VM will use the slower chunked-QGA fallback. "
-                            "See README 'Large write_file fast path > When "
-                            "the fast path is disabled' for things to check. "
-                            "Underlying error: %s",
+                            "iso_write fast path disabled for VM %s (writing "
+                            "%s); using the chunked-QGA fallback for the rest "
+                            "of this VM's life. Underlying error: %s",
                             self.vm_id,
                             file,
                             ex,
