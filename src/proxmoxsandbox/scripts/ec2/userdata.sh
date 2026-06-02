@@ -3,16 +3,13 @@
 # Follows https://pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_13_Trixie
 # with workarounds for non-interactive EC2 environments.
 #
-# NOTE: This script shares setup logic (IPAM patch, SDN config, storage config,
-# host-firewall isolation) with scripts/virtualized_proxmox/build_proxmox_auto.sh
-# (the on-first-boot.sh heredoc). If you change shared logic here, update that
-# file too and vice versa.
+# NOTE: This script shares setup logic with scripts/virtualized_proxmox/build_proxmox_auto.
+# If you change shared logic here, update that file too and vice versa.
 set -euxo pipefail
 # Log all output with timestamps to /root/install-proxmox.log for debugging
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
 
 # --- IMDSv2 helper (also used by EIC and AMI fixup services below) ---
-# Named call-ec2-hypervisor since Proxmox is also a hypervisor on this host.
 apt-get update -y
 apt-get install -y wget curl
 cat > /usr/local/bin/call-ec2-hypervisor << 'CALL_EC2_HYPERVISOR'
@@ -366,10 +363,8 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_NAT_UNIT
 
-# Host isolation: accept the management ports (8006, 22) only on the
-# default-route interface (where external API/SSH callers arrive); sandbox VMs
-# sit on their own SDN bridges and hit the default-deny policy. Run per-boot,
-# like fixup-nat, because the NIC name depends on instance family and can't be
+# Host isolation. See root README. 
+# Run per-boot, like fixup-nat, because the NIC name depends on instance family and can't be
 # baked into the AMI. The per-NIC marker makes it a no-op once applied, and re-runs
 # for a new NIC if the AMI is relaunched on a different family.
 # NOTE: keep these rules in sync with the on-first-boot heredoc in

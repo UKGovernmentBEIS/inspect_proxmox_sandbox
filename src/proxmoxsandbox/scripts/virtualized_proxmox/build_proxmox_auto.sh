@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Monolithic script to install a virtualized proxmox instance.
 # It's all in one file so that you can run it in e.g. cloud-init.
-# Note for EC2 users: AWS does not support nested virtualization so you will
-# need a metal instance for this to work.
+# Note for EC2 users: this is deprecated in favour of the ec2 method.
 #
-# NOTE: The on-first-boot.sh heredoc below shares setup logic (IPAM patch, SDN
-# config, storage config, host-firewall isolation) with scripts/ec2/userdata.sh.
+# NOTE: The on-first-boot.sh heredoc below shares setup logic with scripts/ec2/userdata.sh.
 # If you change shared logic here, update that file too and vice versa.
 #
 # What it does:
@@ -16,8 +14,6 @@
 # ./vend.sh 1
 # The clones will be accessible on the host at ports 11001, 11002, etc.
 # Each clone will have a different root password, which is printed out by vend.sh.
-
-# TODO: rewrite this in Python so the individual functions can be reused elsewhere
 
 set -eu
 
@@ -240,10 +236,7 @@ EOFPATCH
 # modify version to indicate we patched
 sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
 
-# Host isolation: accept the management ports (8006, 22) only on the
-# default-route interface (where external API/SSH callers arrive); sandbox VMs
-# sit on their own SDN bridges and hit the default-deny policy. Runs once at
-# template build (under slirp -> vmbr0) and persists into every vend.sh clone.
+# Host isolation - see README
 # NOTE: keep these rules in sync with the fixup-firewall service in
 # scripts/ec2/userdata.sh.
 NIC=$(ip route show default | awk '{print $5}' | head -1)
