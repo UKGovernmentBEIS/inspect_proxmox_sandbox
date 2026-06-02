@@ -48,11 +48,21 @@ provisioning scripts in this repo (`scripts/virtualized_proxmox/build_proxmox_au
 and `scripts/ec2/userdata.sh`) set it up automatically, so hosts you create with
 them are isolated out of the box.
 
-If you provision Proxmox some other way, run
-[`scripts/configure_host_isolation.sh`](src/proxmoxsandbox/scripts/configure_host_isolation.sh)
-**on the node** once. It enables Proxmox's cluster + node firewall, accepts the
-management ports only on the default-route interface, and keeps SDN DNS/DHCP
-working. Set `INSPECT_PROXMOX_SKIP_HOST_ISOLATION=1` to opt out (not recommended).
+If you provision Proxmox some other way, run these once **on the node**. They
+accept the management ports only on the default-route interface (where external
+callers arrive) and leave SDN DNS/DHCP open; sandbox VMs sit on other bridges and
+hit the default-deny policy:
+
+```bash
+NIC=$(ip route show default | awk '{print $5}' | head -1)
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1
+pvesh set /nodes/$(hostname)/firewall/options --enable 1
+pvesh set /cluster/firewall/options --enable 1
+```
 
 ### Single Proxmox Instance
 

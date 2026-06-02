@@ -5,8 +5,8 @@
 #
 # NOTE: This script shares setup logic (IPAM patch, SDN config, storage config,
 # host-firewall isolation) with scripts/virtualized_proxmox/build_proxmox_auto.sh
-# (the on-first-boot.sh heredoc) and scripts/configure_host_isolation.sh. If you
-# change shared logic here, update those too and vice versa.
+# (the on-first-boot.sh heredoc). If you change shared logic here, update that
+# file too and vice versa.
 set -euxo pipefail
 # Log all output with timestamps to /root/install-proxmox.log for debugging
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
@@ -366,49 +366,30 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_NAT_UNIT
 
-# Host isolation: wall sandbox VMs off from the Proxmox host's own services.
-# Accept the management ports (8006, 22) only on the default-route interface
-# (where external API/SSH callers arrive); sandbox VMs sit on their own SDN
-# bridges and hit the default-deny policy. Run per-boot, like fixup-nat, because
-# the NIC name depends on instance family and can't be baked into the AMI.
-# Idempotent per (dport, iface), so a NIC-name change across launches re-adds for
-# the current NIC rather than locking the API out. See
-# scripts/configure_host_isolation.sh for the standalone reference + rationale.
+# Host isolation: accept the management ports (8006, 22) only on the
+# default-route interface (where external API/SSH callers arrive); sandbox VMs
+# sit on their own SDN bridges and hit the default-deny policy. Run per-boot,
+# like fixup-nat, because the NIC name depends on instance family and can't be
+# baked into the AMI. The per-NIC marker makes it a no-op once applied, and re-runs
+# for a new NIC if the AMI is relaunched on a different family.
+# NOTE: keep these rules in sync with the on-first-boot heredoc in
+# scripts/virtualized_proxmox/build_proxmox_auto.sh.
 cat > /usr/local/bin/proxmox-ami-fixup-firewall.sh << 'FIXUP_FIREWALL'
 #!/bin/bash
 set -euo pipefail
-[ "${INSPECT_PROXMOX_SKIP_HOST_ISOLATION:-}" = "1" ] && exit 0
-MGMT_NIC=$(ip route show default | awk '{print $5}' | head -1)
-if [ -z "$MGMT_NIC" ]; then
-    echo "ERROR: could not determine management NIC from default route" >&2
-    exit 1
-fi
+NIC=$(ip route show default | awk '{print $5}' | head -1)
+[ -z "$NIC" ] && { echo "ERROR: no default route; cannot isolate host" >&2; exit 1; }
+[ -f "/var/local/.host-isolation-$NIC.done" ] && exit 0
 NODE=$(hostname)
 C="inspect-proxmox-sandbox: host-isolation"
-RULES=$(pvesh get "/nodes/$NODE/firewall/rules" --output-format json)
-have() {  # proto dport iface
-    echo "$RULES" | C="$C" python3 -c '
-import os, sys, json
-proto, dport, iface = sys.argv[1], sys.argv[2], sys.argv[3]
-rules = json.load(sys.stdin)
-match = [r for r in rules if r.get("comment") == os.environ["C"]
-         and r.get("proto") == proto and r.get("dport") == dport
-         and r.get("iface", "") == iface]
-sys.exit(0 if match else 1)' "$1" "$2" "$3"
-}
-add() {  # proto dport iface(optional)
-    have "$1" "$2" "${3:-}" && return 0
-    local args=(--type in --action ACCEPT --proto "$1" --dport "$2" --enable 1 --comment "$C")
-    [ -n "${3:-}" ] && args+=(--iface "$3")
-    pvesh create "/nodes/$NODE/firewall/rules" "${args[@]}"
-}
-add tcp 8006 "$MGMT_NIC"
-add tcp 22 "$MGMT_NIC"
-add udp 53
-add tcp 53
-add udp 67
-pvesh set "/nodes/$NODE/firewall/options" --enable 1
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1 --comment "$C"
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1 --comment "$C"
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$C"
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1 --comment "$C"
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1 --comment "$C"
+pvesh set /nodes/$NODE/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
+touch "/var/local/.host-isolation-$NIC.done"
 FIXUP_FIREWALL
 chmod +x /usr/local/bin/proxmox-ami-fixup-firewall.sh
 

@@ -5,7 +5,7 @@ README's "Host firewall isolation" section), not by this library, so this
 property only holds on a host that was provisioned with it. The test is
 therefore skipped unless INSPECT_PROXMOX_EXPECT_ISOLATION=1 — set it when
 running against such a host (e.g. one built by the repo's provisioning
-scripts or configured via scripts/configure_host_isolation.sh).
+scripts).
 """
 
 import os
