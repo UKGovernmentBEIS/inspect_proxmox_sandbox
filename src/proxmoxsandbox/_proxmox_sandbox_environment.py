@@ -322,7 +322,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             # FirewallCommands caches the applied state per-process, so this
             # is a no-op after the first sample on a given host.
             await infra_commands.firewall_commands.ensure_host_isolation(
-                config.host_isolation, caller_host=instance.host
+                config.host_isolation
             )
 
             # The pool guarantees one sample per instance at a time, so any

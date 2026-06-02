@@ -3,7 +3,22 @@
 Sandbox VMs would otherwise be able to reach pveproxy (port 8006), SSH, and
 other host services via the host's SDN gateway IP, vmbr0 IP, or VPC ENI.
 This module enables Proxmox's own cluster + node firewall via the API and
-posts a small set of allow rules so DNS/DHCP from VMs keeps working.
+posts a small set of allow rules.
+
+Isolation is by *interface*, not by source IP: the host management ports
+(8006, 22) are accepted only on the host's management interface, where
+external API/SSH callers arrive. Sandbox VMs reach the host over the SDN /
+vmbr0 bridges, so their packets ingress on a different interface and hit the
+default-deny INPUT policy — even when they aim at the host's management IP
+directly. DNS/DHCP from VMs is accepted on any interface so the SDN dnsmasq
+keeps working.
+
+This assumes the management interface does NOT also bridge sandbox VMs (true
+for a dedicated management NIC, or an SDN-based setup where guests sit on
+their own bridges). If the host's management IP lives on the same bridge VMs
+attach to, interface scoping cannot tell a caller from a VM; set
+``HostIsolation.management_cidrs`` for a source-IP allowlist instead, or pin
+``management_interface`` to the right device.
 
 Unlike SdnCommands or QemuCommands, FirewallCommands has no register_*,
 deregister_*, or task_cleanup methods: the firewall config is intentionally
@@ -11,14 +26,9 @@ persistent across runs, not a per-sample ephemeral resource.
 """
 
 import abc
-import socket
-from ipaddress import (
-    IPv4Address,
-    ip_address,
-    ip_network,
-)
+from ipaddress import ip_network
 from logging import getLogger
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from inspect_ai.util import trace_action
 from pydantic import BaseModel
@@ -41,25 +51,40 @@ class HostIsolationConflictError(RuntimeError):
     """
 
 
+class HostIsolationConfigError(RuntimeError):
+    """Raised when the host's management interface can't be determined.
+
+    Auto-detection picks the single active physical interface. A host with
+    no physical interface in the API view, or more than one, is ambiguous —
+    the caller must set ``host_isolation.management_interface`` to the
+    interface external API/SSH traffic arrives on.
+    """
+
+
 class ManagedRule(BaseModel, frozen=True):
     """A single host firewall rule the framework owns.
 
     The full Proxmox API rule object has additional fields like ``pos`` and
     ``digest`` that change between reads; equality here only compares the
     fields we actually set, so a re-read of a previously-POSTed rule
-    matches the constant in ``FirewallCommands.MANAGED_RULES``.
+    matches the constant we built it from.
     """
 
     type: str
     action: str
     proto: str
     dport: str
+    iface: str = ""
     comment: str = OURS_COMMENT
     enable: int = 1
     log: str = "nolog"
 
     def to_proxmox_params(self) -> dict:
-        return self.model_dump()
+        params = self.model_dump()
+        # Proxmox rejects an empty iface; only send it when set.
+        if not params.get("iface"):
+            params.pop("iface", None)
+        return params
 
     @classmethod
     def from_api_response(cls, rule: dict) -> "ManagedRule":
@@ -71,64 +96,37 @@ class ManagedRule(BaseModel, frozen=True):
             action=rule["action"],
             proto=rule.get("proto", ""),
             dport=rule.get("dport", ""),
+            iface=rule.get("iface", ""),
             comment=rule.get("comment", ""),
             enable=int(rule.get("enable", 1)),
             log=rule.get("log", "nolog"),
         )
 
 
-def detect_caller_cidr(host: str, port: int = 8006) -> Optional[str]:
-    """Return the local IP /16 used to reach ``host:port``, or None.
-
-    Used to widen Proxmox's auto-detected ``management`` ipset so the
-    framework's own API calls keep working when the API caller is on a
-    different VPC subnet than the Proxmox host (the common case on AWS,
-    where dev VMs and Proxmox hosts share a VPC but sit on different /20s).
-
-    UDP ``connect`` triggers kernel route selection without putting any
-    packets on the wire. Returns None for loopback / link-local sources,
-    or on any socket error — the eval should still proceed because
-    Proxmox's own auto-detected /20 is always in the ipset.
-    """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect((host, port))
-            local_ip = s.getsockname()[0]
-    except OSError:
-        return None
-
-    try:
-        addr = ip_address(local_ip)
-    except ValueError:
-        return None
-
-    if not isinstance(addr, IPv4Address):
-        return None
-    if addr.is_loopback or addr.is_link_local or addr.is_unspecified:
-        return None
-
-    return str(ip_network(f"{local_ip}/16", strict=False))
-
-
 class FirewallCommands(abc.ABC):
     """Configure the Proxmox cluster and host firewall idempotently.
 
-    Single public entrypoint: ``ensure_host_isolation``. All conflict checks
-    happen before any writes, so a conflicted host is never half-mutated.
+    Single public entrypoint: ``ensure_host_isolation``. The conflict check
+    and all writes happen while the firewall is still disabled, and the
+    enables are flipped last, so the host is never half-mutated and the API
+    caller is never locked out mid-apply.
     """
 
     logger = getLogger(__name__)
     TRACE_NAME = "proxmox_firewall_command"
 
-    # The three rules we always want on the node firewall — VMs need
-    # DNS and DHCP from the SDN dnsmasq bound to bridge gateway IPs, but
-    # the cluster firewall's default-deny INPUT for the host would otherwise
+    # DNS + DHCP intake for the SDN dnsmasq, accepted on any interface so a
+    # VM can resolve / lease regardless of which bridge it sits on. The
+    # cluster firewall's default-deny INPUT for the host would otherwise
     # block them.
-    MANAGED_RULES: Tuple[ManagedRule, ...] = (
+    MANAGED_DNS_RULES: Tuple[ManagedRule, ...] = (
         ManagedRule(type="in", action="ACCEPT", proto="udp", dport="53"),
         ManagedRule(type="in", action="ACCEPT", proto="tcp", dport="53"),
         ManagedRule(type="in", action="ACCEPT", proto="udp", dport="67"),
     )
+
+    # Host management ports, accepted only on the management interface.
+    MANAGEMENT_PORTS: Tuple[str, ...] = ("8006", "22")
 
     async_proxmox: AsyncProxmoxAPI
     task_wrapper: TaskWrapper
@@ -143,43 +141,83 @@ class FirewallCommands(abc.ABC):
         self.node = node
         self._applied = False
 
-    async def ensure_host_isolation(self, cfg: HostIsolation, caller_host: str) -> None:
+    async def ensure_host_isolation(self, cfg: HostIsolation) -> None:
         if not cfg.enabled:
             self.logger.debug("host_isolation disabled; skipping firewall setup")
             return
         if self._applied:
             return
 
-        desired_cidrs = self._build_desired_management_cidrs(cfg, caller_host)
+        iface = cfg.management_interface or await self._detect_management_interface()
+        desired_cidrs = self._build_desired_management_cidrs(cfg)
+        desired_rules = self._build_desired_rules(iface)
 
         with trace_action(self.logger, self.TRACE_NAME, "ensure host isolation"):
-            # Order matters: populate the management ipset BEFORE enabling
-            # the cluster firewall. Proxmox auto-populates the ipset with
-            # the host's own /20, but the framework is usually on a
-            # different /20 of the VPC; enabling the firewall first would
-            # lock the next API call (the ipset POST) out and time out.
+            existing_rules = await self.async_proxmox.request(
+                "GET", f"/nodes/{self.node}/firewall/rules"
+            )
+            # Raise on any conflict BEFORE we write anything.
+            self._detect_node_rule_conflicts(existing_rules)
+
+            # Stage the ipset and rules while the firewall is still disabled,
+            # then flip the enables last. The management-interface ACCEPTs are
+            # in place before the policy goes default-deny, so an off-subnet
+            # API caller (arriving on the management interface) is never
+            # locked out mid-apply.
             await self._ensure_management_ipset(desired_cidrs)
+            await self._ensure_node_rules(desired_rules, existing_rules)
             await self._ensure_cluster_fw_enabled()
             await self._ensure_node_fw_enabled()
-            await self._ensure_node_rules()
 
         self._applied = True
 
-    @staticmethod
-    def _build_desired_management_cidrs(
-        cfg: HostIsolation, caller_host: str
-    ) -> List[str]:
-        cidrs: List[str] = []
-        auto = detect_caller_cidr(caller_host)
-        if auto is not None:
-            cidrs.append(auto)
-        for net in cfg.extra_management_cidrs:
-            cidrs.append(str(net))
+    @classmethod
+    def _build_desired_rules(cls, iface: str) -> Tuple[ManagedRule, ...]:
+        mgmt = tuple(
+            ManagedRule(
+                type="in", action="ACCEPT", proto="tcp", dport=port, iface=iface
+            )
+            for port in cls.MANAGEMENT_PORTS
+        )
+        return cls.MANAGED_DNS_RULES + mgmt
 
-        # Dedupe while preserving order.
+    async def _detect_management_interface(self) -> str:
+        """The interface external API/SSH callers arrive on.
+
+        We use the single active physical interface (``eth`` / ``bond``).
+        Matching by the host's management IP is deliberately avoided: a
+        DHCP-configured NIC doesn't expose its address in the network config,
+        and address matching would otherwise happily return a *bridge* — the
+        one case where interface scoping fails open, since VMs attach to that
+        same bridge. Anything ambiguous raises.
+        """
+        ifaces = await self.async_proxmox.request("GET", f"/nodes/{self.node}/network")
+        physical = [
+            i
+            for i in ifaces
+            if i.get("type") in ("eth", "bond") and int(i.get("active", 0)) == 1
+        ]
+        if len(physical) == 1:
+            return str(physical[0]["iface"])
+
+        names = sorted(str(i.get("iface", "?")) for i in ifaces)
+        raise HostIsolationConfigError(
+            "Could not determine the Proxmox management interface "
+            f"automatically: found {len(physical)} active physical interfaces "
+            f"among {names}. Set host_isolation.management_interface to the "
+            "interface external API/SSH traffic arrives on."
+        )
+
+    @staticmethod
+    def _build_desired_management_cidrs(cfg: HostIsolation) -> List[str]:
+        # Dedupe while preserving order. The management interface ACCEPTs
+        # cover the normal off-subnet caller; these are an optional source-IP
+        # allowlist for cases interface scoping can't serve (e.g. the mgmt IP
+        # shares a bridge with VMs). Empty is the common case.
         seen: set[str] = set()
         out: List[str] = []
-        for cidr in cidrs:
+        for net in cfg.management_cidrs:
+            cidr = str(net)
             if cidr not in seen:
                 seen.add(cidr)
                 out.append(cidr)
@@ -239,21 +277,16 @@ class FirewallCommands(abc.ABC):
             json={"enable": 1},
         )
 
-    async def _ensure_node_rules(self) -> None:
-        existing = await self.async_proxmox.request(
-            "GET", f"/nodes/{self.node}/firewall/rules"
-        )
-
-        # Raise on any conflict BEFORE we POST anything.
-        self._detect_node_rule_conflicts(existing)
-
+    async def _ensure_node_rules(
+        self, desired_rules: Tuple[ManagedRule, ...], existing_rules: List[dict]
+    ) -> None:
         existing_managed = {
             ManagedRule.from_api_response(r)
-            for r in existing
+            for r in existing_rules
             if r.get("comment") == OURS_COMMENT
         }
 
-        for rule in self.MANAGED_RULES:
+        for rule in desired_rules:
             if rule in existing_managed:
                 continue
             await self.async_proxmox.request(
@@ -267,13 +300,13 @@ class FirewallCommands(abc.ABC):
         """Raise on foreign rules that would prevent our ACCEPTs from working.
 
         Two cases trip this:
-          1. A foreign rule on the same (type, proto, dport) as one of ours
-             — someone else is already managing DNS/DHCP intake; we don't
-             know whether their intent matches ours.
+          1. A foreign rule on the same (type, proto, dport) as one of our
+             unscoped DNS/DHCP ACCEPTs — someone else is already managing
+             that intake; we don't know whether their intent matches ours.
           2. A foreign IN DROP or IN REJECT rule anywhere on the chain —
              we can't be confident our ACCEPTs are reachable.
         """
-        managed_keys = {(r.type, r.proto, r.dport) for r in cls.MANAGED_RULES}
+        managed_keys = {(r.type, r.proto, r.dport) for r in cls.MANAGED_DNS_RULES}
 
         foreign_collisions: List[dict] = []
         foreign_blockers: List[dict] = []
@@ -322,7 +355,7 @@ class FirewallCommands(abc.ABC):
         lines.append("Expected (managed by inspect-proxmox-sandbox):")
         lines.extend(
             f"  IN ACCEPT -p {r.proto} -dport {r.dport} comment={r.comment!r}"
-            for r in cls.MANAGED_RULES
+            for r in cls.MANAGED_DNS_RULES
         )
         lines.extend(
             [

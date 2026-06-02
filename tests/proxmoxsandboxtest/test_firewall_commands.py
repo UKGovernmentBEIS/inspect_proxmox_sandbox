@@ -2,6 +2,10 @@
 
 Uses the same conftest fixtures as the other integration test modules
 (env vars PROXMOX_HOST/PORT/USER/PASSWORD/REALM/NODE).
+
+Isolation is interface-scoped, so the test runner keeps API access via the
+management-interface ACCEPT regardless of which subnet it is on — no
+runner-specific allowlist is needed.
 """
 
 from ipaddress import IPv4Network
@@ -49,11 +53,7 @@ async def _clear_ours_ipset_entries(api: AsyncProxmoxAPI) -> None:
 
 
 async def _disable_cluster_fw(api: AsyncProxmoxAPI) -> None:
-    """Disable the cluster firewall so the host is reachable from any IP.
-
-    Required after a test that locks down the ipset, otherwise the next
-    test (or any other API user) can't connect.
-    """
+    """Disable the cluster + node firewall so the host is reachable again."""
     await api.request("PUT", "/cluster/firewall/options", json={"enable": 0})
 
 
@@ -64,9 +64,7 @@ async def firewall_commands(
     """Yield FirewallCommands with ours-tagged state cleaned before and after.
 
     Teardown disables the cluster firewall after clearing our state so the
-    host stays reachable for subsequent tests / other API users — our
-    teardown can leave the management ipset empty, which would otherwise
-    block all non-host-subnet traffic.
+    host stays reachable for subsequent tests / other API users.
     """
     fw = infra_commands.firewall_commands
     api = fw.async_proxmox
@@ -85,23 +83,18 @@ async def firewall_commands(
     await _disable_cluster_fw(api)
 
 
+def _ours(rules: list) -> list:
+    return [r for r in rules if r.get("comment") == OURS_COMMENT]
+
+
 async def test_ensure_host_isolation_from_clean_state(
     firewall_commands: FirewallCommands,
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
 ) -> None:
     """Apply from a clean slate; both firewalls enabled with managed rules."""
     fw = firewall_commands
     api = fw.async_proxmox
 
-    # Use an explicit extra_management_cidrs so the ipset assertion is
-    # deterministic regardless of how the test connects to the Proxmox
-    # host (auto-detection returns None when caller_host resolves to
-    # loopback, e.g. via an SSH tunnel).
-    extra = IPv4Network("198.51.100.0/24")
-    await fw.ensure_host_isolation(
-        HostIsolation(extra_management_cidrs=(extra,)),
-        caller_host=sandbox_env_config.host,
-    )
+    await fw.ensure_host_isolation(HostIsolation())
 
     cluster_opts = await api.request("GET", "/cluster/firewall/options")
     assert int(cluster_opts.get("enable", 0)) == 1
@@ -110,50 +103,52 @@ async def test_ensure_host_isolation_from_clean_state(
     assert int(node_opts.get("enable", 0)) == 1
 
     rules = await api.request("GET", f"/nodes/{fw.node}/firewall/rules")
-    ours = [r for r in rules if r.get("comment") == OURS_COMMENT]
-    assert len(ours) == 3, f"expected 3 managed rules, found {len(ours)}: {ours}"
+    ours = _ours(rules)
+    # 3 unscoped DNS/DHCP rules + 2 interface-scoped management rules.
+    assert len(ours) == 5, f"expected 5 managed rules, found {len(ours)}: {ours}"
     by_dport = {r["dport"]: r for r in ours}
     assert by_dport["53"]["proto"] in ("udp", "tcp")
     assert by_dport["67"]["proto"] == "udp"
+    # Management ports are pinned to an interface; DNS/DHCP are not.
+    assert by_dport["8006"].get("iface")
+    assert by_dport["22"].get("iface")
+    assert by_dport["8006"]["iface"] == by_dport["22"]["iface"]
+    assert not by_dport["53"].get("iface")
 
-    ipset_entries = await api.request("GET", "/cluster/firewall/ipset/management")
-    our_entries = [e for e in ipset_entries if e.get("comment") == OURS_COMMENT]
-    assert any(e["cidr"] == str(extra) for e in our_entries), (
-        f"expected ours-tagged entry for {extra}, found {ipset_entries}"
-    )
+
+async def test_detect_management_interface_returns_active_physical(
+    firewall_commands: FirewallCommands,
+) -> None:
+    """Auto-detection returns an active physical interface on the node."""
+    fw = firewall_commands
+    iface = await fw._detect_management_interface()
+
+    net = await fw.async_proxmox.request("GET", f"/nodes/{fw.node}/network")
+    match = [i for i in net if i.get("iface") == iface]
+    assert match, f"{iface} not in node network config"
+    assert match[0].get("type") in ("eth", "bond")
+    assert int(match[0].get("active", 0)) == 1
 
 
 async def test_ensure_host_isolation_is_idempotent(
     firewall_commands: FirewallCommands,
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
 ) -> None:
     fw = firewall_commands
     api = fw.async_proxmox
 
-    await fw.ensure_host_isolation(HostIsolation(), caller_host=sandbox_env_config.host)
+    await fw.ensure_host_isolation(HostIsolation())
     rules_after_first = await api.request("GET", f"/nodes/{fw.node}/firewall/rules")
-    ipset_after_first = await api.request("GET", "/cluster/firewall/ipset/management")
 
     # Force a re-run (the _applied memo would otherwise short-circuit).
     fw._applied = False
-    await fw.ensure_host_isolation(HostIsolation(), caller_host=sandbox_env_config.host)
-
+    await fw.ensure_host_isolation(HostIsolation())
     rules_after_second = await api.request("GET", f"/nodes/{fw.node}/firewall/rules")
-    ipset_after_second = await api.request("GET", "/cluster/firewall/ipset/management")
 
-    # Same number of ours-tagged rules in both reads; no duplicates.
-    def ours_count(rules: list) -> int:
-        return sum(1 for r in rules if r.get("comment") == OURS_COMMENT)
-
-    assert ours_count(rules_after_first) == ours_count(rules_after_second) == 3
-    assert sum(1 for e in ipset_after_first if e.get("comment") == OURS_COMMENT) == sum(
-        1 for e in ipset_after_second if e.get("comment") == OURS_COMMENT
-    )
+    assert len(_ours(rules_after_first)) == len(_ours(rules_after_second)) == 5
 
 
 async def test_ensure_host_isolation_disabled_makes_no_changes(
     firewall_commands: FirewallCommands,
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
 ) -> None:
     fw = firewall_commands
     api = fw.async_proxmox
@@ -161,9 +156,7 @@ async def test_ensure_host_isolation_disabled_makes_no_changes(
     rules_before = await api.request("GET", f"/nodes/{fw.node}/firewall/rules")
     ipset_before = await api.request("GET", "/cluster/firewall/ipset/management")
 
-    await fw.ensure_host_isolation(
-        HostIsolation(enabled=False), caller_host=sandbox_env_config.host
-    )
+    await fw.ensure_host_isolation(HostIsolation(enabled=False))
 
     rules_after = await api.request("GET", f"/nodes/{fw.node}/firewall/rules")
     ipset_after = await api.request("GET", "/cluster/firewall/ipset/management")
@@ -176,19 +169,15 @@ async def test_ensure_host_isolation_disabled_makes_no_changes(
     assert _strip(ipset_before) == _strip(ipset_after)
 
 
-async def test_ensure_host_isolation_extra_cidrs(
+async def test_ensure_host_isolation_management_cidrs_escape_hatch(
     firewall_commands: FirewallCommands,
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
 ) -> None:
-    """An explicit extra_management_cidrs entry lands in the ipset with our comment."""
+    """An explicit management_cidrs entry lands in the ipset with our comment."""
     fw = firewall_commands
     api = fw.async_proxmox
 
     extra = IPv4Network("203.0.113.0/24")
-    await fw.ensure_host_isolation(
-        HostIsolation(extra_management_cidrs=(extra,)),
-        caller_host=sandbox_env_config.host,
-    )
+    await fw.ensure_host_isolation(HostIsolation(management_cidrs=(extra,)))
 
     entries = await api.request("GET", "/cluster/firewall/ipset/management")
     matching = [e for e in entries if e.get("cidr") == str(extra)]
@@ -198,9 +187,12 @@ async def test_ensure_host_isolation_extra_cidrs(
 
 async def test_ensure_host_isolation_conflict_on_foreign_drop(
     firewall_commands: FirewallCommands,
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
 ) -> None:
-    """A foreign IN DROP on a managed dport raises and writes nothing."""
+    """A foreign IN DROP on a managed dport raises and writes nothing.
+
+    The conflict is detected before any enable, so the cluster firewall is
+    left disabled — the host is never half-mutated.
+    """
     fw = firewall_commands
     api = fw.async_proxmox
 
@@ -218,17 +210,15 @@ async def test_ensure_host_isolation_conflict_on_foreign_drop(
 
     try:
         with pytest.raises(HostIsolationConflictError):
-            await fw.ensure_host_isolation(
-                HostIsolation(), caller_host=sandbox_env_config.host
-            )
+            await fw.ensure_host_isolation(HostIsolation())
 
-        # No managed rules were added — atomicity check.
+        # No managed rules were added, and the firewall was never enabled.
         rules = await api.request("GET", f"/nodes/{fw.node}/firewall/rules")
-        ours = [r for r in rules if r.get("comment") == OURS_COMMENT]
-        assert ours == []
+        assert _ours(rules) == []
+        cluster_opts = await api.request("GET", "/cluster/firewall/options")
+        assert int(cluster_opts.get("enable", 0)) == 0
 
     finally:
-        # Remove the foreign rule we added.
         rules = await api.request("GET", f"/nodes/{fw.node}/firewall/rules")
         for r in rules:
             if (
@@ -248,11 +238,10 @@ async def test_ensure_host_isolation_conflict_on_foreign_drop(
 async def test_sandbox_vm_cannot_reach_pveproxy_or_ssh() -> None:
     """End-to-end: a sandbox VM brought up via sample_init can't curl pveproxy.
 
-    This is the property the feature exists to deliver — the API-level
-    assertions only prove the API plumbing fires correctly. We hit the
-    SDN gateway IP from inside the VM because that's the IP the VM sees
-    as its default route, and it's also where pveproxy listens (since
-    pveproxy binds 0.0.0.0:8006).
+    This is the property the feature exists to deliver. The VM reaches the
+    host over its SDN bridge, so its packets never ingress on the management
+    interface and hit the default-deny policy — even when aimed at the SDN
+    gateway IP where pveproxy also listens.
     """
     task_name = "test_firewall_e2e"
     config = ProxmoxSandboxEnvironmentConfig()  # default: host_isolation enabled
