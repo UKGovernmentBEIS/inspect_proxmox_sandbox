@@ -27,8 +27,11 @@ or prefix your pytest (etc.) commands with `uv run ...`
 ## Setting up a Proxmox instance for testing
 
 You'll need a Proxmox instance to develop against. Two supported paths; both
-handle the extra configuration mentioned in this project's README, and apply the
-patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
+handle the extra configuration mentioned in this project's README, apply the
+patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html,
+and configure host firewall isolation (see the README's "Host firewall isolation"
+section — the logic lives in `scripts/configure_host_isolation.sh` and is inlined
+into both provisioning scripts; keep the three in sync).
 
 ### Local (Ubuntu 24.04 host)
 

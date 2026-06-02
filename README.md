@@ -34,6 +34,26 @@ SDN requires you to configure dnsmasq, see the [Proxmox SDN documentation](https
 
 If you don't already have a Proxmox instance, see [CONTRIBUTING.md](CONTRIBUTING.md#setting-up-a-proxmox-instance-for-testing) for supported setup paths (local Ubuntu 24.04 host, or EC2 with nested virtualization).
 
+### Host firewall isolation
+
+By default a sandbox VM can reach the Proxmox host's own services — the API
+(`pveproxy`, port 8006), SSH, etc. — via the SDN gateway, the `vmbr0` IP, or the
+host's external NIC. For cyber evals especially, you want those blocked so agents
+can't attack the Proxmox control plane.
+
+This is **configured on the host at provisioning time, not by this library** — it
+needs the host's live routing table to know which interface external API/SSH
+traffic arrives on, which only the host itself can tell you reliably. The
+provisioning scripts in this repo (`scripts/virtualized_proxmox/build_proxmox_auto.sh`
+and `scripts/ec2/userdata.sh`) set it up automatically, so hosts you create with
+them are isolated out of the box.
+
+If you provision Proxmox some other way, run
+[`scripts/configure_host_isolation.sh`](src/proxmoxsandbox/scripts/configure_host_isolation.sh)
+**on the node** once. It enables Proxmox's cluster + node firewall, accepts the
+management ports only on the default-route interface, and keeps SDN DNS/DHCP
+working. Set `INSPECT_PROXMOX_SKIP_HOST_ISOLATION=1` to opt out (not recommended).
+
 ### Single Proxmox Instance
 
 Set the following environment variables (e.g. in a [`.env`](https://dotenvx.com/docs/env-file) file):

@@ -246,51 +246,6 @@ class ProxmoxInstanceConfig(BaseModel, frozen=True):
     verify_tls: bool
 
 
-class HostIsolation(BaseModel, frozen=True):
-    """Configures the Proxmox host firewall to wall sandbox VMs off from the host.
-
-    Without this, a sandbox VM can curl the Proxmox API (pveproxy:8006),
-    SSH (:22), and other host services at the SDN gateway, the host's VPC
-    ENI, and any other IP the host owns.
-
-    The configuration is applied idempotently the first time the framework
-    talks to a given Proxmox host, and persists across runs. Rules added by
-    the framework are tagged so subsequent runs can recognise them and
-    refuse to overwrite a host that another process has configured
-    differently.
-
-    Isolation is by *interface*: the host management ports (8006, 22) are
-    accepted only on the host's management interface, where external API/SSH
-    callers arrive. Sandbox VMs reach the host over the SDN / vmbr0 bridges,
-    so their packets ingress on a different interface and hit the
-    default-deny policy — no client-IP allowlist is needed for the framework
-    to keep working. This assumes the management interface does not also
-    bridge sandbox VMs; if the host's management IP shares a bridge with
-    guests, pin ``management_interface`` and/or set ``management_cidrs``.
-
-    Attributes:
-        enabled: When True (default), enable the cluster + node firewall and
-            add the managed rules. When False the framework does not touch
-            the host firewall at all; any existing isolation is left in
-            place. Disabling is NOT RECOMMENDED — it re-exposes the Proxmox
-            API to sandbox VMs.
-        management_interface: The host interface external API/SSH callers
-            arrive on, e.g. ``"vmbr0"`` or ``"enp39s0"``. When None
-            (default) the framework auto-detects the single active physical
-            interface and raises if that is ambiguous (multiple NICs).
-        management_cidrs: Optional source-IP allowlist added to Proxmox's
-            ``management`` ipset, on top of the ``local_network`` Proxmox
-            trusts automatically and the management-interface ACCEPTs. Needed
-            only when interface scoping can't serve a caller (e.g. the
-            management IP shares a bridge with VMs). Sandbox VMs live on the
-            SDN ranges, not these CIDRs, so this does not re-expose the host.
-    """
-
-    enabled: bool = True
-    management_interface: Optional[str] = None
-    management_cidrs: Tuple[IPvAnyNetwork, ...] = ()
-
-
 def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
     """
     Load Proxmox instance configurations from file or environment variables.
@@ -344,11 +299,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
             normally.
         sdn_config: Software-defined networking configuration
         vms_config: Configurations for virtual machines
-        host_isolation: Host-firewall isolation config. Defaults to enabled,
-            which blocks sandbox VMs from reaching pveproxy / SSH / other
-            services on the Proxmox host by accepting those ports only on the
-            host's management interface. See ``HostIsolation`` for details on
-            opting out and on pinning the management interface.
         host: The hostname or IP address of the Proxmox server
         port: The port number for the Proxmox API, usually 8006
         user: The username for Proxmox authentication
@@ -366,7 +316,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
     vms_config: Tuple[VmConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
-    host_isolation: HostIsolation = HostIsolation()
 
     # Single-instance fields (used when configuring via environment variables)
     host: str = Field(default_factory=lambda: getenv("PROXMOX_HOST", "localhost"))

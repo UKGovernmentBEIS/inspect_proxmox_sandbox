@@ -13,7 +13,6 @@ from rich.table import Table
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
-from proxmoxsandbox._impl.firewall_commands import FirewallCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import (
     ZONE_REGEX,
@@ -56,7 +55,6 @@ class InfraCommands(abc.ABC):
     sdn_commands: SdnCommands
     qemu_commands: QemuCommands
     built_in_vm: BuiltInVM
-    firewall_commands: FirewallCommands
     node: str
 
     def __init__(
@@ -67,7 +65,6 @@ class InfraCommands(abc.ABC):
         sdn_commands: SdnCommands,
         qemu_commands: QemuCommands,
         built_in_vm: BuiltInVM,
-        firewall_commands: FirewallCommands,
     ):
         """Prefer InfraCommands.build() unless injecting collaborators for testing."""
         self.async_proxmox = async_proxmox
@@ -75,7 +72,6 @@ class InfraCommands(abc.ABC):
         self.sdn_commands = sdn_commands
         self.qemu_commands = qemu_commands
         self.built_in_vm = built_in_vm
-        self.firewall_commands = firewall_commands
         self.node = node
 
     @classmethod
@@ -127,7 +123,6 @@ class InfraCommands(abc.ABC):
             sdn_commands,
             storage_commands,
         )
-        firewall_commands = FirewallCommands(async_proxmox, task_wrapper, node)
         return cls(
             async_proxmox,
             node,
@@ -135,7 +130,6 @@ class InfraCommands(abc.ABC):
             sdn_commands,
             qemu_commands,
             built_in_vm,
-            firewall_commands,
         )
 
     async def create_sdn_and_vms(

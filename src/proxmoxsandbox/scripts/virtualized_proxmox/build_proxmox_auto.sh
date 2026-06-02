@@ -5,8 +5,9 @@
 # need a metal instance for this to work.
 #
 # NOTE: The on-first-boot.sh heredoc below shares setup logic (IPAM patch, SDN
-# config, storage config) with scripts/ec2/userdata.sh. If you change shared
-# logic here, update that file too and vice versa.
+# config, storage config, host-firewall isolation) with scripts/ec2/userdata.sh
+# and scripts/configure_host_isolation.sh. If you change shared logic here,
+# update those too and vice versa.
 #
 # What it does:
 # Using docker, builds a Proxmox auto-install ISO per https://pve.proxmox.com/wiki/Automated_Installation
@@ -239,6 +240,31 @@ EOFPATCH
 
 # modify version to indicate we patched
 sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
+
+# Host isolation: wall sandbox VMs off from the Proxmox host's own services.
+# Accept the management ports (8006, 22) only on the default-route interface
+# (where external API/SSH callers arrive); sandbox VMs sit on their own SDN
+# bridges and hit the default-deny policy. See
+# scripts/configure_host_isolation.sh for the standalone reference + rationale.
+# This runs once at template build (under slirp -> vmbr0) and persists into
+# every vend.sh clone. Keep in sync with scripts/ec2/userdata.sh and that
+# reference script.
+if [ "${INSPECT_PROXMOX_SKIP_HOST_ISOLATION:-}" != "1" ]; then
+  ISO_IFACE=$(ip -o route show default | awk '{print $5}' | head -1)
+  ISO_NODE=$(hostname)
+  ISO_C="inspect-proxmox-sandbox: host-isolation"
+  if [ -n "$ISO_IFACE" ]; then
+    pvesh create /nodes/$ISO_NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$ISO_IFACE" --enable 1 --comment "$ISO_C"
+    pvesh create /nodes/$ISO_NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$ISO_IFACE" --enable 1 --comment "$ISO_C"
+    pvesh create /nodes/$ISO_NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$ISO_C"
+    pvesh create /nodes/$ISO_NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1 --comment "$ISO_C"
+    pvesh create /nodes/$ISO_NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1 --comment "$ISO_C"
+    pvesh set /nodes/$ISO_NODE/firewall/options --enable 1
+    pvesh set /cluster/firewall/options --enable 1
+  else
+    echo "WARNING: no default route found; skipping host isolation" >&2
+  fi
+fi
 
 touch /var/local/inspect-proxmox-on-first-boot.done
 

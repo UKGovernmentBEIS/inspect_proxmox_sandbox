@@ -317,14 +317,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 )
                 InfraCommands.set_instance(target, infra_commands)
 
-            # Configure the Proxmox host firewall before bringing any VM up,
-            # so an interrupted sample never leaves the host unprotected.
-            # FirewallCommands caches the applied state per-process, so this
-            # is a no-op after the first sample on a given host.
-            await infra_commands.firewall_commands.ensure_host_isolation(
-                config.host_isolation
-            )
-
             # The pool guarantees one sample per instance at a time, so any
             # leftover provider-managed VNETs here are orphans from a previous
             # failed cleanup. User pre-existing VNETs are ignored by this check.
