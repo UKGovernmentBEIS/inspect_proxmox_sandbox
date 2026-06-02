@@ -1,16 +1,11 @@
-"""End-to-end check that a provisioned host actually isolates sandbox VMs.
+"""End-to-end check that the Proxmox host actually isolates sandbox VMs.
 
 Host firewall isolation is configured by the provisioning scripts (see the
-README's "Host firewall isolation" section), not by this library, so this
-property only holds on a host that was provisioned with it. The test is
-therefore skipped unless INSPECT_PROXMOX_EXPECT_ISOLATION=1 — set it when
-running against such a host (e.g. one built by the repo's provisioning
-scripts).
+README's "Host firewall isolation" section). Every supported way of standing
+up a test host applies it, so this runs unconditionally as part of the
+integration suite — if it fails, the host you're testing against wasn't
+provisioned correctly (e.g. a hand-rolled Proxmox missing the firewall config).
 """
-
-import os
-
-import pytest
 
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
@@ -18,11 +13,6 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
 )
 
 from .proxmox_sandbox_utils import setup_sandbox
-
-pytestmark = pytest.mark.skipif(
-    os.getenv("INSPECT_PROXMOX_EXPECT_ISOLATION") != "1",
-    reason="set INSPECT_PROXMOX_EXPECT_ISOLATION=1 to run against an isolated host",
-)
 
 
 async def test_sandbox_vm_cannot_reach_pveproxy_or_ssh() -> None:
