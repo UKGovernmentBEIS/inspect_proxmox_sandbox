@@ -44,6 +44,12 @@ AMI=$(aws ec2 describe-images \
     --output text)
 echo "  AMI: $AMI"
 
+# cloud-init transparently decompresses gzipped user-data; gzip keeps us well
+# under EC2's 16 KiB limit as userdata.sh grows.
+USERDATA_GZ="$(mktemp)"
+trap 'rm -f "$USERDATA_GZ"' EXIT
+gzip -c "$SCRIPT_DIR/userdata.sh" > "$USERDATA_GZ"
+
 INSTANCE_TAG_SPEC="ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}${LAUNCH_EXTRA_TAGS:+,$LAUNCH_EXTRA_TAGS}]"
 TAG_SPECS=("$INSTANCE_TAG_SPEC")
 if [[ -n "${LAUNCH_EXTRA_TAGS:-}" ]]; then
@@ -62,7 +68,7 @@ RUN_ARGS=(
     --security-group-ids "$SECURITY_GROUP_ID"
     --block-device-mappings
         "DeviceName=/dev/xvda,Ebs={VolumeSize=1024,VolumeType=gp3,DeleteOnTermination=true}"
-    --user-data "file://$SCRIPT_DIR/userdata.sh"
+    --user-data "fileb://$USERDATA_GZ"
     --tag-specifications "${TAG_SPECS[@]}"
     --query 'Instances[0].InstanceId'
     --output text
