@@ -184,28 +184,39 @@ class FirewallCommands(abc.ABC):
     async def _detect_management_interface(self) -> str:
         """The interface external API/SSH callers arrive on.
 
-        We use the single active physical interface (``eth`` / ``bond``).
-        Matching by the host's management IP is deliberately avoided: a
-        DHCP-configured NIC doesn't expose its address in the network config,
-        and address matching would otherwise happily return a *bridge* — the
-        one case where interface scoping fails open, since VMs attach to that
-        same bridge. Anything ambiguous raises.
+        Preferred signal: the interface carrying the host's default route.
+        That is where external traffic enters, and sandbox VMs (on SDN
+        bridges with no default route) never ingress there. This is correct
+        whether the management IP is on a raw NIC or on a bridge whose port
+        is a physical NIC (e.g. ``vmbr0`` over ``enp0s8``) — picking the
+        physical port in that case would be wrong, since the IP lives on the
+        bridge and that is the INPUT ingress interface.
+
+        A DHCP-configured management NIC doesn't expose a gateway in the
+        network config, so we fall back to the single active physical
+        interface. Anything ambiguous raises.
         """
         ifaces = await self.async_proxmox.request("GET", f"/nodes/{self.node}/network")
+        with_gateway = [i for i in ifaces if i.get("gateway")]
+        if len(with_gateway) == 1:
+            return str(with_gateway[0]["iface"])
+
         physical = [
             i
             for i in ifaces
             if i.get("type") in ("eth", "bond") and int(i.get("active", 0)) == 1
         ]
-        if len(physical) == 1:
+        if not with_gateway and len(physical) == 1:
             return str(physical[0]["iface"])
 
         names = sorted(str(i.get("iface", "?")) for i in ifaces)
         raise HostIsolationConfigError(
             "Could not determine the Proxmox management interface "
-            f"automatically: found {len(physical)} active physical interfaces "
-            f"among {names}. Set host_isolation.management_interface to the "
-            "interface external API/SSH traffic arrives on."
+            f"automatically (gateway interfaces: "
+            f"{[i.get('iface') for i in with_gateway]}; active physical: "
+            f"{[i.get('iface') for i in physical]}; all: {names}). Set "
+            "host_isolation.management_interface to the interface external "
+            "API/SSH traffic arrives on."
         )
 
     @staticmethod

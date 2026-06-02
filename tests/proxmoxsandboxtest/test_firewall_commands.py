@@ -87,6 +87,18 @@ def _ours(rules: list) -> list:
     return [r for r in rules if r.get("comment") == OURS_COMMENT]
 
 
+async def _management_ipset_or_empty(api: AsyncProxmoxAPI) -> list:
+    """GET the management ipset, returning [] when it doesn't exist yet.
+
+    On a pristine Proxmox the ``management`` ipset object isn't created
+    until something (us, or a user) adds an entry, so a bare GET 500s.
+    """
+    ipsets = await api.request("GET", "/cluster/firewall/ipset")
+    if not any(s.get("name") == "management" for s in ipsets):
+        return []
+    return await api.request("GET", "/cluster/firewall/ipset/management")
+
+
 async def test_ensure_host_isolation_from_clean_state(
     firewall_commands: FirewallCommands,
 ) -> None:
@@ -116,18 +128,31 @@ async def test_ensure_host_isolation_from_clean_state(
     assert not by_dport["53"].get("iface")
 
 
-async def test_detect_management_interface_returns_active_physical(
+async def test_detect_management_interface_matches_default_route(
     firewall_commands: FirewallCommands,
 ) -> None:
-    """Auto-detection returns an active physical interface on the node."""
+    """Auto-detection returns the default-route interface, else the lone NIC.
+
+    On a host where the management IP is on a bridge (e.g. vmbr0 over a
+    physical port) the bridge carries the gateway and is the right answer;
+    on a DHCP raw-NIC host no interface advertises a gateway and we fall
+    back to the single active physical interface.
+    """
     fw = firewall_commands
     iface = await fw._detect_management_interface()
 
     net = await fw.async_proxmox.request("GET", f"/nodes/{fw.node}/network")
     match = [i for i in net if i.get("iface") == iface]
     assert match, f"{iface} not in node network config"
-    assert match[0].get("type") in ("eth", "bond")
     assert int(match[0].get("active", 0)) == 1
+
+    with_gateway = [i for i in net if i.get("gateway")]
+    if with_gateway:
+        # When a gateway interface exists, detection must return it.
+        assert iface == with_gateway[0]["iface"]
+    else:
+        # Otherwise it must be the single active physical interface.
+        assert match[0].get("type") in ("eth", "bond")
 
 
 async def test_ensure_host_isolation_is_idempotent(
@@ -154,12 +179,12 @@ async def test_ensure_host_isolation_disabled_makes_no_changes(
     api = fw.async_proxmox
 
     rules_before = await api.request("GET", f"/nodes/{fw.node}/firewall/rules")
-    ipset_before = await api.request("GET", "/cluster/firewall/ipset/management")
+    ipset_before = await _management_ipset_or_empty(api)
 
     await fw.ensure_host_isolation(HostIsolation(enabled=False))
 
     rules_after = await api.request("GET", f"/nodes/{fw.node}/firewall/rules")
-    ipset_after = await api.request("GET", "/cluster/firewall/ipset/management")
+    ipset_after = await _management_ipset_or_empty(api)
 
     # Compare ignoring digest (which can change for unrelated reasons).
     def _strip(items):
