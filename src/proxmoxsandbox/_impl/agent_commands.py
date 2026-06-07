@@ -14,15 +14,23 @@ from proxmoxsandbox._impl.async_proxmox import (
     ProxmoxJsonDataType,
 )
 
-# On Windows, we found that the virtio-serial channel between QEMU and
-# the guest agent drops intermittently (~5-7% of calls).  The resulting
-# 500 errors surface with varied messages ("got timeout", "is not running",
-# "being used by another process", corrupt format strings, etc.) so we
-# simply retry on ANY 500 from a QGA endpoint.  A 500 typically indicates
-# the command was not delivered to the guest agent (channel timeout or
-# disconnect), so retrying is generally safe.
-_QGA_MAX_RETRIES = 3
-_QGA_RETRY_DELAY = 3  # seconds
+# Transient failures talking to the QEMU guest agent (QGA) fall into two
+# classes that are safe to retry:
+#   * httpx transport errors - the Proxmox API host was briefly unreachable,
+#     timed out, or dropped the connection mid-request (ConnectError,
+#     ConnectTimeout, ReadTimeout, ReadError, RemoteProtocolError, ...).
+#   * 5xx responses from QGA endpoints - 500 (the virtio-serial channel
+#     between QEMU and the guest agent drops intermittently, ~5-7% of calls
+#     on Windows, surfacing as "got timeout", "is not running", "being used
+#     by another process", etc.) and Proxmox's non-standard 596/597
+#     "Broken pipe" returned when streaming large file-reads back.
+# All indicate the request did not reach or complete at the guest, so a
+# bounded retry with exponential backoff generally recovers.
+# Exception: a 500 reporting a missing file is surfaced immediately - the
+# file will not appear, and read_file_or_blank turns it into empty content.
+_QGA_MAX_RETRIES = 5
+_QGA_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt, capped below
+_QGA_RETRY_MAX_DELAY = 20.0  # seconds
 
 
 class AgentCommands:
@@ -38,22 +46,36 @@ class AgentCommands:
         self.node = node
 
     @staticmethod
-    def _is_transient_qga_error(exc: httpx.HTTPStatusError) -> bool:
-        """Check if an HTTP error is a transient QGA failure safe to retry."""
-        return exc.response.status_code == 500
+    def _is_transient_qga_error(exc: Exception) -> bool:
+        """Whether an error talking to the QGA is worth retrying."""
+        if isinstance(exc, httpx.TransportError):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+            if status_code == 500 and (
+                "no such file" in str(exc).casefold()
+                or "failed to open file" in str(exc).casefold()
+            ):
+                return False
+            return status_code >= 500
+        return False
 
     async def _retry_on_qga_error(self, label: str, coro_fn):
-        """Retry a coroutine function on transient QGA errors."""
+        """Retry a coroutine function on transient QGA / transport errors."""
         for attempt in range(1, _QGA_MAX_RETRIES + 1):
             try:
                 return await coro_fn()
-            except httpx.HTTPStatusError as e:
+            except (httpx.HTTPStatusError, httpx.TransportError) as e:
                 if attempt < _QGA_MAX_RETRIES and self._is_transient_qga_error(e):
+                    delay = min(
+                        _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
+                        _QGA_RETRY_MAX_DELAY,
+                    )
                     self.logger.warning(
                         f"{label} failed (attempt {attempt}/{_QGA_MAX_RETRIES}), "
-                        f"retrying in {_QGA_RETRY_DELAY}s: {e}"
+                        f"retrying in {delay:.1f}s: {e}"
                     )
-                    await asyncio.sleep(_QGA_RETRY_DELAY)
+                    await asyncio.sleep(delay)
                 else:
                     raise
 
