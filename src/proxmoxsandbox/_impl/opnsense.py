@@ -106,9 +106,7 @@ exit 0
 
 # Path where the script is placed inside the OPNsense image.
 # OPNsense rc.syshook.d/early/ scripts run at boot before configd.
-OPNSENSE_CONFIG_IMPORT_PATH = (
-    "/usr/local/etc/rc.syshook.d/early/09-config-import"
-)
+OPNSENSE_CONFIG_IMPORT_PATH = "/usr/local/etc/rc.syshook.d/early/09-config-import"
 
 
 def generate_unbound_whitelist_conf(subnet: SubnetConfig) -> str:
@@ -134,6 +132,60 @@ def generate_unbound_whitelist_conf(subnet: SubnetConfig) -> str:
         domain = domain.rstrip(".")
         lines.append(f'    local-zone: "{domain}." transparent')
     return "\n".join(lines) + "\n"
+
+
+_RFC1918_ALIAS = """\
+<alias uuid="b2000002-0000-0000-0000-000000000002">
+  <enabled>1</enabled>
+  <name>rfc1918_internal</name>
+  <type>network</type>
+  <proto/>
+  <content>10.0.0.0/8
+172.16.0.0/12
+192.168.0.0/16</content>
+  <description>Internal RFC1918 ranges (intra-range routing)</description>
+</alias>"""
+
+_RFC1918_PASS_RULE = """\
+<rule uuid="a1000006-0000-0000-0000-000000000006">
+  <type>pass</type>
+  <interface>lan</interface>
+  <ipprotocol>inet</ipprotocol>
+  <source><network>lan</network></source>
+  <destination><address>rfc1918_internal</address></destination>
+  <descr>Allow internal RFC1918 (gated by per-VM Proxmox firewall)</descr>
+</rule>"""
+
+
+def _add_rfc1918_pass(root: ET.Element) -> None:
+    """Add an RFC1918 network alias and a pass rule for it before block-all.
+
+    Lets OPNsense route intra-range (private) traffic while keeping internet
+    egress whitelist-only. The interface rules are first-match (quick), so the
+    pass must sit ahead of the catch-all block.
+    """
+    aliases = root.find(".//OPNsense/Firewall/Alias/aliases")
+    if aliases is not None and aliases.find("alias[name='rfc1918_internal']") is None:
+        aliases.append(ET.fromstring(_RFC1918_ALIAS))
+
+    filter_el = root.find(".//filter")
+    if filter_el is None:
+        return
+    block_all = next(
+        (
+            r
+            for r in filter_el.findall("rule")
+            if r.findtext("type") == "block"
+            and r.findtext("interface") == "lan"
+            and r.find("destination/any") is not None
+        ),
+        None,
+    )
+    pass_rule = ET.fromstring(_RFC1918_PASS_RULE)
+    if block_all is not None:
+        filter_el.insert(list(filter_el).index(block_all), pass_rule)
+    else:
+        filter_el.append(pass_rule)
 
 
 def generate_config_xml(
@@ -203,6 +255,16 @@ def generate_config_xml(
         content = alias.find("content")
         if content is not None:
             content.text = "\n".join(subnet.domain_whitelist)
+
+    # When allow_internal is set, add a network alias for the RFC1918 ranges
+    # and a pass rule for it just before the catch-all block. Internal traffic
+    # is then permitted out of OPNsense and gated by the per-VM Proxmox
+    # firewall at the destination; only non-whitelisted *internet* egress is
+    # dropped. (DNS is unchanged: internal name resolution still goes through
+    # the whitelist/refuse, so internal pivoting is by IP — which is how the
+    # range firewalls are keyed anyway.)
+    if subnet.allow_internal:
+        _add_rfc1918_pass(root)
 
     # Randomize root password — defence-in-depth. Generate a random
     # plaintext password, hash it with bcrypt, and log the plaintext
@@ -461,9 +523,7 @@ class OpnsenseTemplateManager:
                 rr_name=rr_name,
             )
 
-        temp_file = tempfile.NamedTemporaryFile(
-            delete=False, suffix=".iso"
-        )
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".iso")
         iso.write_fp(cast(BinaryIO, temp_file))
         temp_file.close()
         return Path(temp_file.name)

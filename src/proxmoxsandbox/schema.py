@@ -58,6 +58,15 @@ class SubnetConfig(BaseModel, frozen=True):
         domain_whitelist: FQDNs permitted for egress. Only valid when
             vnet_type="opnsense". When set, only outbound connections
             to these domains are allowed; all other egress is dropped.
+        allow_internal: Only valid when vnet_type="opnsense". When True,
+            OPNsense passes traffic to RFC1918 private ranges
+            (10/8, 172.16/12, 192.168/16) in addition to the domain
+            whitelist, so VMs can still reach the rest of the range while
+            internet egress stays whitelist-only. Internal access control
+            is then left to the per-VM Proxmox firewall (which gates by
+            destination). Defaults to False, i.e. internal traffic is
+            dropped by the catch-all block — appropriate for a fully
+            isolated single-VNet sandbox, but it severs cross-VNet pivoting.
     """
 
     cidr: IPvAnyNetwork
@@ -66,6 +75,7 @@ class SubnetConfig(BaseModel, frozen=True):
     dhcp_ranges: Tuple[DhcpRange, ...]
     vnet_type: Literal["proxmox", "opnsense"] = "proxmox"
     domain_whitelist: Optional[Tuple[str, ...]] = None
+    allow_internal: bool = False
 
     @model_validator(mode="after")
     def _validate_vnet_type_constraints(self) -> "SubnetConfig":
@@ -78,6 +88,10 @@ class SubnetConfig(BaseModel, frozen=True):
             if self.domain_whitelist is not None:
                 raise ValueError(
                     "domain_whitelist is only supported with vnet_type='opnsense'"
+                )
+            if self.allow_internal:
+                raise ValueError(
+                    "allow_internal is only supported with vnet_type='opnsense'"
                 )
         elif self.vnet_type == "opnsense":
             if self.snat is not None:

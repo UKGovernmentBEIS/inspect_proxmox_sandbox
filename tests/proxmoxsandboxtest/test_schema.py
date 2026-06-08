@@ -156,3 +156,35 @@ def test_vnet_accepts_multiple_proxmox_subnets():
         ),
     )
     assert len(vnet.subnets) == 2
+
+
+def test_opnsense_subnet_allow_internal_defaults_false():
+    assert _opnsense_subnet().allow_internal is False
+
+
+def test_opnsense_subnet_accepts_allow_internal():
+    subnet = SubnetConfig(
+        cidr=ip_network("10.0.2.0/24"),
+        gateway=ip_address("10.0.2.1"),
+        dhcp_ranges=(
+            DhcpRange(start=ip_address("10.0.2.100"), end=ip_address("10.0.2.200")),
+        ),
+        vnet_type="opnsense",
+        domain_whitelist=("example.com",),
+        allow_internal=True,
+    )
+    assert subnet.allow_internal is True
+
+
+def test_proxmox_subnet_rejects_allow_internal():
+    with pytest.raises(ValidationError, match="allow_internal"):
+        SubnetConfig(
+            cidr=ip_network("10.0.3.0/24"),
+            gateway=ip_address("10.0.3.1"),
+            dhcp_ranges=(
+                DhcpRange(start=ip_address("10.0.3.100"), end=ip_address("10.0.3.200")),
+            ),
+            vnet_type="proxmox",
+            snat=True,
+            allow_internal=True,
+        )
