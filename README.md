@@ -7,16 +7,16 @@ running within one or more [Proxmox](https://www.proxmox.com/products/proxmox-vi
 
 ## Installing
 
-Add this using [Poetry](https://python-poetry.org/)
-
-```
-poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
-```
-
-or in [uv](https://github.com/astral-sh/uv),
+Add this using [uv](https://github.com/astral-sh/uv),
 
 ```
 uv add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
+```
+
+or with [Poetry](https://python-poetry.org/),
+
+```
+poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
 ```
 
 ## Requirements
@@ -32,7 +32,7 @@ pvesh set /storage/local -content iso,vztmpl,backup,snippets,images,rootdir,impo
 
 SDN requires you to configure dnsmasq, see the [Proxmox SDN documentation](https://pve.proxmox.com/pve-docs/chapter-pvesdn.html#pvesdn_install_dhcp_ipam). Note, the commands on that page must be run on the Proxmox node, not your local machine.
 
-For details on how to set up a local Proxmox instance for testing, see [CONTRIBUTING.md](CONTRIBUTING.md#local-proxmox)
+If you don't already have a Proxmox instance, see [CONTRIBUTING.md](CONTRIBUTING.md#setting-up-a-proxmox-instance-for-testing) for supported setup paths (local Ubuntu 24.04 host, or EC2 with nested virtualization).
 
 ### OPNsense gateway prerequisites (controller machine)
 
@@ -391,9 +391,17 @@ When using `PROXMOX_CONFIG_FILE`, cleanup runs against every instance in the con
 
 The project follows [semantic versioning](https://semver.org/) and is aiming for a 1.0 release. Until then, backward-compatibility is not guaranteed.
 
+## Large `write_file` fast path
+
+For Linux guests, `write_file` payloads larger than 128 KiB are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot, sidestepping the QEMU guest-agent's ~60 KiB per-call write cap. On any failure it falls back to the chunked-QGA path, so it can only speed writes up, never break them. Windows always uses chunked QGA.
+
+Two things worth knowing:
+
+- **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it — move that content to `sata0`–`sata4`, or disable the fast path.
+- **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. On failure it also disables itself for the affected VM and logs a `WARNING`; the warning site in the code lists what to check.
+
 ## Feature Roadmap
 
-- qcow disk image for Proxmox 9.0+
 - Proxmox server health and config check
 - Normalize having a pfSense VM as the default route for networking
 - Firewall off the SDN from the Proxmox server and from other SDNs

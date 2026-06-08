@@ -396,13 +396,10 @@ async def test_task_cleanup_after_interrupted_sample(
     # Resources should be gone
     post_vms = await qemu_commands.list_vms()
     post_zones = await sdn_commands.list_sdn_zones()
-    assert set(vm["vmid"] for vm in post_vms) == set(
-        vm["vmid"] for vm in existing_vms
-    )
+    assert set(vm["vmid"] for vm in post_vms) == set(vm["vmid"] for vm in existing_vms)
     existing_zones.sort(key=lambda x: x["zone"])
     post_zones.sort(key=lambda x: x["zone"])
     assert post_zones == existing_zones
-
 
 
 async def test_cli_cleanup(

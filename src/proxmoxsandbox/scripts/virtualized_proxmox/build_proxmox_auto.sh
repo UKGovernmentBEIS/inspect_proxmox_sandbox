@@ -4,6 +4,10 @@
 # Note for EC2 users: AWS does not support nested virtualization so you will
 # need a metal instance for this to work.
 #
+# NOTE: The on-first-boot.sh heredoc below shares setup logic (IPAM patch, SDN
+# config, storage config) with scripts/ec2/userdata.sh. If you change shared
+# logic here, update that file too and vice versa.
+#
 # What it does:
 # Using docker, builds a Proxmox auto-install ISO per https://pve.proxmox.com/wiki/Automated_Installation
 # Using virt-manager, installs a template Proxmox VM using that auto-install ISO.

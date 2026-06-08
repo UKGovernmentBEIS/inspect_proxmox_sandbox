@@ -1,5 +1,4 @@
 # tests/conftest.py
-import logging
 import os
 import random
 from typing import AsyncGenerator
@@ -8,8 +7,14 @@ import pytest
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
-from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
-from proxmoxsandbox._impl.qemu_commands import QemuCommands, VnetAliases
+from proxmoxsandbox._impl.infra_commands import (
+    InfraCommands,
+    ProxmoxTarget,
+)
+from proxmoxsandbox._impl.qemu_commands import (
+    QemuCommands,
+    VnetAliases,
+)
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
 from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
