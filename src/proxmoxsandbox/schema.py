@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
@@ -9,6 +10,16 @@ from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
 from pydantic import BaseModel, Field, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
+
+# RFC 1035 hostname; accepts trailing dot; rejects wildcards, IPs,
+# whitespace, newlines, ports, schemes. Requires at least one dot
+# (so bare TLDs like "com" are rejected) and a non-numeric TLD label
+# (rejecting "1.2.3.4").
+_FQDN_RE = re.compile(
+    r"^(?=.{1,253}\.?$)"
+    r"([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
+    r"[a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?$"
+)
 
 
 class DhcpRange(BaseModel, frozen=True):
@@ -34,14 +45,73 @@ class SubnetConfig(BaseModel, frozen=True):
     Attributes:
         cidr: The subnet in CIDR notation
         gateway: The gateway IP address for the subnet
-        snat: Whether source NAT is enabled for this subnet
+        snat: Whether source NAT is enabled for this subnet.
+            Required when vnet_type="proxmox", must be None when
+            vnet_type="opnsense".
         dhcp_ranges: DHCP ranges configured for this subnet
+        vnet_type: "proxmox" (default) uses Proxmox dnsmasq for
+            DHCP/gateway. "opnsense" deploys an OPNsense gateway VM
+            that provides DHCP, DNS, NAT, and domain-based egress
+            filtering. Named ``vnet_type`` rather than ``type`` to
+            avoid collision with the Inspect log viewer's content-type
+            discriminator field.
+        domain_whitelist: FQDNs permitted for egress. Only valid when
+            vnet_type="opnsense". When set, only outbound connections
+            to these domains are allowed; all other egress is dropped.
+        allow_internal: Only valid when vnet_type="opnsense". When True,
+            OPNsense passes traffic to RFC1918 private ranges
+            (10/8, 172.16/12, 192.168/16) in addition to the domain
+            whitelist, so VMs can still reach the rest of the range while
+            internet egress stays whitelist-only. Internal access control
+            is then left to the per-VM Proxmox firewall (which gates by
+            destination). Defaults to False, i.e. internal traffic is
+            dropped by the catch-all block — appropriate for a fully
+            isolated single-VNet sandbox, but it severs cross-VNet pivoting.
     """
 
     cidr: IPvAnyNetwork
     gateway: IPvAnyAddress
-    snat: bool
+    snat: Optional[bool] = None
     dhcp_ranges: Tuple[DhcpRange, ...]
+    vnet_type: Literal["proxmox", "opnsense"] = "proxmox"
+    domain_whitelist: Optional[Tuple[str, ...]] = None
+    allow_internal: bool = False
+
+    @model_validator(mode="after")
+    def _validate_vnet_type_constraints(self) -> "SubnetConfig":
+        if self.vnet_type == "proxmox":
+            if self.snat is None:
+                raise ValueError(
+                    "snat must be explicitly set for Proxmox-managed "
+                    "subnets (vnet_type='proxmox')"
+                )
+            if self.domain_whitelist is not None:
+                raise ValueError(
+                    "domain_whitelist is only supported with vnet_type='opnsense'"
+                )
+            if self.allow_internal:
+                raise ValueError(
+                    "allow_internal is only supported with vnet_type='opnsense'"
+                )
+        elif self.vnet_type == "opnsense":
+            if self.snat is not None:
+                raise ValueError(
+                    "snat must not be set for OPNsense-managed subnets "
+                    "— OPNsense handles NAT, not Proxmox"
+                )
+            if self.domain_whitelist is None:
+                raise ValueError(
+                    "domain_whitelist is required for OPNsense-managed "
+                    "subnets (vnet_type='opnsense')"
+                )
+            for entry in self.domain_whitelist:
+                if not _FQDN_RE.match(entry):
+                    raise ValueError(
+                        f"domain_whitelist entry {entry!r} is not a valid "
+                        f"FQDN. Wildcards (*.example.com), IPs, URLs, ports, "
+                        f"and whitespace are not supported."
+                    )
+        return self
 
 
 class VnetConfig(BaseModel, frozen=True):
@@ -60,6 +130,23 @@ class VnetConfig(BaseModel, frozen=True):
         Annotated[str, Field(pattern=r"[()-_.[a-z][A-Z][0-9]\s]{0,256}")]
     ] = None
     subnets: Tuple[SubnetConfig, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_subnet_types(self) -> "VnetConfig":
+        types = {s.vnet_type for s in self.subnets}
+        if len(types) > 1:
+            raise ValueError(
+                f"All subnets within a VnetConfig must share the same "
+                f"vnet_type; got mixed: {sorted(types)}. OPNsense and "
+                f"Proxmox-managed DHCP cannot coexist on the same bridge."
+            )
+        opnsense_count = sum(1 for s in self.subnets if s.vnet_type == "opnsense")
+        if opnsense_count > 1:
+            raise ValueError(
+                f"At most one OPNsense-managed subnet per VnetConfig "
+                f"is supported; got {opnsense_count}."
+            )
+        return self
 
 
 class SdnConfig(BaseModel, frozen=True):
@@ -87,18 +174,20 @@ class VmSourceConfig(BaseModel, frozen=True):
     Exactly one source type must be specified.
 
     Attributes:
-        existing_vm_template_tag: Clone VM from existing Proxmox template with this tag
-        ova: Create VM from this OVA file in the local (not Proxmox) filesystem.
-        built_in: Use this provider's built-in VM template (currently "ubuntu24.04"
-            is supported)
+        existing_vm_template_tag: Clone VM from existing Proxmox template
+            with this tag
+        ova: Create VM from this OVA file in the local (not Proxmox)
+            filesystem.
+        built_in: Use this provider's built-in VM template (currently
+            "ubuntu24.04" is supported)
     """
 
     existing_vm_template_tag: str | None = None
     ova: Path | None = None
-    # Ubuntu 24.04 is supported because an OVA is publicly available from a reliable
-    # source.
-    # From Proxmox 9.0 onwards, qcow2 and raw are also supported, allowing Debian 13,
-    # Kali, and others.
+    # Ubuntu 24.04 is supported because an OVA is publicly available from
+    # a reliable source.
+    # From Proxmox 9.0 onwards, qcow2 and raw are also supported, allowing
+    # Debian 13, Kali, and others.
     built_in: Literal["ubuntu24.04", "debian13", "kali2025.4"] | None = None
 
     @model_validator(mode="after")
@@ -116,7 +205,8 @@ class VmSourceConfig(BaseModel, frozen=True):
         if len(set_sources) != 1:
             raise ValueError(
                 "Exactly one source must be set. "
-                + f"Found {len(set_sources)}: {', '.join(set_sources) or 'none'}"
+                + f"Found {len(set_sources)}: "
+                + f"{', '.join(set_sources) or 'none'}"
             )
 
         return self

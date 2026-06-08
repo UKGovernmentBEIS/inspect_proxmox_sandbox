@@ -35,6 +35,7 @@ from proxmoxsandbox.schema import (
     OsType,
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
+    SdnConfig,
 )
 
 # Above this many raw stdin bytes, exec() writes stdin to a file and redirects
@@ -240,6 +241,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 built_in_names.add(vm_config.vm_source_config.built_in)
         for built_in_name in built_in_names:
             await infra_commands.built_in_vm.ensure_exists(built_in_name)
+
+        # Ensure OPNsense base template exists if any subnet uses OPNsense
+        has_opnsense = False
+        if isinstance(config.sdn_config, SdnConfig):
+            for vnet in config.sdn_config.vnet_configs:
+                for subnet in vnet.subnets:
+                    if subnet.vnet_type == "opnsense":
+                        has_opnsense = True
+                        break
+                if has_opnsense:
+                    break
+        if has_opnsense:
+            await infra_commands.opnsense_template_manager.ensure_template()
 
     @classmethod
     @override
