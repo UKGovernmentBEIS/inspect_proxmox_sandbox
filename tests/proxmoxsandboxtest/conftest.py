@@ -1,4 +1,5 @@
 # tests/conftest.py
+import logging
 import os
 import random
 from typing import AsyncGenerator
