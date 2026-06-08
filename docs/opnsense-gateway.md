@@ -182,11 +182,17 @@ The serial port appears as a UNIX socket at `/var/run/qemu-server/{vmid}.serial0
 Copy `src/proxmoxsandbox/scripts/experimental/opn_serial.py` onto the proxmox host and then:
 
 ```bash
-python3 opn_serial_5.py 100 "ifconfig vtnet0" "pfctl -sr"
+# Stock default password:
+python3 opn_serial.py 100 "ifconfig vtnet0" "pfctl -sr"
+
+# This provider randomizes the root password per VM (logged to the Inspect
+# eval log — see below), so pass it for provider-created gateways:
+python3 opn_serial.py --password <pw> 100 "pfctl -sr"
 ```
 
-This handles login (root/opnsense), menu navigation (option 8 = shell), and
-command execution.
+This handles login (menu navigation, option 8 = shell) and command execution.
+The password defaults to the stock `opnsense`; override with `--password` or
+`$OPNSENSE_ROOT_PASSWORD` for the randomized per-VM password.
 
 ### SSH (from LAN — blocked by default)
 
