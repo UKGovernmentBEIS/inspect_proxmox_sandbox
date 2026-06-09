@@ -43,6 +43,15 @@ from proxmoxsandbox.schema import (
 # for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
 _INLINE_STDIN_LIMIT = 30 * 1024
 
+# Grace added to the exec polling deadline on top of the caller's timeout.
+# The in-guest `timeout -k 5s {timeout}s` wrapper only SIGTERMs the command at
+# `timeout`; a command that doesn't exit at once on SIGTERM (e.g. `john` saves
+# its session first) lingers until the SIGKILL at `timeout`+5s. Polling for only
+# `timeout` then catches the command mid-shutdown and raised an opaque
+# RetryError (issue #76); the grace lets the poll outlast the SIGKILL so the
+# real exit (rc 124, or 137 if it had to be killed) is seen instead.
+_EXEC_POLL_GRACE_SECONDS = 10
+
 
 @sandboxenv(name="proxmox")
 class ProxmoxSandboxEnvironment(SandboxEnvironment):
@@ -656,7 +665,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(timeout)
+            stop=tenacity.stop_after_delay(timeout + _EXEC_POLL_GRACE_SECONDS)
             if timeout is not None
             else tenacity.stop_never,
             retry=tenacity.retry_if_result(lambda x: x is False),
@@ -743,7 +752,23 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             self.TRACE_NAME,
             f"exec_command {self.vm_id=} {exec_response_pid=}",
         ):
-            exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
+            try:
+                exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
+            except tenacity.RetryError as ex:
+                # wait_for_exec only raises RetryError when stop_after_delay
+                # fired while exec-status still reported the process running, so
+                # timeout is set. With the grace margin this should not normally
+                # happen — the in-guest timeout SIGKILLs by timeout+5s — so it
+                # means exec-status itself could not confirm completion within
+                # timeout+grace (a genuinely unresponsive guest agent). Surface a
+                # clear TimeoutError instead of the opaque RetryError (issue #76).
+                raise TimeoutError(
+                    f"Command did not complete within {timeout}s "
+                    f"(+{_EXEC_POLL_GRACE_SECONDS}s guest-agent grace) on VM "
+                    f"{self.vm_id}, pid {exec_response_pid}. The QEMU guest "
+                    f"agent did not report the process as finished. "
+                    f"Command: {shlex.join(cmd)[:200]}"
+                ) from ex
 
         if exec_status and isinstance(exec_status, Dict) and "err-data" in exec_status:
             # Something went wrong with the wrapper script, not the actual command
