@@ -19,6 +19,17 @@ from pydantic_core import from_json
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
 
+def _parse_truncated_file_read(raw: bytes) -> str:
+    r"""Extract data.content from a QGA file-read body cut off at the size limit.
+
+    The cut can land inside a JSON `\\uXXXX` escape, so we let pydantic_core's
+    'trailing-strings' mode drop the incomplete trailing token. Hand-closing the
+    string with a `"` instead produced things like `\\u00"` -> invalid escape (#77).
+    """
+    parsed = from_json(raw, allow_partial="trailing-strings")
+    return parsed.get("data", {}).get("content", "") or ""
+
+
 class ProxmoxVersionInfo(BaseModel):
     release: str
     repoid: str
@@ -220,15 +231,7 @@ class AsyncProxmoxAPI:
                     if max_size and total_size > max_size:
                         await response.aclose()
 
-                        truncated_json = from_json(
-                            b"".join(chunks) + b'"', allow_partial=True
-                        )
-                        truncated_content = truncated_json.get(
-                            "data", {"content": ""}
-                        ).get(
-                            "content",
-                            "",
-                        )
+                        truncated_content = _parse_truncated_file_read(b"".join(chunks))
                         raise OutputLimitExceededError(max_size_str, truncated_content)
 
                 # Combine chunks and parse JSON

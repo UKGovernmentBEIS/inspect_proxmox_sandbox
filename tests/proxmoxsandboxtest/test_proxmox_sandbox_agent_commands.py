@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List
 
 import pytest
+from inspect_ai.util import OutputLimitExceededError
 from inspect_ai.util._sandbox.self_check import self_check
 
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
@@ -10,25 +11,45 @@ from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironmen
 from .proxmox_sandbox_utils import setup_requests_logging
 
 
+@pytest.mark.parametrize("lead", ["", "a"], ids=["even-offset", "odd-offset"])
 async def test_exec_10mb_limit(
-    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment, lead: str
 ) -> None:
-    num_chars = (
-        pow(2, 20) * 10 - 1000
-    )  # 10 MiB - 1000, there are vagaries around the extra from JSON marshalling
-
+    # Output over MAX_EXEC_OUTPUT_SIZE (10 MiB) must truncate cleanly, even when
+    # the cut lands in the middle of a multi-byte sequence (issue #77). The old
+    # all-'a' version of this test never hit that: plain ASCII has no multi-byte
+    # sequences for the cut to split, so it always parsed cleanly.
+    #
+    # read_file streams the file-read response in 8192-byte chunks and stops once
+    # the total first exceeds 10 MiB, so the cut is at a fixed, even byte offset
+    # (1281*8192 = 10493952). Each 0xC3 output byte comes back as a 2-byte sequence
+    # on the wire (Proxmox re-encodes raw bytes via latin-1). Whether the cut splits
+    # one of those pairs depends on the parity of the offset at which they start,
+    # which we can't predict exactly (the JSON field order is non-deterministic).
+    # So we run two outputs differing by a single leading byte: their pairs sit on
+    # opposite parities, guaranteeing exactly one variant lands mid-sequence and
+    # reproduces the crash. Pre-fix that variant raised
+    # `ValueError: invalid unicode code point`; both must now truncate cleanly.
     if proxmox_sandbox_environment._is_windows():
-        exec_cmd = [
-            "powershell",
-            "-Command",
-            f"Write-Host -NoNewline ('a' * {num_chars})",
-        ]
-    else:
-        exec_cmd = ["perl", "-E", f"print 'a' x {num_chars}"]
+        pytest.skip("byte-level multi-byte boundary repro is Linux-only")
 
-    exec_result = await proxmox_sandbox_environment.exec(exec_cmd, timeout=120)
-    assert len(exec_result.stdout) == num_chars
-    assert exec_result.stdout == "a" * num_chars
+    high_bytes = pow(2, 20) * 12  # 12 MiB of 0xC3, comfortably over the 10 MiB limit
+    exec_cmd = [
+        "perl",
+        "-e",
+        f'binmode STDOUT; print "{lead}", "\\xc3" x {high_bytes}',
+    ]
+
+    with pytest.raises(OutputLimitExceededError) as exc_info:
+        await proxmox_sandbox_environment.exec(exec_cmd, timeout=120)
+
+    # Partial output is still recovered: the optional ASCII lead, then U+00C3 ('Ã'),
+    # with any split trailing byte dropped rather than crashing the parse.
+    truncated = exc_info.value.truncated_output
+    assert isinstance(truncated, str)
+    assert truncated.startswith(lead)
+    assert truncated[len(lead) :].strip("\xc3") == ""
+    assert len(truncated) > 1_000_000
 
 
 CURRENT_DIR = Path(__file__).parent
