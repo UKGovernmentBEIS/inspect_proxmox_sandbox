@@ -571,6 +571,13 @@ class QemuCommands(abc.ABC):
                 f"{self.image_storage}:0,efitype=4m,pre-enrolled-keys=0"
             )
             json_for_create["bios"] = "ovmf"
+        if vm_config.is_sandbox:
+            # Dedicated empty SATA CD-ROM for the iso_write fast path.
+            # Must be cold-added: Proxmox silently drops hot-attach of new
+            # sataN slots, so the slot has to exist at boot for QEMU to
+            # enumerate the AHCI controller. Then runtime media-change
+            # works to swap ISOs in/out.
+            json_for_create["sata5"] = "none,media=cdrom"
 
     async def ping_qemu_agent(self, vm_id: int):
         await self.async_proxmox.request(

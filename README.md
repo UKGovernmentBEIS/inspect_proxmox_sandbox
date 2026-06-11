@@ -379,6 +379,15 @@ When using `PROXMOX_CONFIG_FILE`, cleanup runs against every instance in the con
 
 The project follows [semantic versioning](https://semver.org/) and is aiming for a 1.0 release. Until then, backward-compatibility is not guaranteed.
 
+## Large `write_file` fast path
+
+For Linux guests, `write_file` payloads larger than 128 KiB are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot, sidestepping the QEMU guest-agent's ~60 KiB per-call write cap. On any failure it falls back to the chunked-QGA path, so it can only speed writes up, never break them. Windows always uses chunked QGA.
+
+Two things worth knowing:
+
+- **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it — move that content to `sata0`–`sata4`, or disable the fast path.
+- **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. On failure it also disables itself for the affected VM and logs a `WARNING`; the warning site in the code lists what to check.
+
 ## Feature Roadmap
 
 - Proxmox server health and config check

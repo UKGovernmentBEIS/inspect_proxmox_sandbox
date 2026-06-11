@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.0 - 2026-06-01
+
+- Faster large `write_file` on Linux via hot-plugged ISO (reserves `sata5` on sandbox VMs); falls back to the guest-agent path on failure
+- EC2 build scripts for running Proxmox on m8i instances via nested virtualization
+- Don't sweep pre-existing user SDN zones/VNets during cleanup
+- Fix: failed Proxmox tasks no longer polled until timeout; allow OVA VMs to omit `os_type` and set `cpu`
+
 ## 0.10.0 - 2026-04-08
 
 - Multi-instance pool-based allocation: run evals across multiple Proxmox servers

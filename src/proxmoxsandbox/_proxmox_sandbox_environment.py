@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import errno
 import re
@@ -25,6 +26,7 @@ from typing_extensions import override
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
+from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, IpamMapping
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
@@ -34,6 +36,12 @@ from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
 )
+
+# Above this many raw stdin bytes, exec() writes stdin to a file and redirects
+# from it instead of inlining base64 into the shell script — see exec() below.
+# Empirically ~34 KiB raw stdin saturates the script-write API limit (see exec
+# for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
+_INLINE_STDIN_LIMIT = 30 * 1024
 
 
 @sandboxenv(name="proxmox")
@@ -60,6 +68,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     pool_id: str | None
     # OS type for Windows support
     os_type: OsType | None
+    # Set to True after the ISO write_file fast path fails on this VM.
+    # Subsequent large writes go straight to chunked QGA instead of paying
+    # the ~3 s of ISO build+upload+attach before falling back.
+    _iso_fast_path_disabled: bool
+    # Serialises concurrent ISO writes to this VM: they share the single
+    # cold-added sata5 slot and would clobber each other's media-change.
+    _iso_write_lock: asyncio.Lock
 
     def __init__(
         self,
@@ -84,6 +99,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.instance = instance
         self.pool_id = pool_id
         self.os_type = os_type
+        self._iso_fast_path_disabled = False
+        self._iso_write_lock = asyncio.Lock()
 
     # originally from k8s sandbox
     def _pipe_user_input(self, stdin: str | bytes) -> str:
@@ -180,6 +197,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         env: dict[str, str],
         user: str | None,
         timeout: int | None,
+        stdin_file: str | None = None,
     ) -> str:
         def generate() -> Generator[str, None, None]:
             yield (
@@ -196,8 +214,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 yield f"export {shlex.quote(key)}={shlex.quote(value)}\n"
             if stdin is not None:
                 yield self._pipe_user_input(stdin)
+            cmd_line = f"{self._prefix_timeout(timeout)}{shlex.join(command)}"
+            if stdin_file is not None:
+                cmd_line += f" <{shlex.quote(stdin_file)}"
             yield (
-                f"{self._prefix_timeout(timeout)}{shlex.join(command)}"
+                cmd_line
                 + f" >{tmp_start}script.stdout"
                 + f" 2>{tmp_start}script.stderr\n"
                 + 'echo -n "$?" >'
@@ -673,14 +694,39 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 vm_id=self.vm_id, command=["cmd.exe", "/c", script_path]
             )
         else:
+            # Inlined stdin is base64-encoded into the script, which itself
+            # gets base64-encoded into the agent/file-write `content` field.
+            # That field is hard-capped at 61440 chars by PVE validation, so
+            # stdin > ~34 KiB raw fails (empirically: 32 KiB OK, 45 KiB → HTTP
+            # 400 "value may only be 61440 characters long"). At much larger
+            # sizes (>~380 KiB raw stdin) the request also exceeds the
+            # pveproxy POST cap (512 KiB on PVE 8.4+) and the connection is
+            # closed without an HTTP response, surfacing as httpx ReadError('')
+            # — that's the failure mode the 1 MiB self_check.test_exec_input_large
+            # hits. For larger inputs, write stdin to a separate file (chunked
+            # via self.write_file) and have the script redirect from it.
+            # See https://forum.proxmox.com/threads/166200 and
+            # https://forum.proxmox.com/threads/105556
+            stdin_for_script: str | bytes | None = input
+            stdin_file: str | None = None
+            if input is not None:
+                input_bytes = (
+                    input if isinstance(input, bytes) else input.encode("utf-8")
+                )
+                if len(input_bytes) > _INLINE_STDIN_LIMIT:
+                    stdin_file = f"{tmp_start}stdin"
+                    await self.write_file(stdin_file, input_bytes)
+                    stdin_for_script = None
+
             script = self._build_shell_script(
                 tmp_start=tmp_start,
                 command=cmd,
-                stdin=input,
+                stdin=stdin_for_script,
                 cwd=cwd,
                 env=env or {},
                 user=user,
                 timeout=timeout,
+                stdin_file=stdin_file,
             )
             await self._write_file_only(f"{tmp_start}script.sh", script)
             exec_post_response = await self.agent_commands.exec_command(
@@ -813,6 +859,15 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 raise ex
 
+    # Above this size, write_file uses the ISO fast path; below it, chunked
+    # QGA. Not a true crossover: benchmarking (live ubuntu24.04) found ISO
+    # wins down to ~8 KiB — it collapses to one in-guest exec, beating even
+    # QGA's separate mkdir+write round-trips. Set deliberately above the
+    # crossover so trivially-small writes stay on the simpler QGA path (no
+    # storage upload, smaller failure surface) and keep that fallback path
+    # exercised on the normal route. Linux only — Windows always chunks.
+    ISO_WRITE_THRESHOLD_BYTES = 128 * 1024
+
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
         # Writes contents to file, handling large files by splitting them into chunks
@@ -827,6 +882,56 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # version number to ensure backward compatibility.
 
         is_windows = self._is_windows()
+
+        # Linux large-file fast path: hot-plug ISO instead of chunked QGA.
+        # Skips the parent-mkdir round-trip below — the in-guest ISO script
+        # does its own `mkdir -p -- "$(dirname target)"`, so doing it here
+        # too is one whole env.exec() (~2s of QGA round-trips) wasted.
+        if (
+            not is_windows
+            and len(contents) >= self.ISO_WRITE_THRESHOLD_BYTES
+            and not self._iso_fast_path_disabled
+        ):
+            # Hold the per-VM lock for the whole attach/copy/detach: it's a
+            # single shared sata5 slot, so concurrent writes must serialise.
+            async with self._iso_write_lock:
+                # Re-check under the lock: a write we queued behind may have
+                # already tripped the failure and disabled the fast path,
+                # in which case fall straight through to chunked QGA.
+                if not self._iso_fast_path_disabled:
+                    try:
+                        content_bytes = (
+                            contents
+                            if isinstance(contents, bytes)
+                            else contents.encode("utf-8")
+                        )
+                        iso_writer = IsoWriter(
+                            async_proxmox=self.infra_commands.async_proxmox,
+                            agent_commands=self.agent_commands,
+                            storage_commands=self.qemu_commands.storage_commands,
+                            node=self.infra_commands.node,
+                        )
+                        await iso_writer.write_file(self.vm_id, file, content_bytes)
+                        return
+                    except Exception as ex:
+                        # Persistent failure (iso_write already retried the
+                        # first-call "Can't open blockdev" race internally via
+                        # detach + re-attach). Usual causes: the VM template
+                        # repurposed the sata5 slot; full `local` storage so
+                        # the ISO upload fails; or the guest kernel refusing
+                        # optical opens (dmesg shows AHCI / "Can't open
+                        # blockdev"). Disable for this VM's lifetime so we
+                        # don't re-pay ~3 s of ISO build+upload+attach on every
+                        # subsequent large write; fall through to chunked QGA.
+                        self._iso_fast_path_disabled = True
+                        self.logger.warning(
+                            "iso_write fast path disabled for VM %s (writing "
+                            "%s); using the chunked-QGA fallback for the rest "
+                            "of this VM's life. Underlying error: %s",
+                            self.vm_id,
+                            file,
+                            ex,
+                        )
 
         # Create parent directory
         if is_windows:
