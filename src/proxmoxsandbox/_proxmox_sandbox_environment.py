@@ -207,7 +207,32 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         user: str | None,
         timeout: int | None,
         stdin_file: str | None = None,
-    ) -> str:
+    ) -> tuple[str, str]:
+        """Build the wrapper script and the command file it runs.
+
+        Returns ``(wrapper, cmd_file)``. The agent's command goes into a
+        *separate* file (``{tmp_start}cmd``) that the wrapper runs as
+        ``sh {tmp_start}cmd`` — its contents never appear in any process's argv.
+        That keeps the wrapper / ``timeout`` scaffolding opaque to an in-command
+        ``pkill -f <pat>`` / ``pgrep -f <pat> | kill``: the agent can only match
+        its own processes, not ours. Previously the command text was spliced into
+        the ``timeout`` process's argv, so an agent killing "its own" process by
+        pattern would also kill the wrapper, corrupting the result or leaving the
+        provider unable to read a return code (issue #75).
+        """
+        stdin_prefix = self._pipe_user_input(stdin) if stdin is not None else ""
+        joined = shlex.join(command)
+        redirect = f" <{shlex.quote(stdin_file)}" if stdin_file is not None else ""
+        if stdin_prefix:
+            # A stdin pipe can't be exec'd, so this stays a child of sh {cmd};
+            # the wrapper's timeout then bounds the whole pipeline.
+            cmd_file = f"{stdin_prefix}{joined}{redirect}\n"
+        else:
+            # exec so that `sh {tmp_start}cmd` is *replaced* by the command: the
+            # wrapper's `timeout` keeps the command as its direct child, exactly
+            # as before this change, so timeout / SIGKILL behaviour is unchanged.
+            cmd_file = f"exec {joined}{redirect}\n"
+
         def generate() -> Generator[str, None, None]:
             if user is not None:
                 yield f"su -l {shlex.quote(user)} << 'EOF{tmp_start}EOF'\n"
@@ -223,18 +248,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             # one finishes, so whichever pid we end up polling reads a consistent
             # result and the command runs once. fd 9 (single digit) works in
             # dash, which is /bin/sh on the default image.
-            stdin_prefix = self._pipe_user_input(stdin) if stdin is not None else ""
-            cmd_line = f"{self._prefix_timeout(timeout)}{shlex.join(command)}"
-            if stdin_file is not None:
-                cmd_line += f" <{shlex.quote(stdin_file)}"
             yield f"exec 9>{tmp_start}script.lock\n"
             yield "if flock -n 9; then\n"
             yield (
                 f"  rm -f {tmp_start}script.stdout {tmp_start}script.stderr"
-                f" {tmp_start}script.returncode\n"
+                f" {tmp_start}script.returncode {tmp_start}script.started\n"
             )
+            # Sentinel written *before* the command runs. If script.returncode is
+            # later missing but this exists, the wrapper was killed mid-command
+            # (e.g. a broad `pkill -f sh` matched the wrapper itself) rather than
+            # the command never starting — exec() tells the agent so (issue #75).
+            yield f"  echo -n R > {tmp_start}script.started\n"
             yield (
-                f"  {stdin_prefix}{cmd_line}"
+                f"  {self._prefix_timeout(timeout)}sh {tmp_start}cmd"
                 f" >{tmp_start}script.stdout 2>{tmp_start}script.stderr\n"
                 f'  echo -n "$?" > {tmp_start}script.returncode\n'
                 "  sync\n"
@@ -245,7 +271,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             if user is not None:
                 yield f"EOF{tmp_start}EOF\n"
 
-        return "".join(generate())
+        return "".join(generate()), cmd_file
 
     @staticmethod
     async def ensure_vms(
@@ -735,7 +761,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     await self.write_file(stdin_file, input_bytes)
                     stdin_for_script = None
 
-            script = self._build_shell_script(
+            script, cmd_file = self._build_shell_script(
                 tmp_start=tmp_start,
                 command=cmd,
                 stdin=stdin_for_script,
@@ -745,6 +771,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 timeout=timeout,
                 stdin_file=stdin_file,
             )
+            # The wrapper runs `sh {tmp_start}cmd`, so the command file must
+            # exist before the wrapper is launched.
+            await self._write_file_only(f"{tmp_start}cmd", cmd_file)
             await self._write_file_only(f"{tmp_start}script.sh", script)
             exec_post_response = await self.agent_commands.exec_command(
                 vm_id=self.vm_id, command=["sh", f"{tmp_start}script.sh"]
@@ -808,9 +837,42 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 )
             )["content"]
             returncode = await self._read_return_code(tmp_start)
+            # A missing return code (None) means the wrapper recorded no exit
+            # code. If it had reached the command (script.started exists), it was
+            # killed mid-command — most often a broad in-command `pkill -f sh` /
+            # `pkill -f /tmp` that matched the wrapper itself (issue #75). Tell the
+            # agent plainly and let the run continue, rather than raising (which
+            # could abort the sample) or reporting a misleading timeout.
+            wrapper_killed = returncode is None and await self._wrapper_started(
+                tmp_start
+            )
+            if wrapper_killed:
+                # Internal diagnostic only (eval log, never shown to the agent):
+                # makes killed-wrapper events visible while a run is in progress.
+                self.logger.warning(
+                    f"exec on VM {self.vm_id} (pid {exec_response_pid}) recorded "
+                    "no return code but had started — treating as killed "
+                    "mid-command (an in-command pkill/kill likely matched the "
+                    "wrapper). See issue #75."
+                )
+                # Agent-facing message: deliberately free of any sandbox / infra
+                # detail — the agent only needs to know the outcome is uncertain.
+                killed_note = (
+                    "The command did not complete normally. It may or may not "
+                    "have executed before exiting; check the state of the system "
+                    "before proceeding."
+                )
+                stderr = f"{stderr}\n{killed_note}" if stderr else killed_note
+                effective_returncode = 137
+            elif returncode is None:
+                # No return code and the wrapper never marked itself started:
+                # treat as before — a non-start / timeout (raised as 124 below).
+                effective_returncode = 124
+            else:
+                effective_returncode = returncode
             exec_response = ExecResult(
-                success=returncode == 0,
-                returncode=returncode,
+                success=effective_returncode == 0,
+                returncode=effective_returncode,
                 stdout=stdout,
                 stderr=stderr,
             )
@@ -845,9 +907,16 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @tenacity.retry(
         wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
         stop=tenacity.stop_after_delay(2),
-        retry_error_callback=lambda retry_state: 124,
+        retry_error_callback=lambda retry_state: None,
     )
-    async def _read_return_code(self, tmp_start):
+    async def _read_return_code(self, tmp_start) -> int | None:
+        """Read the wrapper's recorded exit code.
+
+        Returns None if the return code file never materialised within the retry
+        budget — i.e. the wrapper recorded no exit code (it was killed before it
+        finished, or never started). exec() distinguishes the killed-mid-command
+        case from a genuine non-start via the script.started sentinel (issue #75).
+        """
         returncode_string = (
             await self.agent_commands.read_file_or_blank(
                 vm_id=self.vm_id,
@@ -859,6 +928,22 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if len(returncode_string_stripped) == 0:
             raise ValueError("Return code file is empty")
         return int(returncode_string_stripped)
+
+    async def _wrapper_started(self, tmp_start) -> bool:
+        """Whether the wrapper recorded reaching the command (issue #75).
+
+        The wrapper writes script.started just before running the command, so if
+        that exists but no return code was recorded, the wrapper was killed
+        mid-command rather than the command simply never starting.
+        """
+        content = (
+            await self.agent_commands.read_file_or_blank(
+                vm_id=self.vm_id,
+                filepath=f"{tmp_start}script.started",
+                max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
+            )
+        )["content"]
+        return len(content.strip()) > 0
 
     # Platform-specific "file not found" messages from the QEMU guest agent.
     _FILE_NOT_FOUND_ERRORS = [

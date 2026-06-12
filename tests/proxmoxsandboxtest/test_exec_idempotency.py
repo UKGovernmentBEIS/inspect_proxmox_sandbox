@@ -43,7 +43,7 @@ def _make_sandbox() -> ProxmoxSandboxEnvironment:
 def _write_script(tmp_path: Path, command_body: str) -> str:
     """Generate the wrapper for `sh -c <command_body>`; return the tmp_start."""
     tmp_start = f"{tmp_path}/e_"
-    script = _make_sandbox()._build_shell_script(
+    script, cmd_file = _make_sandbox()._build_shell_script(
         tmp_start=tmp_start,
         command=["sh", "-c", command_body],
         stdin=None,
@@ -52,6 +52,8 @@ def _write_script(tmp_path: Path, command_body: str) -> str:
         user=None,
         timeout=None,
     )
+    # The wrapper runs `sh {tmp_start}cmd`, so both files must be on disk.
+    Path(f"{tmp_start}cmd").write_text(cmd_file)
     Path(f"{tmp_start}script.sh").write_text(script)
     return tmp_start
 
