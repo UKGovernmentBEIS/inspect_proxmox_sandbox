@@ -3,12 +3,41 @@ from pathlib import Path
 from typing import List
 
 import pytest
+import tenacity
 from inspect_ai.util import OutputLimitExceededError
 from inspect_ai.util._sandbox.self_check import self_check
 
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
 from .proxmox_sandbox_utils import setup_requests_logging
+
+
+async def test_exec_timeout_with_sigterm_handler_no_retryerror(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    """A SIGTERM-handling command that outlives its timeout must not raise RetryError.
+
+    Issue #76: a command that handles SIGTERM and doesn't exit immediately
+    (like `john` saving its session) used to surface an opaque tenacity
+    RetryError when it ran past its timeout, because the poll deadline equalled
+    the in-guest timeout and so fired while the command was still in the
+    `timeout -k 5s` SIGKILL grace window. It must now surface as a clean
+    TimeoutError or a terminated returncode — never RetryError.
+    """
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("SIGTERM handling is Linux-only")
+
+    try:
+        result = await proxmox_sandbox_environment.exec(
+            ["sh", "-c", "trap 'sleep 30' TERM; while :; do :; done"],
+            timeout=5,
+        )
+        # Force-killed by the in-guest SIGKILL after the grace period.
+        assert result.returncode != 0
+    except TimeoutError:
+        pass  # also acceptable: surfaced as a clean timeout
+    except tenacity.RetryError as ex:
+        pytest.fail(f"exec leaked tenacity.RetryError (issue #76): {ex}")
 
 
 @pytest.mark.parametrize("lead", ["", "a"], ids=["even-offset", "odd-offset"])
