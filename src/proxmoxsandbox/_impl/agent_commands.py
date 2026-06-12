@@ -36,13 +36,7 @@ from proxmoxsandbox._impl.async_proxmox import (
 # Exception: a 500 for a missing file / gone PID is surfaced immediately (it
 # will not change on retry); callers turn those into empty content / a disk
 # fallback.
-# Budget sized to ride out more than a momentary blip: the Proxmox API can
-# report 500 "QEMU guest agent is not running" for a stretch of seconds while
-# qemu re-establishes its view of the agent channel. 5 retries (~30s) was
-# sometimes too few; 10 attempts with the backoff below is ~130s. The cost is
-# that a genuinely dead VM takes that long to fail a sample - an easy trade
-# for a long-running eval.
-_QGA_MAX_RETRIES = 10
+_QGA_MAX_RETRIES = 5
 _QGA_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt, capped below
 _QGA_RETRY_MAX_DELAY = 20.0  # seconds
 
