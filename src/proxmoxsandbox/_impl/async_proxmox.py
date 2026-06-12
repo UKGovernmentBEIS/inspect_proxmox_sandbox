@@ -18,6 +18,13 @@ from pydantic_core import from_json
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
+# A connect that hasn't completed in 15s won't; failing fast lets the QGA
+# retry loop take over (and a connect failure is the one case it's always safe
+# to retry, since the request provably never left us).
+_CONNECT_TIMEOUT = 15.0
+# Default read timeout for ordinary, retryable calls.
+_DEFAULT_READ_TIMEOUT = 60.0
+
 
 class ProxmoxVersionInfo(BaseModel):
     release: str
@@ -84,12 +91,15 @@ class AsyncProxmoxAPI:
         content_type: str | None = None,
         json: Optional[ProxmoxJsonDataType] = None,
         body_content: Optional[str | bytes] = None,
+        read_timeout: float = _DEFAULT_READ_TIMEOUT,
     ):
         if json is not None:
             content_type = "application/json"
         async with httpx.AsyncClient(
             verify=self.verify_tls,
-            timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
+            timeout=httpx.Timeout(
+                connect=_CONNECT_TIMEOUT, read=read_timeout, write=60, pool=60
+            ),
         ) as client:
             # Get a fresh ticket if we don't have one or it's approaching expiry
             if not self.ticket or self._ticket_near_expiry():
