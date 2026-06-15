@@ -19,6 +19,21 @@ from pydantic_core import from_json
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
 
+def _human_readable_size(size_bytes: int) -> str:
+    """Convert bytes to a human-readable string like '16 MiB'.
+
+    Copied from inspect_ai.util._sandbox.limits, which keeps it private.
+    """
+    if size_bytes >= 1024**3 and size_bytes % 1024**3 == 0:
+        return f"{size_bytes // 1024**3} GiB"
+    elif size_bytes >= 1024**2 and size_bytes % 1024**2 == 0:
+        return f"{size_bytes // 1024**2} MiB"
+    elif size_bytes >= 1024 and size_bytes % 1024 == 0:
+        return f"{size_bytes // 1024} KiB"
+    else:
+        return f"{size_bytes} bytes"
+
+
 class ProxmoxVersionInfo(BaseModel):
     release: str
     repoid: str
@@ -164,9 +179,7 @@ class AsyncProxmoxAPI:
     async def _ping_qemu_agent(self, node: str, vm_id: int):
         await self.request("POST", f"/nodes/{node}/qemu/{vm_id}/agent/ping")
 
-    async def read_file(
-        self, node: str, vm_id: int, filepath: str, max_size: int, max_size_str: str
-    ):
+    async def read_file(self, node: str, vm_id: int, filepath: str, max_size: int):
         """Read a file from the VM using QEMU agent with optional size limit.
 
         Args:
@@ -175,7 +188,6 @@ class AsyncProxmoxAPI:
             filepath (str): Path to the file to read
             max_size (int, optional): Maximum number of bytes to read.
                 None means no limit.
-            max_size_str (str): Human-readable string of the max_size
 
         Returns:
             dict: The file contents and metadata
@@ -207,7 +219,9 @@ class AsyncProxmoxAPI:
                 if content_length and max_size:
                     if int(content_length) > max_size:
                         await response.aclose()
-                        raise OutputLimitExceededError(max_size_str, None)
+                        raise OutputLimitExceededError(
+                            _human_readable_size(max_size), None
+                        )
 
                 # Read the response in chunks
                 chunks = []
@@ -229,7 +243,9 @@ class AsyncProxmoxAPI:
                             "content",
                             "",
                         )
-                        raise OutputLimitExceededError(max_size_str, truncated_content)
+                        raise OutputLimitExceededError(
+                            _human_readable_size(max_size), truncated_content
+                        )
 
                 # Combine chunks and parse JSON
                 full_response = b"".join(chunks)

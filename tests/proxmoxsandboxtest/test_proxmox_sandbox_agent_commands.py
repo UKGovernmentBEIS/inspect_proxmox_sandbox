@@ -92,6 +92,13 @@ async def test_self_check(
         "test_read_file_not_allowed",  # user is root, so this doesn't work
         "test_write_text_file_without_permissions",  # ditto
         "test_write_binary_file_without_permissions",  # ditto
+        "test_read_and_write_large_file_binary",  # 16MB limit; this tries 28MB
+        # Upstream self_check asserts the error says "100 MiB" even though it
+        # lowers the enforced limit to 1 KiB; we (correctly) report the limit we
+        # actually enforce. Remove once the inspect_ai fix lands:
+        # https://github.com/UKGovernmentBEIS/inspect_ai/pull/4257
+        # It will still probably be broken
+        "test_read_file_limit",
     ]
 
     return await check_results_of_self_check(

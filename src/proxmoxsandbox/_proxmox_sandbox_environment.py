@@ -11,7 +11,6 @@ from typing import Any, Dict, Generator, List, Tuple, Type, Union
 import tenacity
 from inspect_ai.util import (
     ExecResult,
-    OutputLimitExceededError,
     SandboxConnection,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
@@ -42,6 +41,11 @@ from proxmoxsandbox.schema import (
 # Empirically ~34 KiB raw stdin saturates the script-write API limit (see exec
 # for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
 _INLINE_STDIN_LIMIT = 30 * 1024
+
+# Proxmox's QEMU-agent file-read API caps a single read at 16 MiB, regardless of
+# Inspect's (larger) MAX_READ_FILE_SIZE. See:
+# https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vm_id}/agent/file-read
+_PROXMOX_MAX_READ_FILE_SIZE = 16 * 1024**2
 
 
 @sandboxenv(name="proxmox")
@@ -1038,13 +1042,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         """
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
-        # Note, per https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vm_id}/agent/file-read
-        # read from proxmox API is limited to 16777216 bytes
         try:
             read_get_response = await self.agent_commands.read_file(
                 vm_id=self.vm_id,
                 filepath=file,
-                max_size=min(SandboxEnvironmentLimits.MAX_READ_FILE_SIZE, 16777216),
+                max_size=min(
+                    SandboxEnvironmentLimits.MAX_READ_FILE_SIZE,
+                    _PROXMOX_MAX_READ_FILE_SIZE,
+                ),
             )
         except Exception as ex:
             if "Agent error" in str(ex):
@@ -1060,12 +1065,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     raise ex
             else:
                 raise ex
-        if (
-            getattr(read_get_response, "truncated", False)
-            or len(read_get_response["content"])
-            >= SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
-        ):
-            raise OutputLimitExceededError("Output size exceeds 16 MiB limit.", file)
         mangled_response = read_get_response["content"]
         bytes_data = mangled_response.encode("iso-8859-1")
         if text:

@@ -190,18 +190,9 @@ class AgentCommands:
         filepath: str,
         max_size: int = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE,
     ):
-        # this is a hack; it would be better to use a type here with
-        # e.g. size_bytes and friendly_name
-        max_size_str = (
-            SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR
-            if max_size == SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
-            else SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR
-        )
         return await self._retry_on_qga_error(
             f"read_file vm={vm_id} {filepath}",
-            lambda: self.async_proxmox.read_file(
-                self.node, vm_id, filepath, max_size, max_size_str
-            ),
+            lambda: self.async_proxmox.read_file(self.node, vm_id, filepath, max_size),
         )
 
     async def create_snapshot(self, vm_id: int, snapshot_name: str) -> None:
