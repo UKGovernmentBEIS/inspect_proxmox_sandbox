@@ -153,7 +153,7 @@ class AgentCommands:
         Every element of `command` MUST be ASCII. A single non-ASCII byte in
         the QMP guest-exec arguments breaks Proxmox's agent bridge: the call
         times out and the next one reports "QEMU guest agent is not running"
-        (upstream Bugzilla #6609, still open).
+        (upstream bug report: https://bugzilla.proxmox.com/show_bug.cgi?id=6609 ).
         """
         with trace_action(
             self.logger, self.TRACE_NAME, f"exec_command {vm_id=} {command=}"
