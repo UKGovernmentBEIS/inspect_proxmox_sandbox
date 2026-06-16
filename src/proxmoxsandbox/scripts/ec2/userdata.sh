@@ -239,26 +239,36 @@ pvesm set local --content images,rootdir,vztmpl,backup,iso,snippets,import
 # --- AMI boot-time fixup services ---
 # When an AMI is launched with a new IP, EC2 changes the hostname to ip-x-x-x-x,
 # breaking Proxmox node identity, SSL certs, and pveproxy. These services fix
-# that on every boot. The password fixup additionally detects fresh launches
-# (by EC2 instance-id) and regenerates the root password so credentials don't
-# leak across instances launched from the same AMI.
-NODE_NAME="proxmox"
+# that on every boot: the hostname fixup pins the node name to the cloud-init
+# hostname (the instance Name the launcher set via cloud-config), the cert fixup
+# regenerates the node SSL cert for it, and the password fixup detects fresh
+# launches (by EC2 instance-id) and regenerates the root password so credentials
+# don't leak across instances launched from the same AMI.
 
 cat > /usr/local/bin/proxmox-ami-fixup-hostname.sh << 'FIXUP_HOSTNAME'
 #!/bin/bash
+# The PVE node name follows the OS hostname. If the launcher set a hostname via
+# cloud-config -- e.g. a compute-management layer that injects
+# hostname:<instance-name> (with preserve_hostname=false) -- cloud-init applies it and
+# the node takes that name. On a plain EC2 launch with no such config, cloud-init uses
+# the private-DNS default (ip-x-x-x); keep the stable "proxmox" node name in that case
+# rather than naming the node after an ephemeral address. Ordered After=cloud-init.service
+# so the hostname is settled before we read it.
 set -euo pipefail
+NODE=$(hostname)
+case "$NODE" in ip-*|"") NODE=proxmox ;; esac
+hostnamectl set-hostname "$NODE"
 PRIVATE_IP=$(hostname -I | awk '{print $1}')
-hostnamectl set-hostname proxmox
-sed -i "/proxmox/d" /etc/hosts
-echo "$PRIVATE_IP proxmox.localdomain proxmox" >> /etc/hosts
+sed -i "/$NODE/d" /etc/hosts
+echo "$PRIVATE_IP $NODE.localdomain $NODE" >> /etc/hosts
 FIXUP_HOSTNAME
 chmod +x /usr/local/bin/proxmox-ami-fixup-hostname.sh
 
 cat > /etc/systemd/system/proxmox-ami-fixup-hostname.service << 'FIXUP_HOSTNAME_UNIT'
 [Unit]
-Description=Fix hostname and /etc/hosts for AMI-launched Proxmox
+Description=Pin Proxmox node name to the cloud-init hostname (AMI-launched)
 Before=pve-cluster.service
-After=network-online.target
+After=network-online.target cloud-init.service
 Wants=network-online.target
 
 [Service]
@@ -274,6 +284,13 @@ cat > /usr/local/bin/proxmox-ami-fixup-certs.sh << 'FIXUP_CERTS'
 #!/bin/bash
 set -euo pipefail
 pvecm updatecerts --force
+# Drop the orphan build-time "proxmox" node dir once the node has a different name
+# (first boot has no VMs; bail out if it somehow holds VM configs).
+NODE=$(hostname)
+if [ "$NODE" != proxmox ] && [ -d /etc/pve/nodes/proxmox ] \
+    && [ -z "$(ls -A /etc/pve/nodes/proxmox/qemu-server 2>/dev/null)" ]; then
+    rm -rf /etc/pve/nodes/proxmox
+fi
 FIXUP_CERTS
 chmod +x /usr/local/bin/proxmox-ami-fixup-certs.sh
 
