@@ -28,8 +28,6 @@ curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
 CALL_EC2_HYPERVISOR
 chmod 755 /usr/local/bin/call-ec2-hypervisor
 
-# --- SSM agent (needed for out-of-band access before Proxmox is up) ---
-# Pull from the in-region bucket so the build doesn't pay cross-region S3 egress.
 REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
 wget -q "https://s3.${REGION}.amazonaws.com/amazon-ssm-${REGION}/latest/debian_amd64/amazon-ssm-agent.deb" \
     -O /tmp/amazon-ssm-agent.deb
@@ -62,7 +60,6 @@ wget -q https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg
 echo "136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45  /usr/share/keyrings/proxmox-archive-keyring.gpg" \
     | sha256sum -c
 
-# --- Proxmox apt source ---
 cat > /etc/apt/sources.list.d/pve-install-repo.sources << 'EOF'
 Types: deb
 URIs: http://download.proxmox.com/debian/pve
@@ -71,7 +68,6 @@ Components: pve-no-subscription
 Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
 EOF
 
-# --- Update and full-upgrade ---
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y
 
@@ -247,12 +243,7 @@ pvesm set local --content images,rootdir,vztmpl,backup,iso,snippets,import
 
 cat > /usr/local/bin/proxmox-ami-fixup-hostname.sh << 'FIXUP_HOSTNAME'
 #!/bin/bash
-# The PVE node name follows the OS hostname. If the launcher set a hostname via
-# cloud-config -- e.g. a compute-management layer that injects
-# hostname:<instance-name> (with preserve_hostname=false) -- cloud-init applies it and
-# the node takes that name. On a plain EC2 launch with no such config, cloud-init uses
-# the private-DNS default (ip-x-x-x); keep the stable "proxmox" node name in that case
-# rather than naming the node after an ephemeral address. Ordered After=cloud-init.service
+# ordered After=cloud-init.service
 # so the hostname is settled before we read it.
 set -euo pipefail
 NODE=$(hostname)
@@ -309,11 +300,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_CERTS_UNIT
 
-# Regenerate root password whenever the EC2 instance-id changes (i.e. on the
-# build instance's first boot, and on every fresh launch from an AMI). Without
-# this, every instance launched from a given AMI shares the password set during
-# the build run, which leaks across launches as soon as one of the saved
-# passwords is exposed.
+# Regenerate root password whenever the EC2 instance-id changes 
 cat > /usr/local/bin/proxmox-ami-fixup-password.sh << 'FIXUP_PASSWORD'
 #!/bin/bash
 set -euo pipefail
