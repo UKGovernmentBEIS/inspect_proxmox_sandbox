@@ -99,6 +99,23 @@ async def test_self_check(
     )
 
 
+async def test_exec_self_kill_degrades_gracefully(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    # GH #75: a command that kills processes by name can match and kill its own
+    # wrapper shell. exec() must report a failed result rather than raise, and the
+    # sandbox must survive for subsequent execs.
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("signal kill is POSIX-only")
+
+    result = await proxmox_sandbox_environment.exec(["sh", "-c", "pkill -f script.sh"])
+    assert result.success is False
+    assert result.returncode in (143, 137)  # 128+SIGTERM / 128+SIGKILL
+
+    after = await proxmox_sandbox_environment.exec(["echo", "alive"])
+    assert after.success and after.stdout.strip() == "alive"
+
+
 async def check_results_of_self_check(sandbox_env, known_failures=[]):
     self_check_results = await self_check(sandbox_env)
     failures = []
