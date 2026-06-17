@@ -44,6 +44,10 @@ from proxmoxsandbox.schema import (
 _INLINE_STDIN_LIMIT = 30 * 1024
 
 
+class ReturnCodeNotWritten(Exception):
+    """The exec wrapper exited without writing its returncode file."""
+
+
 @sandboxenv(name="proxmox")
 class ProxmoxSandboxEnvironment(SandboxEnvironment):
     """An Inspect sandbox environment for Proxmox virtual machines."""
@@ -782,8 +786,15 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
                 )
             )["content"]
-            returncode = await self._read_return_code(tmp_start)
-            if returncode is None:
+            try:
+                returncode = await self._read_return_code(tmp_start)
+                exec_response = ExecResult(
+                    success=returncode == 0,
+                    returncode=returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            except ReturnCodeNotWritten:
                 # exec exited but the wrapper never wrote its returncode file: it was
                 # killed before completion.
                 signal_num = (
@@ -805,13 +816,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     returncode=returncode,
                     stdout=stdout,
                     stderr=f"{stderr}\n{killed_note}" if stderr else killed_note,
-                )
-            else:
-                exec_response = ExecResult(
-                    success=returncode == 0,
-                    returncode=returncode,
-                    stdout=stdout,
-                    stderr=stderr,
                 )
 
         # cleanup - we don't need to wait for the result of this
@@ -844,9 +848,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @tenacity.retry(
         wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
         stop=tenacity.stop_after_delay(2),
-        retry_error_callback=lambda retry_state: None,
+        reraise=True,
     )
-    async def _read_return_code(self, tmp_start) -> int | None:
+    async def _read_return_code(self, tmp_start) -> int:
         returncode_string = (
             await self.agent_commands.read_file_or_blank(
                 vm_id=self.vm_id,
@@ -856,7 +860,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         )["content"]
         returncode_string_stripped = returncode_string.strip()
         if len(returncode_string_stripped) == 0:
-            raise ValueError("Return code file is empty")
+            raise ReturnCodeNotWritten()
         return int(returncode_string_stripped)
 
     # Platform-specific "file not found" messages from the QEMU guest agent.
