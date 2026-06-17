@@ -43,13 +43,8 @@ from proxmoxsandbox.schema import (
 # for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
 _INLINE_STDIN_LIMIT = 30 * 1024
 
-# Grace added to the exec polling deadline on top of the caller's timeout.
-# The in-guest `timeout -k 5s {timeout}s` wrapper only SIGTERMs the command at
-# `timeout`; a command that doesn't exit at once on SIGTERM (e.g. `john` saves
-# its session first) lingers until the SIGKILL at `timeout`+5s. Polling for only
-# `timeout` then catches the command mid-shutdown and raised an opaque
-# RetryError (issue #76); the grace lets the poll outlast the SIGKILL so the
-# real exit (rc 124, or 137 if it had to be killed) is seen instead.
+# Poll past the in-guest `timeout -k 5s` SIGKILL (at timeout+5s) so we observe
+# the real exit instead of catching the command mid-shutdown.
 _EXEC_POLL_GRACE_SECONDS = 10
 
 
@@ -763,13 +758,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             try:
                 exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
             except tenacity.RetryError as ex:
-                # wait_for_exec only raises RetryError when stop_after_delay
-                # fired while exec-status still reported the process running, so
-                # timeout is set. With the grace margin this should not normally
-                # happen — the in-guest timeout SIGKILLs by timeout+5s — so it
-                # means exec-status itself could not confirm completion within
-                # timeout+grace (a genuinely unresponsive guest agent). Surface a
-                # clear TimeoutError instead of the opaque RetryError (issue #76).
+                # Grace margin should prevent this; reaching here means the guest
+                # agent never confirmed completion within timeout+grace. Surface
+                # it clearly, not as RetryError.
                 raise TimeoutError(
                     f"Command did not complete within {timeout}s "
                     f"(+{_EXEC_POLL_GRACE_SECONDS}s guest-agent grace) on VM "
