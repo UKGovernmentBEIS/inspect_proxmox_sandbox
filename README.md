@@ -34,6 +34,36 @@ SDN requires you to configure dnsmasq, see the [Proxmox SDN documentation](https
 
 If you don't already have a Proxmox instance, see [CONTRIBUTING.md](CONTRIBUTING.md#setting-up-a-proxmox-instance-for-testing) for supported setup paths (local Ubuntu 24.04 host, or EC2 with nested virtualization).
 
+### Host firewall isolation
+
+By default a sandbox VM can reach the Proxmox host's own services — the API
+(`pveproxy`, port 8006), SSH, etc. — via the SDN gateway, the `vmbr0` IP, or the
+host's external NIC. For cyber evals especially, you want those blocked so agents
+can't attack the Proxmox control plane.
+
+This is **configured on the host at provisioning time, not by this library** — it
+needs the host's live routing table to know which interface external API/SSH
+traffic arrives on, which only the host itself can tell you reliably. The
+provisioning scripts in this repo (`scripts/virtualized_proxmox/build_proxmox_auto.sh`
+and `scripts/ec2/userdata.sh`) set it up automatically, so hosts you create with
+them are isolated out of the box.
+
+If you provision Proxmox some other way, run these once **on the node**. They
+accept the management ports only on the default-route interface (where external
+callers arrive) and leave SDN DNS/DHCP open; sandbox VMs sit on other bridges and
+hit the default-deny policy:
+
+```bash
+NIC=$(ip route show default | awk '{print $5}' | head -1)
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1
+pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1
+pvesh set /nodes/$(hostname)/firewall/options --enable 1
+pvesh set /cluster/firewall/options --enable 1
+```
+
 ### Single Proxmox Instance
 
 Set the following environment variables (e.g. in a [`.env`](https://dotenvx.com/docs/env-file) file):

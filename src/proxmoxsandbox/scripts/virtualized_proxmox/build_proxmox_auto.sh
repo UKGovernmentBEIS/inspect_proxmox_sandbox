@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # Monolithic script to install a virtualized proxmox instance.
 # It's all in one file so that you can run it in e.g. cloud-init.
-# Note for EC2 users: AWS does not support nested virtualization so you will
-# need a metal instance for this to work.
+# Note for EC2 users: this is deprecated in favour of the ec2 method.
 #
-# NOTE: The on-first-boot.sh heredoc below shares setup logic (IPAM patch, SDN
-# config, storage config) with scripts/ec2/userdata.sh. If you change shared
-# logic here, update that file too and vice versa.
+# NOTE: The on-first-boot.sh heredoc below shares setup logic with scripts/ec2/userdata.sh.
+# If you change shared logic here, update that file too and vice versa.
 #
 # What it does:
 # Using docker, builds a Proxmox auto-install ISO per https://pve.proxmox.com/wiki/Automated_Installation
@@ -16,8 +14,6 @@
 # ./vend.sh 1
 # The clones will be accessible on the host at ports 11001, 11002, etc.
 # Each clone will have a different root password, which is printed out by vend.sh.
-
-# TODO: rewrite this in Python so the individual functions can be reused elsewhere
 
 set -eu
 
@@ -187,7 +183,7 @@ rm -f /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 # install dnsmasq for SDN, and xterm so we can use the resize command in terminal windows
 apt update
 apt upgrade -y
-apt install -y dnsmasq xterm patch
+apt install -y dnsmasq xterm patch jq
 systemctl disable --now dnsmasq
 
 # Fix IPAM bug, see https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/
@@ -239,6 +235,25 @@ EOFPATCH
 
 # modify version to indicate we patched
 sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
+
+# Host isolation - see README
+# Delete our own rules (matched by comment) then recreate, so the rule set
+# converges regardless of prior state.
+# NOTE: keep these rules in sync with the fixup-firewall service in
+# scripts/ec2/userdata.sh.
+NIC=$(ip route show default | awk '{print $5}' | head -1)
+[ -z "$NIC" ] && { echo "ERROR: no default route; cannot isolate host" >&2; exit 1; }
+C="inspect-proxmox-sandbox: host-isolation"
+pvesh get /nodes/proxmox/firewall/rules --output-format json \
+    | jq -r --arg c "$C" 'map(select(.comment == $c)) | sort_by(.pos) | reverse | .[].pos' \
+    | while read -r pos; do pvesh delete /nodes/proxmox/firewall/rules/"$pos"; done
+pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1 --comment "$C"
+pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1 --comment "$C"
+pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$C"
+pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1 --comment "$C"
+pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1 --comment "$C"
+pvesh set /nodes/proxmox/firewall/options --enable 1
+pvesh set /cluster/firewall/options --enable 1
 
 touch /var/local/inspect-proxmox-on-first-boot.done
 
