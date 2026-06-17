@@ -784,14 +784,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )["content"]
             returncode = await self._read_return_code(tmp_start)
             if returncode is None:
-                # exited==1 but the wrapper never wrote its returncode file: it was
-                # killed before completion. This happens when the command kills
-                # processes by name (e.g. `pkill -f script.sh`) and matches the
-                # wrapper's own command line (`pkill -f` spares its own PID but not its
-                # parent). Recover gracefully rather than misreporting a timeout (the
-                # old 124 sentinel did exactly that). Use the signal if exec-status
-                # still carries it; the PID-gone fallback strips it, in which case we
-                # assume a SIGKILL-class kill (137).
+                # exec exited but the wrapper never wrote its returncode file: it was
+                # killed before completion.
                 signal_num = (
                     exec_status.get("signal") if isinstance(exec_status, Dict) else None
                 )
@@ -850,11 +844,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @tenacity.retry(
         wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
         stop=tenacity.stop_after_delay(2),
-        # Returns None if the file never becomes readable within the window. A genuine
-        # `timeout` writes a non-empty "124" (the wrapper survives and records it), so
-        # this exhaustion path is only reached when the wrapper itself died without
-        # writing the file; the caller maps None to a graceful failure. (Must not return
-        # 124 here: it would be indistinguishable from a real timeout.)
         retry_error_callback=lambda retry_state: None,
     )
     async def _read_return_code(self, tmp_start) -> int | None:
