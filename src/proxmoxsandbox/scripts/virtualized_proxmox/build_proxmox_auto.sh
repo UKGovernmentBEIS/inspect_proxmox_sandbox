@@ -183,7 +183,7 @@ rm -f /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 # install dnsmasq for SDN, and xterm so we can use the resize command in terminal windows
 apt update
 apt upgrade -y
-apt install -y dnsmasq xterm patch
+apt install -y dnsmasq xterm patch jq
 systemctl disable --now dnsmasq
 
 # Fix IPAM bug, see https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/
@@ -237,11 +237,16 @@ EOFPATCH
 sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
 
 # Host isolation - see README
+# Delete our own rules (matched by comment) then recreate, so the rule set
+# converges regardless of prior state.
 # NOTE: keep these rules in sync with the fixup-firewall service in
 # scripts/ec2/userdata.sh.
 NIC=$(ip route show default | awk '{print $5}' | head -1)
 [ -z "$NIC" ] && { echo "ERROR: no default route; cannot isolate host" >&2; exit 1; }
 C="inspect-proxmox-sandbox: host-isolation"
+pvesh get /nodes/proxmox/firewall/rules --output-format json \
+    | jq -r --arg c "$C" 'map(select(.comment == $c)) | sort_by(.pos) | reverse | .[].pos' \
+    | while read -r pos; do pvesh delete /nodes/proxmox/firewall/rules/"$pos"; done
 pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1 --comment "$C"
 pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1 --comment "$C"
 pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$C"

@@ -143,7 +143,7 @@ update-grub
 
 # --- SDN dependencies ---
 # dnsmasq: needed for SDN DHCP/IPAM; disable the system service (PVE manages per-zone instances)
-DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq patch
+DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq patch jq
 systemctl disable --now dnsmasq
 # frr: needed for SDN routing (EVPN/OSPF zones); installed with proxmox-ve but not enabled.
 # Not needed for simple zones (the default), only for EVPN/OSPF.
@@ -363,10 +363,11 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_NAT_UNIT
 
-# Host isolation. See root README. 
-# Run per-boot, like fixup-nat, because the NIC name depends on instance family and can't be
-# baked into the AMI. The per-NIC marker makes it a no-op once applied, and re-runs
-# for a new NIC if the AMI is relaunched on a different family.
+# Host isolation. See root README.
+# Re-applied every boot (no marker): the node name changes per launch, so any
+# node-scoped rules baked into the AMI are orphaned under the old node name, and
+# the NIC name depends on instance family. We delete our own rules (matched by
+# comment) and recreate them, so the rule set converges regardless of prior state.
 # NOTE: keep these rules in sync with the on-first-boot heredoc in
 # scripts/virtualized_proxmox/build_proxmox_auto.sh.
 cat > /usr/local/bin/proxmox-ami-fixup-firewall.sh << 'FIXUP_FIREWALL'
@@ -374,9 +375,12 @@ cat > /usr/local/bin/proxmox-ami-fixup-firewall.sh << 'FIXUP_FIREWALL'
 set -euo pipefail
 NIC=$(ip route show default | awk '{print $5}' | head -1)
 [ -z "$NIC" ] && { echo "ERROR: no default route; cannot isolate host" >&2; exit 1; }
-[ -f "/var/local/.host-isolation-$NIC.done" ] && exit 0
 NODE=$(hostname)
 C="inspect-proxmox-sandbox: host-isolation"
+# Delete any of our existing rules first, descending pos (deletes renumber).
+pvesh get /nodes/$NODE/firewall/rules --output-format json \
+    | jq -r --arg c "$C" 'map(select(.comment == $c)) | sort_by(.pos) | reverse | .[].pos' \
+    | while read -r pos; do pvesh delete /nodes/$NODE/firewall/rules/"$pos"; done
 pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1 --comment "$C"
 pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1 --comment "$C"
 pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$C"
@@ -384,14 +388,15 @@ pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp -
 pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1 --comment "$C"
 pvesh set /nodes/$NODE/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
-touch "/var/local/.host-isolation-$NIC.done"
 FIXUP_FIREWALL
 chmod +x /usr/local/bin/proxmox-ami-fixup-firewall.sh
 
 cat > /etc/systemd/system/proxmox-ami-fixup-firewall.service << 'FIXUP_FIREWALL_UNIT'
 [Unit]
 Description=Enable Proxmox host firewall isolation with current management NIC
-After=pve-cluster.service network-online.target
+# After the hostname fixup so rules are created under the final node name, not
+# the transient EC2 ip-x-x-x-x hostname.
+After=proxmox-ami-fixup-hostname.service pve-cluster.service network-online.target
 Wants=network-online.target
 
 [Service]
