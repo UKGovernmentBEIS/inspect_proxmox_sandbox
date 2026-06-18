@@ -322,8 +322,6 @@ class SdnCommands(abc.ABC):
                         },
                     )
 
-            # TODO firewall to block access to proxmox?
-
         await self.do_update_all_sdn()
 
         return sdn_zone_id, existing_vnet_aliases
