@@ -86,7 +86,8 @@ aws ec2 run-instances --region "$REGION" \
     --instance-type m8i.2xlarge \
     --cpu-options "NestedVirtualization=enabled" \
     --subnet-id "$SUBNET_ID" \
-    --security-group-ids "$SECURITY_GROUP_ID"
+    --security-group-ids "$SECURITY_GROUP_ID" \
+    --metadata-options "InstanceMetadataTags=enabled"
     # add --iam-instance-profile Name=<profile> if SSM access doesn't come from DHMC
 ```
 
@@ -121,6 +122,24 @@ outbound traffic via iptables MASQUERADE. VM gateway: `10.10.10.1`. DNS:
 `169.254.169.253` (VPC resolver). VMs can't bind directly to the VPC subnet
 because EC2 only routes to IPs on attached ENIs.
 
+## Metrics (CloudWatch)
+
+The instance ships a localhost CloudWatch agent that forwards Proxmox's `pvestatd`
+metrics to CloudWatch using OpenTelemetry.
+
+**IAM**: the instance role needs `cloudwatch:PutMetricData` for metrics to be
+accepted. Without it the agent still runs, but the endpoint returns 403 —
+harmless, you just get no metrics.
+
+**Per-instance `Name` dimension**: every datapoint is labelled with the EC2
+instance-id. It is additionally labelled with the instance `Name` tag **only if
+the launcher enables instance metadata tags**. Like the hostname and root
+password (see fixup services below), this is a per-launch attribute set at
+`run-instances` time — it is **not** baked into the AMI. Pass
+`--metadata-options InstanceMetadataTags=enabled` (as `launch.sh` does for the
+build instance, and as the everyday-launch example above does) or you get
+instance-id only.
+
 ## EC2-specific bits handled by `userdata.sh`
 
 - SSM agent (not in Debian 13 by default) — installed in stage 1.
@@ -132,6 +151,7 @@ because EC2 only routes to IPs on attached ENIs.
   (see <https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/>).
 - `/run/dnsmasq/resolv.conf` shim for SDN dnsmasq DNS forwarding.
 - AMI fixup services for hostname + SSL cert + root password regeneration on every boot.
+- CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
 
 ## Other scripts
 
