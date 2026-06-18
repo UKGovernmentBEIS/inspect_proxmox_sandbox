@@ -43,14 +43,16 @@ from proxmoxsandbox.schema import (
 # for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
 _INLINE_STDIN_LIMIT = 30 * 1024
 
+_IN_GUEST_KILL_GRACE = 5
+
 # Grace added to the exec polling deadline on top of the caller's timeout.
-# The in-guest `timeout -k 5s {timeout}s` wrapper only SIGTERMs the command at
+# The in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s {timeout}s` wrapper only SIGTERMs the command at
 # `timeout`; a command that doesn't exit at once on SIGTERM (e.g. `john` saves
-# its session first) lingers until the SIGKILL at `timeout`+5s. Polling for only
+# its session first) lingers until the SIGKILL at `timeout`+_IN_GUEST_KILL_GRACE. Polling for only
 # `timeout` then catches the command mid-shutdown and raised an opaque
 # RetryError (issue #76); the grace lets the poll outlast the SIGKILL so the
 # real exit (rc 124, or 137 if it had to be killed) is seen instead.
-_EXEC_POLL_GRACE_SECONDS = 10
+_EXEC_POLL_GRACE_SECONDS = _IN_GUEST_KILL_GRACE + 3
 
 
 @sandboxenv(name="proxmox")
@@ -133,7 +135,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # (requires terminating the remote process).
         # `-k 5s` sends SIGKILL after grace period in case user command doesn't respect
         # SIGTERM.
-        return f"timeout -k 5s {timeout}s "
+        return f"timeout -k {_IN_GUEST_KILL_GRACE}s {timeout}s "
 
     def _is_windows(self) -> bool:
         """Check if this VM is running Windows based on os_type."""
