@@ -417,6 +417,98 @@ systemctl enable proxmox-ami-fixup-nat.service
 systemctl enable proxmox-ami-fixup-password.service
 systemctl enable proxmox-ami-fixup-firewall.service
 
+# ===== CloudWatch OTLP metrics collector =====
+# Ship pvestatd's metrics to the CloudWatch OTLP endpoint via a localhost CloudWatch
+# agent, SigV4-signed with the instance role (needs cloudwatch:PutMetricData; 403s
+# harmlessly without it). cumulativetodelta is required -- PVE emits cumulative sums
+# without StartTimeUnixNano, which CloudWatch rejects. The build only STAGES files;
+# all runtime steps (region from IMDS, agent config + start) happen at first boot, so
+# we never start the agent or connection-test the endpoint at build time.
+#
+# resourcedetection tags every datapoint with the EC2 instance-id and (via tags) the
+# instance Name tag, so metrics are distinguishable per box without renaming the PVE
+# node. The Name tag is fetched via the DescribeTags API, so the instance role needs
+# ec2:DescribeTags (without it the agent still runs and exports instance-id, just no
+# Name). Do NOT add tags_from_imds: the CloudWatch agent's embedded collector rejects
+# that key and refuses to start.
+curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/debian/amd64/latest/amazon-cloudwatch-agent.deb" \
+    -o /tmp/cwagent.deb
+dpkg -i /tmp/cwagent.deb
+
+cat > /opt/aws/amazon-cloudwatch-agent/etc/otel-metrics.yaml << 'OTELYAML'
+receivers:
+  otlp/cwagent:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+processors:
+  resourcedetection/cwagent:
+    detectors: [ec2]
+    timeout: 5s
+    ec2:
+      tags: ["^Name$"]
+  cumulativetodelta/cwagent: {}
+  batch/cwagent: {}
+exporters:
+  otlphttp/cwagent:
+    metrics_endpoint: "https://monitoring.${env:AWS_REGION}.amazonaws.com/v1/metrics"
+    compression: gzip
+    auth: { authenticator: sigv4auth/cwagent }
+extensions:
+  sigv4auth/cwagent: { service: monitoring, region: "${env:AWS_REGION}" }
+service:
+  extensions: [sigv4auth/cwagent]
+  pipelines:
+    metrics/cwagent:
+      receivers: [otlp/cwagent]
+      processors: [resourcedetection/cwagent, cumulativetodelta/cwagent, batch/cwagent]
+      exporters: [otlphttp/cwagent]
+OTELYAML
+echo '{"agent":{}}' > /opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
+
+# pvestatd -> local collector. Write status.cfg directly: `pvesh create` connection-tests
+# the endpoint, which isn't running at build time. Persists in pmxcfs (baked in).
+printf 'opentelemetry: cloudwatch-otel\n\tserver 127.0.0.1\n\tport 4318\n\totel-protocol http\n\totel-path /v1/metrics\n\totel-compression gzip\n' >> /etc/pve/status.cfg
+
+# First-boot setup: resolve region from IMDS, then translate + start the agent. Done
+# at boot (not build) so ${env:AWS_REGION} resolves to the launch region and the agent
+# is never started (nor the endpoint tested) at build time.
+cat > /usr/local/bin/cloudwatch-otel-apply.sh << 'OTELAPPLY'
+#!/bin/bash
+set -euo pipefail
+REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
+echo "AWS_REGION=${REGION}" > /etc/default/amazon-cloudwatch-agent-otel
+export AWS_REGION="${REGION}"
+ctl=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+"$ctl" -a fetch-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
+"$ctl" -a append-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/otel-metrics.yaml -s
+OTELAPPLY
+chmod +x /usr/local/bin/cloudwatch-otel-apply.sh
+
+# The agent service reads AWS_REGION (written above) so otelcol resolves ${env:AWS_REGION}.
+mkdir -p /etc/systemd/system/amazon-cloudwatch-agent.service.d
+cat > /etc/systemd/system/amazon-cloudwatch-agent.service.d/otel-region.conf << 'OTELDROPIN'
+[Service]
+EnvironmentFile=/etc/default/amazon-cloudwatch-agent-otel
+OTELDROPIN
+
+cat > /etc/systemd/system/cloudwatch-otel-apply.service << 'OTELAPPLYUNIT'
+[Unit]
+Description=Configure and start the CloudWatch agent OTel pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cloudwatch-otel-apply.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+OTELAPPLYUNIT
+systemctl daemon-reload
+systemctl enable cloudwatch-otel-apply.service
+
 echo "PROXMOX INSTALL COMPLETE: $(pveversion)"
 
 # Final reboot: pvenetcommit.service will promote interfaces.new -> interfaces
