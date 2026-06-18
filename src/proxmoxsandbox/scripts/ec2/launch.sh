@@ -66,6 +66,9 @@ RUN_ARGS=(
     --cpu-options "NestedVirtualization=enabled"
     --subnet-id "$SUBNET_ID"
     --security-group-ids "$SECURITY_GROUP_ID"
+    # Expose the instance's own tags (incl. Name) via IMDS so the OTel collector
+    # can label metrics with the Name (read at boot, no ec2:DescribeTags needed).
+    --metadata-options "InstanceMetadataTags=enabled"
     --block-device-mappings
         "DeviceName=/dev/xvda,Ebs={VolumeSize=1024,VolumeType=gp3,DeleteOnTermination=true}"
     --user-data "fileb://$USERDATA_GZ"

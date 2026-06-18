@@ -425,12 +425,12 @@ systemctl enable proxmox-ami-fixup-firewall.service
 # all runtime steps (region from IMDS, agent config + start) happen at first boot, so
 # we never start the agent or connection-test the endpoint at build time.
 #
-# resourcedetection tags every datapoint with the EC2 instance-id and (via tags) the
-# instance Name tag, so metrics are distinguishable per box without renaming the PVE
-# node. The Name tag is fetched via the DescribeTags API, so the instance role needs
-# ec2:DescribeTags (without it the agent still runs and exports instance-id, just no
-# Name). Do NOT add tags_from_imds: the CloudWatch agent's embedded collector rejects
-# that key and refuses to start.
+# resourcedetection tags every datapoint with the EC2 instance-id and the instance
+# Name tag, so metrics are distinguishable per box without renaming the PVE node.
+# The Name is read from IMDS at boot (the launcher must enable InstanceMetadataTags)
+# and injected via OTEL_RESOURCE_ATTRIBUTES, picked up by resourcedetection's env
+# detector -- no ec2:DescribeTags IAM needed. Do NOT use the ec2 detector's
+# tags_from_imds: the CloudWatch agent's embedded collector rejects that key.
 curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/debian/amd64/latest/amazon-cloudwatch-agent.deb" \
     -o /tmp/cwagent.deb
 dpkg -i /tmp/cwagent.deb
@@ -443,10 +443,10 @@ receivers:
         endpoint: 127.0.0.1:4318
 processors:
   resourcedetection/cwagent:
-    detectors: [ec2]
+    # env reads ec2.tag.Name from OTEL_RESOURCE_ATTRIBUTES (set at boot from IMDS);
+    # ec2 adds instance-id/region/AZ/type.
+    detectors: [env, ec2]
     timeout: 5s
-    ec2:
-      tags: ["^Name$"]
   cumulativetodelta/cwagent: {}
   batch/cwagent: {}
 exporters:
@@ -478,6 +478,13 @@ cat > /usr/local/bin/cloudwatch-otel-apply.sh << 'OTELAPPLY'
 set -euo pipefail
 REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
 echo "AWS_REGION=${REGION}" > /etc/default/amazon-cloudwatch-agent-otel
+# Read the instance Name tag from IMDS (present only if the launcher enabled
+# InstanceMetadataTags) and hand it to the collector's env detector as a resource
+# attribute. Absent tag -> no Name label, instance-id still identifies the box.
+NAME=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/tags/instance/Name 2>/dev/null || true)
+if [ -n "${NAME}" ]; then
+    echo "OTEL_RESOURCE_ATTRIBUTES=ec2.tag.Name=${NAME}" >> /etc/default/amazon-cloudwatch-agent-otel
+fi
 export AWS_REGION="${REGION}"
 ctl=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
 "$ctl" -a fetch-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
