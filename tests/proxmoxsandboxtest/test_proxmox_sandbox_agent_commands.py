@@ -92,6 +92,10 @@ async def test_self_check(
         "test_read_file_not_allowed",  # user is root, so this doesn't work
         "test_write_text_file_without_permissions",  # ditto
         "test_write_binary_file_without_permissions",  # ditto
+        # Proxmox's QGA file-read API is hard-limited to 16 MiB; this self_check
+        # writes 50 MiB. read_file() caps at 16 MiB (a documented deviation from
+        # Inspect's 100 MiB spec, see read_file in _proxmox_sandbox_environment).
+        "test_read_and_write_large_file_binary",
     ]
 
     return await check_results_of_self_check(
