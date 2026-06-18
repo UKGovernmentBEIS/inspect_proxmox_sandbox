@@ -148,7 +148,13 @@ class AgentCommands:
             )
 
     async def exec_command(self, vm_id: int, command: List[str]):
-        """Execute a command in the VM using QEMU agent."""
+        """Execute a command in the VM using QEMU agent.
+
+        Every element of `command` MUST be ASCII. A single non-ASCII byte in
+        the QMP guest-exec arguments breaks Proxmox's agent bridge: the call
+        times out and the next one reports "QEMU guest agent is not running"
+        (upstream bug report: https://bugzilla.proxmox.com/show_bug.cgi?id=6609 ).
+        """
         with trace_action(
             self.logger, self.TRACE_NAME, f"exec_command {vm_id=} {command=}"
         ):

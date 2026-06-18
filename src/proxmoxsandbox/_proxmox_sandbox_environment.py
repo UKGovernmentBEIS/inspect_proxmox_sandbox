@@ -50,6 +50,13 @@ _IN_GUEST_KILL_GRACE = 5
 _EXEC_POLL_GRACE_SECONDS = _IN_GUEST_KILL_GRACE + 3
 
 
+def _recover_qga_bytes(mangled: str) -> bytes:
+    # Proxmox's file-read returns each raw file byte as a Latin-1 codepoint, then
+    # serialises that as UTF-8 JSON, so non-ASCII bytes arrive double-encoded
+    # (e.g. "é" -> "Ã©"). Encoding back to ISO-8859-1 recovers the original bytes.
+    return mangled.encode("iso-8859-1")
+
+
 class ReturnCodeNotWritten(Exception):
     """The exec wrapper exited without writing its returncode file."""
 
@@ -790,20 +797,24 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
         else:
             # TODO: consider reading all files at once?
-            stdout = (
-                await self.agent_commands.read_file_or_blank(
-                    vm_id=self.vm_id,
-                    filepath=f"{tmp_start}script.stdout",
-                    max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
-                )
-            )["content"]
-            stderr = (
-                await self.agent_commands.read_file_or_blank(
-                    vm_id=self.vm_id,
-                    filepath=f"{tmp_start}script.stderr",
-                    max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
-                )
-            )["content"]
+            stdout = self._decode_exec_output(
+                (
+                    await self.agent_commands.read_file_or_blank(
+                        vm_id=self.vm_id,
+                        filepath=f"{tmp_start}script.stdout",
+                        max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
+                    )
+                )["content"]
+            )
+            stderr = self._decode_exec_output(
+                (
+                    await self.agent_commands.read_file_or_blank(
+                        vm_id=self.vm_id,
+                        filepath=f"{tmp_start}script.stderr",
+                        max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
+                    )
+                )["content"]
+            )
             try:
                 returncode = await self._read_return_code(tmp_start)
                 exec_response = ExecResult(
@@ -880,6 +891,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if len(returncode_string_stripped) == 0:
             raise ReturnCodeNotWritten()
         return int(returncode_string_stripped)
+
+    @staticmethod
+    def _decode_exec_output(content: str) -> str:
+        # ExecResult.stdout/stderr are str, so undo Proxmox's file-read mangling
+        # (see _recover_qga_bytes) and decode as UTF-8. errors="replace" because
+        # a command's output can be arbitrary bytes, not necessarily valid UTF-8.
+        return _recover_qga_bytes(content).decode("utf-8", errors="replace")
 
     # Platform-specific "file not found" messages from the QEMU guest agent.
     _FILE_NOT_FOUND_ERRORS = [
@@ -1112,8 +1130,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             >= SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
         ):
             raise OutputLimitExceededError("Output size exceeds 16 MiB limit.", file)
-        mangled_response = read_get_response["content"]
-        bytes_data = mangled_response.encode("iso-8859-1")
+        bytes_data = _recover_qga_bytes(read_get_response["content"])
         if text:
             return bytes_data.decode("utf-8")
         else:
