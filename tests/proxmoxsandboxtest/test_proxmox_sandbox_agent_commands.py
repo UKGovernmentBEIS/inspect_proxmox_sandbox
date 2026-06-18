@@ -3,11 +3,32 @@ from pathlib import Path
 from typing import List
 
 import pytest
+import tenacity
 from inspect_ai.util._sandbox.self_check import self_check
 
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
 from .proxmox_sandbox_utils import setup_requests_logging
+
+
+async def test_exec_timeout_with_sigterm_handler_no_retryerror(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    """A SIGTERM-handling command outliving its timeout must not raise RetryError."""
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("SIGTERM handling is Linux-only")
+
+    try:
+        result = await proxmox_sandbox_environment.exec(
+            ["sh", "-c", "trap 'sleep 30' TERM; while :; do :; done"],
+            timeout=5,
+        )
+        # Force-killed by the in-guest SIGKILL after the grace period.
+        assert result.returncode != 0
+    except TimeoutError:
+        pass  # also acceptable: surfaced as a clean timeout
+    except tenacity.RetryError as ex:
+        pytest.fail(f"exec leaked tenacity.RetryError: {ex}")
 
 
 async def test_exec_10mb_limit(
