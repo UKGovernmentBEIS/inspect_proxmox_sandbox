@@ -43,6 +43,23 @@ from proxmoxsandbox.schema import (
 # for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
 _INLINE_STDIN_LIMIT = 30 * 1024
 
+_IN_GUEST_KILL_GRACE = 5
+
+# Poll past the in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s` SIGKILL (at timeout+5s)
+# so we observe the real exit instead of catching the command mid-shutdown.
+_EXEC_POLL_GRACE_SECONDS = _IN_GUEST_KILL_GRACE + 3
+
+
+def _recover_qga_bytes(mangled: str) -> bytes:
+    # Proxmox's file-read returns each raw file byte as a Latin-1 codepoint, then
+    # serialises that as UTF-8 JSON, so non-ASCII bytes arrive double-encoded
+    # (e.g. "é" -> "Ã©"). Encoding back to ISO-8859-1 recovers the original bytes.
+    return mangled.encode("iso-8859-1")
+
+
+class ReturnCodeNotWritten(Exception):
+    """The exec wrapper exited without writing its returncode file."""
+
 
 @sandboxenv(name="proxmox")
 class ProxmoxSandboxEnvironment(SandboxEnvironment):
@@ -124,7 +141,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # (requires terminating the remote process).
         # `-k 5s` sends SIGKILL after grace period in case user command doesn't respect
         # SIGTERM.
-        return f"timeout -k 5s {timeout}s "
+        return f"timeout -k {_IN_GUEST_KILL_GRACE}s {timeout}s "
 
     def _is_windows(self) -> bool:
         """Check if this VM is running Windows based on os_type."""
@@ -200,11 +217,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         stdin_file: str | None = None,
     ) -> str:
         def generate() -> Generator[str, None, None]:
-            yield (
-                f"rm -f {tmp_start}script.stdout"
-                + f" {tmp_start}script.stderr"
-                + f" {tmp_start}script.returncode\n"
-            )
             if user is not None:
                 yield f"su -l {shlex.quote(user)} << 'EOF{tmp_start}EOF'\n"
             # The rest of the script gets quoted in a heredoc if we had to use su
@@ -212,19 +224,32 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 yield f"cd {shlex.quote(cwd)} || exit $?\n"
             for key, value in env.items():
                 yield f"export {shlex.quote(key)}={shlex.quote(value)}\n"
-            if stdin is not None:
-                yield self._pipe_user_input(stdin)
+            # Make the launch idempotent. agent/exec is retried on transient
+            # errors, so the same script can be launched more than once for this
+            # tmp_start. flock keyed on the temp path lets exactly one launch run
+            # the command and write the outputs; any duplicate blocks until that
+            # one finishes, so whichever pid we end up polling reads a consistent
+            # result and the command runs once. fd 9 (single digit) works in
+            # dash, which is /bin/sh on the default image.
+            stdin_prefix = self._pipe_user_input(stdin) if stdin is not None else ""
             cmd_line = f"{self._prefix_timeout(timeout)}{shlex.join(command)}"
             if stdin_file is not None:
                 cmd_line += f" <{shlex.quote(stdin_file)}"
+            yield f"exec 9>{tmp_start}script.lock\n"
+            yield "if flock -n 9; then\n"
             yield (
-                cmd_line
-                + f" >{tmp_start}script.stdout"
-                + f" 2>{tmp_start}script.stderr\n"
-                + 'echo -n "$?" >'
-                + f" {tmp_start}script.returncode\n"
+                f"  rm -f {tmp_start}script.stdout {tmp_start}script.stderr"
+                f" {tmp_start}script.returncode\n"
             )
-            yield "sync\n"
+            yield (
+                f"  {stdin_prefix}{cmd_line}"
+                f" >{tmp_start}script.stdout 2>{tmp_start}script.stderr\n"
+                f'  echo -n "$?" > {tmp_start}script.returncode\n'
+                "  sync\n"
+            )
+            yield "else\n"
+            yield "  flock 9\n"  # duplicate launch: wait for the real one
+            yield "fi\n"
             if user is not None:
                 yield f"EOF{tmp_start}EOF\n"
 
@@ -656,7 +681,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(timeout)
+            stop=tenacity.stop_after_delay(timeout + _EXEC_POLL_GRACE_SECONDS)
             if timeout is not None
             else tenacity.stop_never,
             retry=tenacity.retry_if_result(lambda x: x is False),
@@ -743,7 +768,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             self.TRACE_NAME,
             f"exec_command {self.vm_id=} {exec_response_pid=}",
         ):
-            exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
+            try:
+                exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
+            except tenacity.RetryError as ex:
+                # Grace margin should prevent this; reaching here means the guest
+                # agent never confirmed completion within timeout+grace. Surface
+                # it clearly, not as RetryError.
+                raise TimeoutError(
+                    f"Command did not complete within {timeout}s "
+                    f"(+{_EXEC_POLL_GRACE_SECONDS}s guest-agent grace) on VM "
+                    f"{self.vm_id}, pid {exec_response_pid}. The QEMU guest "
+                    f"agent did not report the process as finished. "
+                    f"Command: {shlex.join(cmd)[:200]}"
+                ) from ex
 
         if exec_status and isinstance(exec_status, Dict) and "err-data" in exec_status:
             # Something went wrong with the wrapper script, not the actual command
@@ -760,27 +797,55 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
         else:
             # TODO: consider reading all files at once?
-            stdout = (
-                await self.agent_commands.read_file_or_blank(
-                    vm_id=self.vm_id,
-                    filepath=f"{tmp_start}script.stdout",
-                    max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
-                )
-            )["content"]
-            stderr = (
-                await self.agent_commands.read_file_or_blank(
-                    vm_id=self.vm_id,
-                    filepath=f"{tmp_start}script.stderr",
-                    max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
-                )
-            )["content"]
-            returncode = await self._read_return_code(tmp_start)
-            exec_response = ExecResult(
-                success=returncode == 0,
-                returncode=returncode,
-                stdout=stdout,
-                stderr=stderr,
+            stdout = self._decode_exec_output(
+                (
+                    await self.agent_commands.read_file_or_blank(
+                        vm_id=self.vm_id,
+                        filepath=f"{tmp_start}script.stdout",
+                        max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
+                    )
+                )["content"]
             )
+            stderr = self._decode_exec_output(
+                (
+                    await self.agent_commands.read_file_or_blank(
+                        vm_id=self.vm_id,
+                        filepath=f"{tmp_start}script.stderr",
+                        max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
+                    )
+                )["content"]
+            )
+            try:
+                returncode = await self._read_return_code(tmp_start)
+                exec_response = ExecResult(
+                    success=returncode == 0,
+                    returncode=returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            except ReturnCodeNotWritten:
+                # exec exited but the wrapper never wrote its returncode file: it was
+                # killed before completion.
+                signal_num = (
+                    exec_status.get("signal") if isinstance(exec_status, Dict) else None
+                )
+                returncode = 128 + signal_num if signal_num else 137
+                if signal_num:
+                    killed_note = (
+                        f"proxmox sandbox: command-runner wrapper terminated by signal "
+                        f"{signal_num} before completion; reporting code {returncode}."
+                    )
+                else:
+                    killed_note = (
+                        "proxmox sandbox: command-runner wrapper terminated before "
+                        "writing an exit code (likely killed by the command itself)."
+                    )
+                exec_response = ExecResult(
+                    success=False,
+                    returncode=returncode,
+                    stdout=stdout,
+                    stderr=f"{stderr}\n{killed_note}" if stderr else killed_note,
+                )
 
         # cleanup - we don't need to wait for the result of this
         if is_windows:
@@ -812,9 +877,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @tenacity.retry(
         wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
         stop=tenacity.stop_after_delay(2),
-        retry_error_callback=lambda retry_state: 124,
+        reraise=True,
     )
-    async def _read_return_code(self, tmp_start):
+    async def _read_return_code(self, tmp_start) -> int:
         returncode_string = (
             await self.agent_commands.read_file_or_blank(
                 vm_id=self.vm_id,
@@ -824,8 +889,15 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         )["content"]
         returncode_string_stripped = returncode_string.strip()
         if len(returncode_string_stripped) == 0:
-            raise ValueError("Return code file is empty")
+            raise ReturnCodeNotWritten()
         return int(returncode_string_stripped)
+
+    @staticmethod
+    def _decode_exec_output(content: str) -> str:
+        # ExecResult.stdout/stderr are str, so undo Proxmox's file-read mangling
+        # (see _recover_qga_bytes) and decode as UTF-8. errors="replace" because
+        # a command's output can be arbitrary bytes, not necessarily valid UTF-8.
+        return _recover_qga_bytes(content).decode("utf-8", errors="replace")
 
     # Platform-specific "file not found" messages from the QEMU guest agent.
     _FILE_NOT_FOUND_ERRORS = [
@@ -1058,8 +1130,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             >= SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
         ):
             raise OutputLimitExceededError("Output size exceeds 16 MiB limit.", file)
-        mangled_response = read_get_response["content"]
-        bytes_data = mangled_response.encode("iso-8859-1")
+        bytes_data = _recover_qga_bytes(read_get_response["content"])
         if text:
             return bytes_data.decode("utf-8")
         else:

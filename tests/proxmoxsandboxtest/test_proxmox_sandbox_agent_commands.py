@@ -3,12 +3,33 @@ from pathlib import Path
 from typing import List
 
 import pytest
+import tenacity
 from inspect_ai.util import OutputLimitExceededError
 from inspect_ai.util._sandbox.self_check import self_check
 
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
 from .proxmox_sandbox_utils import setup_requests_logging
+
+
+async def test_exec_timeout_with_sigterm_handler_no_retryerror(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    """A SIGTERM-handling command outliving its timeout must not raise RetryError."""
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("SIGTERM handling is Linux-only")
+
+    try:
+        result = await proxmox_sandbox_environment.exec(
+            ["sh", "-c", "trap 'sleep 30' TERM; while :; do :; done"],
+            timeout=5,
+        )
+        # Force-killed by the in-guest SIGKILL after the grace period.
+        assert result.returncode != 0
+    except TimeoutError:
+        pass  # also acceptable: surfaced as a clean timeout
+    except tenacity.RetryError as ex:
+        pytest.fail(f"exec leaked tenacity.RetryError: {ex}")
 
 
 @pytest.mark.parametrize("lead", ["", "a"], ids=["even-offset", "odd-offset"])
@@ -113,11 +134,29 @@ async def test_self_check(
         "test_read_file_not_allowed",  # user is root, so this doesn't work
         "test_write_text_file_without_permissions",  # ditto
         "test_write_binary_file_without_permissions",  # ditto
+        # Proxmox's QGA file-read API is hard-limited to 16 MiB; this self_check
+        # writes 50 MiB. read_file() caps at 16 MiB (a documented deviation from
+        # Inspect's 100 MiB spec, see read_file in _proxmox_sandbox_environment).
+        "test_read_and_write_large_file_binary",
     ]
 
     return await check_results_of_self_check(
         proxmox_sandbox_environment, known_failures
     )
+
+
+async def test_exec_self_kill_degrades_gracefully(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("signal kill is POSIX-only")
+
+    result = await proxmox_sandbox_environment.exec(["sh", "-c", "pkill -f script.sh"])
+    assert result.success is False
+    assert result.returncode in (143, 137)  # 128+SIGTERM / 128+SIGKILL
+
+    after = await proxmox_sandbox_environment.exec(["echo", "alive"])
+    assert after.success and after.stdout.strip() == "alive"
 
 
 async def check_results_of_self_check(sandbox_env, known_failures=[]):

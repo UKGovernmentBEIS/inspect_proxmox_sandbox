@@ -3,15 +3,13 @@
 # Follows https://pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_13_Trixie
 # with workarounds for non-interactive EC2 environments.
 #
-# NOTE: This script shares setup logic (IPAM patch, SDN config, storage config)
-# with scripts/virtualized_proxmox/build_proxmox_auto.sh (the on-first-boot.sh
-# heredoc). If you change shared logic here, update that file too and vice versa.
+# NOTE: This script shares setup logic with scripts/virtualized_proxmox/build_proxmox_auto.
+# If you change shared logic here, update that file too and vice versa.
 set -euxo pipefail
 # Log all output with timestamps to /root/install-proxmox.log for debugging
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
 
 # --- IMDSv2 helper (also used by EIC and AMI fixup services below) ---
-# Named call-ec2-hypervisor since Proxmox is also a hypervisor on this host.
 apt-get update -y
 apt-get install -y wget curl
 cat > /usr/local/bin/call-ec2-hypervisor << 'CALL_EC2_HYPERVISOR'
@@ -145,7 +143,7 @@ update-grub
 
 # --- SDN dependencies ---
 # dnsmasq: needed for SDN DHCP/IPAM; disable the system service (PVE manages per-zone instances)
-DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq patch
+DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq patch jq
 systemctl disable --now dnsmasq
 # frr: needed for SDN routing (EVPN/OSPF zones); installed with proxmox-ve but not enabled.
 # Not needed for simple zones (the default), only for EVPN/OSPF.
@@ -365,6 +363,51 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_NAT_UNIT
 
+# Host isolation. See root README.
+# Re-applied every boot (no marker): the node name changes per launch, so any
+# node-scoped rules baked into the AMI are orphaned under the old node name, and
+# the NIC name depends on instance family. We delete our own rules (matched by
+# comment) and recreate them, so the rule set converges regardless of prior state.
+# NOTE: keep these rules in sync with the on-first-boot heredoc in
+# scripts/virtualized_proxmox/build_proxmox_auto.sh.
+cat > /usr/local/bin/proxmox-ami-fixup-firewall.sh << 'FIXUP_FIREWALL'
+#!/bin/bash
+set -euo pipefail
+NIC=$(ip route show default | awk '{print $5}' | head -1)
+[ -z "$NIC" ] && { echo "ERROR: no default route; cannot isolate host" >&2; exit 1; }
+NODE=$(hostname)
+C="inspect-proxmox-sandbox: host-isolation"
+# Delete any of our existing rules first, descending pos (deletes renumber).
+pvesh get /nodes/$NODE/firewall/rules --output-format json \
+    | jq -r --arg c "$C" 'map(select(.comment == $c)) | sort_by(.pos) | reverse | .[].pos' \
+    | while read -r pos; do pvesh delete /nodes/$NODE/firewall/rules/"$pos"; done
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1 --comment "$C"
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1 --comment "$C"
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$C"
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1 --comment "$C"
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1 --comment "$C"
+pvesh set /nodes/$NODE/firewall/options --enable 1
+pvesh set /cluster/firewall/options --enable 1
+FIXUP_FIREWALL
+chmod +x /usr/local/bin/proxmox-ami-fixup-firewall.sh
+
+cat > /etc/systemd/system/proxmox-ami-fixup-firewall.service << 'FIXUP_FIREWALL_UNIT'
+[Unit]
+Description=Enable Proxmox host firewall isolation with current management NIC
+# After the hostname fixup so rules are created under the final node name, not
+# the transient EC2 ip-x-x-x-x hostname.
+After=proxmox-ami-fixup-hostname.service pve-cluster.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/proxmox-ami-fixup-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+FIXUP_FIREWALL_UNIT
+
 rm -vf /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 
 systemctl daemon-reload
@@ -372,6 +415,108 @@ systemctl enable proxmox-ami-fixup-hostname.service
 systemctl enable proxmox-ami-fixup-certs.service
 systemctl enable proxmox-ami-fixup-nat.service
 systemctl enable proxmox-ami-fixup-password.service
+systemctl enable proxmox-ami-fixup-firewall.service
+
+# ===== CloudWatch OTLP metrics collector =====
+# Ship pvestatd's metrics to the CloudWatch OTLP endpoint via a localhost CloudWatch
+# agent, SigV4-signed with the instance role (needs cloudwatch:PutMetricData; 403s
+# harmlessly without it). cumulativetodelta is required -- PVE emits cumulative sums
+# without StartTimeUnixNano, which CloudWatch rejects. The build only STAGES files;
+# all runtime steps (region from IMDS, agent config + start) happen at first boot, so
+# we never start the agent or connection-test the endpoint at build time.
+#
+# resourcedetection tags every datapoint with the EC2 instance-id and the instance
+# Name tag, so metrics are distinguishable per box without renaming the PVE node.
+# The Name is read from IMDS at boot (the launcher must enable InstanceMetadataTags)
+# and injected via OTEL_RESOURCE_ATTRIBUTES, picked up by resourcedetection's env
+# detector -- no ec2:DescribeTags IAM needed. Do NOT use the ec2 detector's
+# tags_from_imds: the CloudWatch agent's embedded collector rejects that key.
+curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/debian/amd64/latest/amazon-cloudwatch-agent.deb" \
+    -o /tmp/cwagent.deb
+dpkg -i /tmp/cwagent.deb
+
+cat > /opt/aws/amazon-cloudwatch-agent/etc/otel-metrics.yaml << 'OTELYAML'
+receivers:
+  otlp/cwagent:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+processors:
+  resourcedetection/cwagent:
+    # env reads ec2.tag.Name from OTEL_RESOURCE_ATTRIBUTES (set at boot from IMDS);
+    # ec2 adds instance-id/region/AZ/type.
+    detectors: [env, ec2]
+    timeout: 5s
+  cumulativetodelta/cwagent: {}
+  batch/cwagent: {}
+exporters:
+  otlphttp/cwagent:
+    metrics_endpoint: "https://monitoring.${env:AWS_REGION}.amazonaws.com/v1/metrics"
+    compression: gzip
+    auth: { authenticator: sigv4auth/cwagent }
+extensions:
+  sigv4auth/cwagent: { service: monitoring, region: "${env:AWS_REGION}" }
+service:
+  extensions: [sigv4auth/cwagent]
+  pipelines:
+    metrics/cwagent:
+      receivers: [otlp/cwagent]
+      processors: [resourcedetection/cwagent, cumulativetodelta/cwagent, batch/cwagent]
+      exporters: [otlphttp/cwagent]
+OTELYAML
+echo '{"agent":{}}' > /opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
+
+# pvestatd -> local collector. Write status.cfg directly: `pvesh create` connection-tests
+# the endpoint, which isn't running at build time. Persists in pmxcfs (baked in).
+printf 'opentelemetry: cloudwatch-otel\n\tserver 127.0.0.1\n\tport 4318\n\totel-protocol http\n\totel-path /v1/metrics\n\totel-compression gzip\n' >> /etc/pve/status.cfg
+
+# Boot-time setup (runs every boot): resolve region from IMDS, then translate +
+# start the agent. Done at boot (not build) so ${env:AWS_REGION} resolves to the
+# launch region and the agent is never started (nor the endpoint tested) at build
+# time. fetch-config(base) + append-config is idempotent, so re-running each boot
+# re-resolves region/Name (e.g. on AMI relaunch) without duplicating the pipeline.
+cat > /usr/local/bin/cloudwatch-otel-apply.sh << 'OTELAPPLY'
+#!/bin/bash
+set -euo pipefail
+REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
+echo "AWS_REGION=${REGION}" > /etc/default/amazon-cloudwatch-agent-otel
+# Read the instance Name tag from IMDS (present only if the launcher enabled
+# InstanceMetadataTags) and hand it to the collector's env detector as a resource
+# attribute. Absent tag -> no Name label, instance-id still identifies the box.
+NAME=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/tags/instance/Name 2>/dev/null || true)
+if [ -n "${NAME}" ]; then
+    echo "OTEL_RESOURCE_ATTRIBUTES=ec2.tag.Name=${NAME}" >> /etc/default/amazon-cloudwatch-agent-otel
+fi
+export AWS_REGION="${REGION}"
+ctl=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+"$ctl" -a fetch-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
+"$ctl" -a append-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/otel-metrics.yaml -s
+OTELAPPLY
+chmod +x /usr/local/bin/cloudwatch-otel-apply.sh
+
+# The agent service reads AWS_REGION (written above) so otelcol resolves ${env:AWS_REGION}.
+mkdir -p /etc/systemd/system/amazon-cloudwatch-agent.service.d
+cat > /etc/systemd/system/amazon-cloudwatch-agent.service.d/otel-region.conf << 'OTELDROPIN'
+[Service]
+EnvironmentFile=/etc/default/amazon-cloudwatch-agent-otel
+OTELDROPIN
+
+cat > /etc/systemd/system/cloudwatch-otel-apply.service << 'OTELAPPLYUNIT'
+[Unit]
+Description=Configure and start the CloudWatch agent OTel pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cloudwatch-otel-apply.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+OTELAPPLYUNIT
+systemctl daemon-reload
+systemctl enable cloudwatch-otel-apply.service
 
 echo "PROXMOX INSTALL COMPLETE: $(pveversion)"
 
