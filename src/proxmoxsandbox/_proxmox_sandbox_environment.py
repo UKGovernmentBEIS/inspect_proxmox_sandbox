@@ -43,6 +43,12 @@ from proxmoxsandbox.schema import (
 # for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
 _INLINE_STDIN_LIMIT = 30 * 1024
 
+_IN_GUEST_KILL_GRACE = 5
+
+# Poll past the in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s` SIGKILL (at timeout+5s)
+# so we observe the real exit instead of catching the command mid-shutdown.
+_EXEC_POLL_GRACE_SECONDS = _IN_GUEST_KILL_GRACE + 3
+
 
 class ReturnCodeNotWritten(Exception):
     """The exec wrapper exited without writing its returncode file."""
@@ -128,7 +134,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # (requires terminating the remote process).
         # `-k 5s` sends SIGKILL after grace period in case user command doesn't respect
         # SIGTERM.
-        return f"timeout -k 5s {timeout}s "
+        return f"timeout -k {_IN_GUEST_KILL_GRACE}s {timeout}s "
 
     def _is_windows(self) -> bool:
         """Check if this VM is running Windows based on os_type."""
@@ -668,7 +674,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(timeout)
+            stop=tenacity.stop_after_delay(timeout + _EXEC_POLL_GRACE_SECONDS)
             if timeout is not None
             else tenacity.stop_never,
             retry=tenacity.retry_if_result(lambda x: x is False),
@@ -755,7 +761,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             self.TRACE_NAME,
             f"exec_command {self.vm_id=} {exec_response_pid=}",
         ):
-            exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
+            try:
+                exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
+            except tenacity.RetryError as ex:
+                # Grace margin should prevent this; reaching here means the guest
+                # agent never confirmed completion within timeout+grace. Surface
+                # it clearly, not as RetryError.
+                raise TimeoutError(
+                    f"Command did not complete within {timeout}s "
+                    f"(+{_EXEC_POLL_GRACE_SECONDS}s guest-agent grace) on VM "
+                    f"{self.vm_id}, pid {exec_response_pid}. The QEMU guest "
+                    f"agent did not report the process as finished. "
+                    f"Command: {shlex.join(cmd)[:200]}"
+                ) from ex
 
         if exec_status and isinstance(exec_status, Dict) and "err-data" in exec_status:
             # Something went wrong with the wrapper script, not the actual command
