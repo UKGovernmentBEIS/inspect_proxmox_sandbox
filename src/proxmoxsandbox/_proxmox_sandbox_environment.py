@@ -797,24 +797,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
         else:
             # TODO: consider reading all files at once?
-            stdout = self._decode_exec_output(
-                (
-                    await self.agent_commands.read_file_or_blank(
-                        vm_id=self.vm_id,
-                        filepath=f"{tmp_start}script.stdout",
-                        max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
-                    )
-                )["content"]
-            )
-            stderr = self._decode_exec_output(
-                (
-                    await self.agent_commands.read_file_or_blank(
-                        vm_id=self.vm_id,
-                        filepath=f"{tmp_start}script.stderr",
-                        max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
-                    )
-                )["content"]
-            )
+            stdout = await self._read_exec_output(f"{tmp_start}script.stdout")
+            stderr = await self._read_exec_output(f"{tmp_start}script.stderr")
             try:
                 returncode = await self._read_return_code(tmp_start)
                 exec_response = ExecResult(
@@ -891,6 +875,22 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if len(returncode_string_stripped) == 0:
             raise ReturnCodeNotWritten()
         return int(returncode_string_stripped)
+
+    async def _read_exec_output(self, filepath: str) -> str:
+        try:
+            response = await self.agent_commands.read_file_or_blank(
+                vm_id=self.vm_id,
+                filepath=filepath,
+                max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
+            )
+        except OutputLimitExceededError as ex:
+            # truncated_output arrives in Proxmox's mangled wire form; decode it the
+            # same way as a full read so the truncated text matches what a non-truncated
+            # read would have produced, rather than leaking mojibake to the caller.
+            if ex.truncated_output is not None:
+                ex.truncated_output = self._decode_exec_output(ex.truncated_output)
+            raise
+        return self._decode_exec_output(response["content"])
 
     @staticmethod
     def _decode_exec_output(content: str) -> str:

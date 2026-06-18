@@ -563,7 +563,10 @@ runcmd:
                     vm_id=next_available_vm_id, pid=res["pid"]
                 )
                 if exec_status["exited"] == 1:
-                    if exec_status["out-data"].strip() == "status: done":
+                    # `cloud-init status --wait` prints progress dots before the
+                    # final status line, so match the trailing token, not the whole
+                    # output (status: error/degraded still fall through to the raise).
+                    if exec_status["out-data"].strip().endswith("status: done"):
                         return True
                     else:
                         raise ValueError(
