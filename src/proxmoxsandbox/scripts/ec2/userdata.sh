@@ -470,9 +470,11 @@ echo '{"agent":{}}' > /opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
 # the endpoint, which isn't running at build time. Persists in pmxcfs (baked in).
 printf 'opentelemetry: cloudwatch-otel\n\tserver 127.0.0.1\n\tport 4318\n\totel-protocol http\n\totel-path /v1/metrics\n\totel-compression gzip\n' >> /etc/pve/status.cfg
 
-# First-boot setup: resolve region from IMDS, then translate + start the agent. Done
-# at boot (not build) so ${env:AWS_REGION} resolves to the launch region and the agent
-# is never started (nor the endpoint tested) at build time.
+# Boot-time setup (runs every boot): resolve region from IMDS, then translate +
+# start the agent. Done at boot (not build) so ${env:AWS_REGION} resolves to the
+# launch region and the agent is never started (nor the endpoint tested) at build
+# time. fetch-config(base) + append-config is idempotent, so re-running each boot
+# re-resolves region/Name (e.g. on AMI relaunch) without duplicating the pipeline.
 cat > /usr/local/bin/cloudwatch-otel-apply.sh << 'OTELAPPLY'
 #!/bin/bash
 set -euo pipefail
