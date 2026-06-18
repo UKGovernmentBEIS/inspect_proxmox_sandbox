@@ -1,9 +1,4 @@
-"""Unit tests for exec timeout handling (issue #76).
-
-When the guest agent never reports a command as completed within the polling
-deadline, the underlying tenacity loop raises an opaque RetryError. exec()
-must convert that into a clear TimeoutError instead of leaking RetryError.
-"""
+"""exec() converts an exhausted poll into a clear TimeoutError, not a RetryError."""
 
 from unittest.mock import AsyncMock, MagicMock
 

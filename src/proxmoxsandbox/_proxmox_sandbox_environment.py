@@ -45,14 +45,8 @@ _INLINE_STDIN_LIMIT = 30 * 1024
 
 _IN_GUEST_KILL_GRACE = 5
 
-# Grace added to the exec polling deadline on top of the caller's timeout.
-# The in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s {timeout}s` wrapper only
-# SIGTERMs the command at `timeout`; a command that doesn't exit at once on
-# SIGTERM (e.g. `john` saves its session first) lingers until the SIGKILL at
-# `timeout`+_IN_GUEST_KILL_GRACE. Polling for only
-# `timeout` then catches the command mid-shutdown and raised an opaque
-# RetryError (issue #76); the grace lets the poll outlast the SIGKILL so the
-# real exit (rc 124, or 137 if it had to be killed) is seen instead.
+# Poll past the in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s` SIGKILL (at timeout+5s)
+# so we observe the real exit instead of catching the command mid-shutdown.
 _EXEC_POLL_GRACE_SECONDS = _IN_GUEST_KILL_GRACE + 3
 
 
@@ -212,11 +206,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         stdin_file: str | None = None,
     ) -> str:
         def generate() -> Generator[str, None, None]:
-            yield (
-                f"rm -f {tmp_start}script.stdout"
-                + f" {tmp_start}script.stderr"
-                + f" {tmp_start}script.returncode\n"
-            )
             if user is not None:
                 yield f"su -l {shlex.quote(user)} << 'EOF{tmp_start}EOF'\n"
             # The rest of the script gets quoted in a heredoc if we had to use su
@@ -224,19 +213,32 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 yield f"cd {shlex.quote(cwd)} || exit $?\n"
             for key, value in env.items():
                 yield f"export {shlex.quote(key)}={shlex.quote(value)}\n"
-            if stdin is not None:
-                yield self._pipe_user_input(stdin)
+            # Make the launch idempotent. agent/exec is retried on transient
+            # errors, so the same script can be launched more than once for this
+            # tmp_start. flock keyed on the temp path lets exactly one launch run
+            # the command and write the outputs; any duplicate blocks until that
+            # one finishes, so whichever pid we end up polling reads a consistent
+            # result and the command runs once. fd 9 (single digit) works in
+            # dash, which is /bin/sh on the default image.
+            stdin_prefix = self._pipe_user_input(stdin) if stdin is not None else ""
             cmd_line = f"{self._prefix_timeout(timeout)}{shlex.join(command)}"
             if stdin_file is not None:
                 cmd_line += f" <{shlex.quote(stdin_file)}"
+            yield f"exec 9>{tmp_start}script.lock\n"
+            yield "if flock -n 9; then\n"
             yield (
-                cmd_line
-                + f" >{tmp_start}script.stdout"
-                + f" 2>{tmp_start}script.stderr\n"
-                + 'echo -n "$?" >'
-                + f" {tmp_start}script.returncode\n"
+                f"  rm -f {tmp_start}script.stdout {tmp_start}script.stderr"
+                f" {tmp_start}script.returncode\n"
             )
-            yield "sync\n"
+            yield (
+                f"  {stdin_prefix}{cmd_line}"
+                f" >{tmp_start}script.stdout 2>{tmp_start}script.stderr\n"
+                f'  echo -n "$?" > {tmp_start}script.returncode\n'
+                "  sync\n"
+            )
+            yield "else\n"
+            yield "  flock 9\n"  # duplicate launch: wait for the real one
+            yield "fi\n"
             if user is not None:
                 yield f"EOF{tmp_start}EOF\n"
 
@@ -758,13 +760,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             try:
                 exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
             except tenacity.RetryError as ex:
-                # wait_for_exec only raises RetryError when stop_after_delay
-                # fired while exec-status still reported the process running, so
-                # timeout is set. With the grace margin this should not normally
-                # happen — the in-guest timeout SIGKILLs by timeout+5s — so it
-                # means exec-status itself could not confirm completion within
-                # timeout+grace (a genuinely unresponsive guest agent). Surface a
-                # clear TimeoutError instead of the opaque RetryError (issue #76).
+                # Grace margin should prevent this; reaching here means the guest
+                # agent never confirmed completion within timeout+grace. Surface
+                # it clearly, not as RetryError.
                 raise TimeoutError(
                     f"Command did not complete within {timeout}s "
                     f"(+{_EXEC_POLL_GRACE_SECONDS}s guest-agent grace) on VM "

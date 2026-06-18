@@ -124,7 +124,12 @@ class InfraCommands(abc.ABC):
             storage_commands,
         )
         return cls(
-            async_proxmox, node, task_wrapper, sdn_commands, qemu_commands, built_in_vm
+            async_proxmox,
+            node,
+            task_wrapper,
+            sdn_commands,
+            qemu_commands,
+            built_in_vm,
         )
 
     async def create_sdn_and_vms(
