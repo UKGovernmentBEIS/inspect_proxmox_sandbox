@@ -46,9 +46,10 @@ _INLINE_STDIN_LIMIT = 30 * 1024
 _IN_GUEST_KILL_GRACE = 5
 
 # Grace added to the exec polling deadline on top of the caller's timeout.
-# The in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s {timeout}s` wrapper only SIGTERMs the command at
-# `timeout`; a command that doesn't exit at once on SIGTERM (e.g. `john` saves
-# its session first) lingers until the SIGKILL at `timeout`+_IN_GUEST_KILL_GRACE. Polling for only
+# The in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s {timeout}s` wrapper only
+# SIGTERMs the command at `timeout`; a command that doesn't exit at once on
+# SIGTERM (e.g. `john` saves its session first) lingers until the SIGKILL at
+# `timeout`+_IN_GUEST_KILL_GRACE. Polling for only
 # `timeout` then catches the command mid-shutdown and raised an opaque
 # RetryError (issue #76); the grace lets the poll outlast the SIGKILL so the
 # real exit (rc 124, or 137 if it had to be killed) is seen instead.

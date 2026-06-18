@@ -77,9 +77,10 @@ def _make_structured_payload(line_count: int) -> bytes:
     predictable. ~5 MiB for 200k lines — well over the 1 MiB fast-path
     threshold.
     """
-    return b"\n".join(
-        f"line {i:08d} payload xyz".encode() for i in range(line_count)
-    ) + b"\n"
+    return (
+        b"\n".join(f"line {i:08d} payload xyz".encode() for i in range(line_count))
+        + b"\n"
+    )
 
 
 _DMESG_RED_FLAGS = (
@@ -159,7 +160,8 @@ def _write_and_inspect(line_count: int) -> Solver:
         new_dmesg = "\n".join(chunks[5:]).strip()
 
         red_flag_hits = [
-            line for line in new_dmesg.splitlines()
+            line
+            for line in new_dmesg.splitlines()
             if any(flag in line for flag in _DMESG_RED_FLAGS)
         ]
 
@@ -194,7 +196,7 @@ def _iso_write_health_scorer():
         checks = {
             "lines": m.get("actual_lines") == m.get("expected_lines"),
             "bytes": m.get("actual_bytes") == m.get("payload_size"),
-            "sha":   m.get("actual_sha") == m.get("expected_sha"),
+            "sha": m.get("actual_sha") == m.get("expected_sha"),
             "kernel_quiet": not m.get("dmesg_red_flags"),
         }
         all_ok = all(checks.values())
@@ -295,9 +297,9 @@ def test_iso_write_fast_path_via_eval() -> None:
     # this log line; if it were used, this assertion would catch a silent
     # regression).
     iso_write_log_lines = [
-        msg for (name, msg) in captured
-        if name == "proxmoxsandbox._impl.iso_write"
-        and msg.startswith("iso_write vm=")
+        msg
+        for (name, msg) in captured
+        if name == "proxmoxsandbox._impl.iso_write" and msg.startswith("iso_write vm=")
     ]
     assert iso_write_log_lines, (
         f"expected at least one 'iso_write vm=' log line proving the "
@@ -307,9 +309,7 @@ def test_iso_write_fast_path_via_eval() -> None:
 
     # Hard: the per-VM disable mechanism didn't fire — that warning
     # would mean iso_write gave up on this VM entirely.
-    disabled_warnings = [
-        msg for (_, msg) in captured if "fast path disabled" in msg
-    ]
+    disabled_warnings = [msg for (_, msg) in captured if "fast path disabled" in msg]
     assert not disabled_warnings, (
         f"fast path got disabled unexpectedly: {disabled_warnings}"
     )
@@ -325,7 +325,8 @@ def test_iso_write_fast_path_via_eval() -> None:
             "iso_write fast path emitted guest kernel red flags during "
             "write (path recovered, but worth investigating): %s "
             "(new dmesg lines added: %s)",
-            red_flags, m.get("dmesg_lines_added"),
+            red_flags,
+            m.get("dmesg_lines_added"),
         )
 
 
