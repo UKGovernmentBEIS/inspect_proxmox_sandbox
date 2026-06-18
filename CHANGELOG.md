@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process (e.g. `pkill -f`); it returns a failed `ExecResult` (`128+signal`, or `137` when the signal is unavailable) instead of raising a misleading `TimeoutError` (#75)
+- Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process (e.g. `pkill -f`); it returns a failed `ExecResult` (`128+signal`, or `137` when the signal is unavailable) instead of raising a misleading `TimeoutError`
 
 ## 0.11.0 - 2026-06-01
 
