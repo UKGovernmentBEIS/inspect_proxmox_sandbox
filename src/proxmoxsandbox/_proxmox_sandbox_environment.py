@@ -43,6 +43,10 @@ from proxmoxsandbox.schema import (
 # for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
 _INLINE_STDIN_LIMIT = 30 * 1024
 
+# Raw bytes per exec-wrapper-script chunk; base64 stays under the 61440-char
+# agent/file-write cap.
+_SCRIPT_CHUNK_SIZE = 40 * 1024
+
 _IN_GUEST_KILL_GRACE = 5
 
 # Poll past the in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s` SIGKILL (at timeout+5s)
@@ -714,9 +718,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 timeout=timeout,
             )
             script_path = f"{tmp_start}script.bat"
-            await self._write_file_only(script_path, script)
+            launch = await self._upload_exec_script(
+                script_path, script, is_windows=True
+            )
             exec_post_response = await self.agent_commands.exec_command(
-                vm_id=self.vm_id, command=["cmd.exe", "/c", script_path]
+                vm_id=self.vm_id, command=launch
             )
         else:
             # Inlined stdin is base64-encoded into the script, which itself
@@ -753,9 +759,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 timeout=timeout,
                 stdin_file=stdin_file,
             )
-            await self._write_file_only(f"{tmp_start}script.sh", script)
+            launch = await self._upload_exec_script(
+                f"{tmp_start}script.sh", script, is_windows=False
+            )
             exec_post_response = await self.agent_commands.exec_command(
-                vm_id=self.vm_id, command=["sh", f"{tmp_start}script.sh"]
+                vm_id=self.vm_id, command=launch
             )
 
         exec_response_pid = exec_post_response["pid"]
@@ -930,6 +938,49 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     raise ex
             else:
                 raise ex
+
+    async def _upload_exec_script(
+        self, script_path: str, script: str, is_windows: bool
+    ) -> List[str]:
+        """Upload the exec wrapper script; return the command that runs it.
+
+        Bootstrap-safe: uses only _write_file_only and agent_commands.exec_command,
+        never self.exec / self.write_file (those re-enter exec and would recurse).
+        """
+        data = script.encode("utf-8")
+        if len(data) <= _SCRIPT_CHUNK_SIZE:
+            await self._write_file_only(script_path, data)
+            return (
+                ["cmd.exe", "/c", script_path]
+                if is_windows
+                else ["sh", script_path]
+            )
+
+        chunks = [
+            data[i : i + _SCRIPT_CHUNK_SIZE]
+            for i in range(0, len(data), _SCRIPT_CHUNK_SIZE)
+        ]
+        width = len(str(len(chunks) - 1))
+        for i, chunk in enumerate(chunks):
+            await self._write_file_only(f"{script_path}.part{i:0{width}d}", chunk)
+
+        if is_windows:
+            parts = "+".join(
+                f'"{script_path}.part{i:0{width}d}"' for i in range(len(chunks))
+            )
+            return [
+                "cmd.exe",
+                "/c",
+                f'copy /b {parts} "{script_path}" >nul && "{script_path}"',
+            ]
+        # zero-padded names sort correctly under the glob, so cat reassembles in
+        # order; the combine runs in the SAME launched command we already poll —
+        # no extra wait.
+        return [
+            "sh",
+            "-c",
+            f"cat {script_path}.part* > {script_path} && exec sh {script_path}",
+        ]
 
     # Above this size, write_file uses the ISO fast path; below it, chunked
     # QGA. Not a true crossover: benchmarking (live ubuntu24.04) found ISO

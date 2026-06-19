@@ -83,6 +83,23 @@ async def test_exec_10mb_limit(
     assert len(body) > 1_000_000
 
 
+async def test_exec_large_command(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    # A command large enough that its wrapper script exceeds the 61440-char
+    # agent/file-write cap. Pre-fix this fails with HTTP 400 "value may only be
+    # 61440 characters long"; the chunked script upload must handle it.
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("large-command wrapper chunking asserted on Linux only")
+
+    payload = "a" * (100 * 1024)  # ~133 KiB base64 wrapper script, over the cap
+    result = await proxmox_sandbox_environment.exec(
+        ["echo", "-n", payload], timeout=60
+    )
+    assert result.success
+    assert result.stdout == payload
+
+
 CURRENT_DIR = Path(__file__).parent
 
 
