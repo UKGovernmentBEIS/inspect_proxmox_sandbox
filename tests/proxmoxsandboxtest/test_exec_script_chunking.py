@@ -33,12 +33,21 @@ _WINDOWS = (True, r"C:\Windows\Temp\proxmox_script.bat")
 _OS_PARAMS = [pytest.param(*_LINUX, id="linux"), pytest.param(*_WINDOWS, id="windows")]
 
 
+# `== _WRITE_CHUNK_SIZE` is the last size that still fits one write; the chunked
+# branch starts at `+ 1`. Both boundaries are exercised so the `<=` can't drift.
+@pytest.mark.parametrize(
+    "size",
+    [mod._WRITE_CHUNK_SIZE - 100, mod._WRITE_CHUNK_SIZE],
+    ids=["under", "at-boundary"],
+)
 @pytest.mark.parametrize("is_windows,script_path", _OS_PARAMS)
-async def test_small_script_single_write(is_windows: bool, script_path: str) -> None:
+async def test_small_script_single_write(
+    is_windows: bool, script_path: str, size: int
+) -> None:
     env = _make_sandbox()
     env._write_file_only = AsyncMock()  # type: ignore[method-assign]
 
-    script = "a" * (mod._SCRIPT_CHUNK_SIZE - 100)
+    script = "a" * size
     launch = await env._upload_exec_script(script_path, script, is_windows=is_windows)
 
     env._write_file_only.assert_awaited_once_with(script_path, script.encode("utf-8"))
@@ -47,15 +56,23 @@ async def test_small_script_single_write(is_windows: bool, script_path: str) -> 
     )
 
 
+# `+ 1` is the smallest chunked script (2 parts); 11 chunks forces a two-digit
+# part index (`.part10`), which only sorts after `.part09` because the names are
+# zero-padded — the property the glob reassembly relies on.
+@pytest.mark.parametrize(
+    "size",
+    [mod._WRITE_CHUNK_SIZE + 1, 130 * 1024, 11 * mod._WRITE_CHUNK_SIZE],
+    ids=["just-over", "multi-chunk", "two-digit-index"],
+)
 @pytest.mark.parametrize("is_windows,script_path", _OS_PARAMS)
 async def test_large_script_chunked_and_reassembled(
-    is_windows: bool, script_path: str
+    is_windows: bool, script_path: str, size: int
 ) -> None:
     env = _make_sandbox()
     env._write_file_only = AsyncMock()  # type: ignore[method-assign]
 
-    data = ("a" * (130 * 1024)).encode("utf-8")
-    expected_chunks = -(-len(data) // mod._SCRIPT_CHUNK_SIZE)
+    data = ("a" * size).encode("utf-8")
+    expected_chunks = -(-len(data) // mod._WRITE_CHUNK_SIZE)
     assert expected_chunks > 1
     width = len(str(expected_chunks - 1))
 
@@ -68,6 +85,10 @@ async def test_large_script_chunked_and_reassembled(
         f"{script_path}.part{i:0{width}d}" for i in range(expected_chunks)
     ]
     assert written_paths == expected_paths
+    # The invariant the zero-padding exists for: written (= numeric) order must
+    # equal lexical order, so the shell glob reassembles chunks in sequence.
+    # Unpadded names would put `.part10` before `.part2` and fail this.
+    assert written_paths == sorted(written_paths)
     # Round-tripping the written chunks must reproduce the original script bytes.
     assert b"".join(c.args[1] for c in env._write_file_only.await_args_list) == data
 

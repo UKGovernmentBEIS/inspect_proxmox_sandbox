@@ -43,9 +43,12 @@ from proxmoxsandbox.schema import (
 # for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
 _INLINE_STDIN_LIMIT = 30 * 1024
 
-# Raw bytes per exec-wrapper-script chunk; base64 stays under the 61440-char
-# agent/file-write cap.
-_SCRIPT_CHUNK_SIZE = 40 * 1024
+# 40KB chunks to be safe, to take base64 encoding into account
+# note this 40KB limit was based on the Proxmox <=8.3 limit of
+# 60Kb, but this was increased in Proxmox 8.4, so could
+# potentially be increased here. Would need to check the
+# version number to ensure backward compatibility.
+_WRITE_CHUNK_SIZE = 40 * 1024
 
 _IN_GUEST_KILL_GRACE = 5
 
@@ -948,17 +951,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         never self.exec / self.write_file (those re-enter exec and would recurse).
         """
         data = script.encode("utf-8")
-        if len(data) <= _SCRIPT_CHUNK_SIZE:
+        if len(data) <= _WRITE_CHUNK_SIZE:
             await self._write_file_only(script_path, data)
-            return (
-                ["cmd.exe", "/c", script_path]
-                if is_windows
-                else ["sh", script_path]
-            )
+            return ["cmd.exe", "/c", script_path] if is_windows else ["sh", script_path]
 
         chunks = [
-            data[i : i + _SCRIPT_CHUNK_SIZE]
-            for i in range(0, len(data), _SCRIPT_CHUNK_SIZE)
+            data[i : i + _WRITE_CHUNK_SIZE]
+            for i in range(0, len(data), _WRITE_CHUNK_SIZE)
         ]
         width = len(str(len(chunks) - 1))
         for i, chunk in enumerate(chunks):
@@ -995,14 +994,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     async def write_file(self, file: str, contents: str | bytes) -> None:
         # Writes contents to file, handling large files by splitting them into chunks
         # and recombining using cat (Linux) or copy /b (Windows).
-
-        CHUNK_SIZE = (
-            40 * 1024
-        )  # 40KB chunks to be safe, to take base64 encoding into account
-        # note this 40KB limit was based on the Proxmox <=8.3 limit of
-        # 60Kb, but this was increased in Proxmox 8.4, so could
-        # potentially be increased here. Would need to check the
-        # version number to ensure backward compatibility.
 
         is_windows = self._is_windows()
 
@@ -1072,13 +1063,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
 
         # If content is small enough, write directly
-        if len(contents) <= CHUNK_SIZE:
+        if len(contents) <= _WRITE_CHUNK_SIZE:
             await self._write_file_only(file, contents)
             return
 
         # For large contents, split into chunks
         chunks = [
-            contents[i : i + CHUNK_SIZE] for i in range(0, len(contents), CHUNK_SIZE)
+            contents[i : i + _WRITE_CHUNK_SIZE] for i in range(0, len(contents), _WRITE_CHUNK_SIZE)
         ]
 
         # Calculate padding width based on number of chunks

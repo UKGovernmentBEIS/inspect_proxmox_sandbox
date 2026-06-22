@@ -93,9 +93,7 @@ async def test_exec_large_command(
         pytest.skip("large-command wrapper chunking asserted on Linux only")
 
     payload = "a" * (100 * 1024)  # ~133 KiB base64 wrapper script, over the cap
-    result = await proxmox_sandbox_environment.exec(
-        ["echo", "-n", payload], timeout=60
-    )
+    result = await proxmox_sandbox_environment.exec(["echo", "-n", payload], timeout=60)
     assert result.success
     assert result.stdout == payload
 
