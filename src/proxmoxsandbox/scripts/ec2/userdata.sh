@@ -431,6 +431,10 @@ systemctl enable proxmox-ami-fixup-firewall.service
 # and injected via OTEL_RESOURCE_ATTRIBUTES, picked up by resourcedetection's env
 # detector -- no ec2:DescribeTags IAM needed. Do NOT use the ec2 detector's
 # tags_from_imds: the CloudWatch agent's embedded collector rejects that key.
+#
+# A filter processor trims pvestatd's ~1400 datapoints/cycle down to memory, CPU and
+# disk (see its comment below) -- the full set exceeds CloudWatch's 1000-per-request
+# limit; the batch processor also hard-caps each request at 1000 as a backstop.
 curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/debian/amd64/latest/amazon-cloudwatch-agent.deb" \
     -o /tmp/cwagent.deb
 dpkg -i /tmp/cwagent.deb
@@ -447,8 +451,23 @@ processors:
     # ec2 adds instance-id/region/AZ/type.
     detectors: [env, ec2]
     timeout: 5s
+  # Keep only memory, CPU and disk (capacity + I/O) for guests and host. pvestatd emits
+  # ~1400 datapoints/cycle and the bulk is per-VM-per-disk proxmox_vm_blockstat_*, which
+  # blows past CloudWatch's 1000-datapoints-per-request limit. Of blockstat we keep only
+  # rd/wr operations + total_time_ns per device (IOPS, and latency = Dtime/Dops) -- the
+  # [a-z]+[0-9]+ device match deliberately excludes failed_/invalid_ op counters. io PSI
+  # (pressureio*) shows tasks stalled on I/O. Everything else is dropped.
+  filter/cwagent:
+    error_mode: ignore
+    metrics:
+      metric:
+        - 'not IsMatch(name, "^(proxmox_vm_(cpu|cpus|mem|maxmem|memhost|balloon|freemem|disk|maxdisk)|proxmox_vm_pressureio(full|some)|proxmox_vm_blockstat_[a-z]+[0-9]+_(rd|wr)_(operations|total_time_ns)_total|proxmox_node_(memory|cpustat|blockstat)_.+|proxmox_storage_(used|total|avail))$")'
   cumulativetodelta/cwagent: {}
-  batch/cwagent: {}
+  # Hard cap so a request can never exceed CloudWatch's 1000-datapoint limit, even if
+  # the guest count grows past what the filter trims to.
+  batch/cwagent:
+    send_batch_size: 1000
+    send_batch_max_size: 1000
 exporters:
   otlphttp/cwagent:
     metrics_endpoint: "https://monitoring.${env:AWS_REGION}.amazonaws.com/v1/metrics"
@@ -461,7 +480,7 @@ service:
   pipelines:
     metrics/cwagent:
       receivers: [otlp/cwagent]
-      processors: [resourcedetection/cwagent, cumulativetodelta/cwagent, batch/cwagent]
+      processors: [filter/cwagent, resourcedetection/cwagent, cumulativetodelta/cwagent, batch/cwagent]
       exporters: [otlphttp/cwagent]
 OTELYAML
 echo '{"agent":{}}' > /opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
