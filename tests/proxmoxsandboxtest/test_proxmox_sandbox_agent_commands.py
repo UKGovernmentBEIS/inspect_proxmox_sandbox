@@ -86,16 +86,25 @@ async def test_exec_10mb_limit(
 async def test_exec_large_command(
     proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
 ) -> None:
-    # A command large enough that its wrapper script exceeds the 61440-char
-    # agent/file-write cap. Pre-fix this fails with HTTP 400 "value may only be
-    # 61440 characters long"; the chunked script upload must handle it.
+    # A command whose wrapper script exceeds both the 61440-char agent/file-write
+    # cap and the 128 KiB ISO threshold, so it exercises the ISO-fast-path ->
+    # chunked-QGA fallback chain end to end.
+    #
+    # Built from many medium arguments rather than one giant one: the wrapper runs
+    # the command under the external `timeout` binary, so a single ~1 MiB argument
+    # would hit MAX_ARG_STRLEN (128 KiB per argv element) and fail with E2BIG long
+    # before testing the script transport. `printf %s` cycles its format over every
+    # argument, so stdout is the chunks concatenated with no separators or newline.
     if proxmox_sandbox_environment._is_windows():
         pytest.skip("large-command wrapper chunking asserted on Linux only")
 
-    payload = "a" * (100 * 1024)  # ~133 KiB base64 wrapper script, over the cap
-    result = await proxmox_sandbox_environment.exec(["echo", "-n", payload], timeout=60)
-    assert result.success
-    assert result.stdout == payload
+    chunk = "a" * (64 * 1024)
+    n = 16  # ~1 MiB wrapper script, over both caps; each arg well under MAX_ARG_STRLEN
+    result = await proxmox_sandbox_environment.exec(
+        ["printf", "%s", *([chunk] * n)], timeout=60
+    )
+    assert result.success, f"printf failed: stderr=[{result.stderr}]"
+    assert result.stdout == chunk * n
 
 
 CURRENT_DIR = Path(__file__).parent

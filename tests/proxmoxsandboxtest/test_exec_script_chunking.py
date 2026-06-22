@@ -46,6 +46,7 @@ async def test_small_script_single_write(
 ) -> None:
     env = _make_sandbox()
     env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
     script = "a" * size
     launch = await env._upload_exec_script(script_path, script, is_windows=is_windows)
@@ -70,6 +71,10 @@ async def test_large_script_chunked_and_reassembled(
 ) -> None:
     env = _make_sandbox()
     env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    # Force the chunked path: above 128 KiB _upload_exec_script tries the ISO
+    # fast path first, which with MagicMock collaborators would error (and flip
+    # the disabled flag) instead of cleanly skipping.
+    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
     data = ("a" * size).encode("utf-8")
     expected_chunks = -(-len(data) // mod._WRITE_CHUNK_SIZE)
@@ -116,6 +121,7 @@ async def test_chunked_upload_does_not_re_enter_exec(
     # (which re-enter the exec primitive), it recurses without bound — fail loudly.
     env = _make_sandbox()
     env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
     env.exec = AsyncMock()  # type: ignore[method-assign]
     env.write_file = AsyncMock()  # type: ignore[method-assign]
 
@@ -124,3 +130,24 @@ async def test_chunked_upload_does_not_re_enter_exec(
 
     env.exec.assert_not_called()
     env.write_file.assert_not_called()
+
+
+@pytest.mark.parametrize("is_windows,script_path", _OS_PARAMS)
+async def test_iso_fast_path_launches_single_file(
+    is_windows: bool, script_path: str
+) -> None:
+    # When the ISO fast path writes the whole script, _upload_exec_script must
+    # just launch it — no chunking, no per-file writes. The Windows variant
+    # forces True only to exercise the branch; IsoWriter itself is Linux-only.
+    env = _make_sandbox()
+    env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    env._try_iso_write = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    script = "a" * (130 * 1024)
+    launch = await env._upload_exec_script(script_path, script, is_windows=is_windows)
+
+    env._try_iso_write.assert_awaited_once_with(script_path, script.encode("utf-8"))
+    env._write_file_only.assert_not_called()
+    assert launch == (
+        ["cmd.exe", "/c", script_path] if is_windows else ["sh", script_path]
+    )
