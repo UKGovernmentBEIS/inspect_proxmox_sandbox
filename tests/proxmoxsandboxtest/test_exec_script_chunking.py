@@ -151,3 +151,26 @@ async def test_iso_fast_path_launches_single_file(
     assert launch == (
         ["cmd.exe", "/c", script_path] if is_windows else ["sh", script_path]
     )
+
+
+async def test_write_file_chunks_text_by_encoded_bytes() -> None:
+    env = _make_sandbox()
+    env.exec = AsyncMock()  # type: ignore[method-assign]
+    env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    payload = "é" * (mod._WRITE_CHUNK_SIZE // 2 + 1)
+    data = payload.encode("utf-8")
+    assert len(payload) <= mod._WRITE_CHUNK_SIZE < len(data)
+
+    await env.write_file("/tmp/out.txt", payload)
+
+    chunk_writes = [
+        call
+        for call in env._write_file_only.await_args_list
+        if "/chunk_" in call.args[0]
+    ]
+    assert [call.args[1] for call in chunk_writes] == [
+        data[: mod._WRITE_CHUNK_SIZE],
+        data[mod._WRITE_CHUNK_SIZE :],
+    ]

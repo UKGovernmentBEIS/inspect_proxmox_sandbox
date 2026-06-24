@@ -1080,6 +1080,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if await self._try_iso_write(file, contents):
             return
 
+        content_bytes = (
+            contents if isinstance(contents, bytes) else contents.encode("utf-8")
+        )
+
         # Create parent directory
         if is_windows:
             parent_dir = str(PureWindowsPath(file).parent)
@@ -1096,18 +1100,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
 
         # If content is small enough, write directly
-        if len(contents) <= _WRITE_CHUNK_SIZE:
-            await self._write_file_only(file, contents)
+        if len(content_bytes) <= _WRITE_CHUNK_SIZE:
+            await self._write_file_only(file, content_bytes)
             return
 
         # For large contents, split into chunks
-        chunks = [
-            contents[i : i + _WRITE_CHUNK_SIZE]
-            for i in range(0, len(contents), _WRITE_CHUNK_SIZE)
-        ]
-
-        # Calculate padding width based on number of chunks
-        padding_width = len(str(len(chunks) - 1))
+        chunks, padding_width = _split_chunks(content_bytes)
 
         # Use appropriate temp directory
         if is_windows:
