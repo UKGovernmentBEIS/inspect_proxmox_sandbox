@@ -74,7 +74,31 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata() -> None:
             f"SSH on {gw}:22 reachable from sandbox VM: {ssh_res.stdout!r}"
         )
 
-        metadata_res = await env.exec(
+        # A token PUT can time out solely because HttpPutResponseHopLimit=1,
+        # even when IMDS is reachable. A tokenless GET returns 401 when IMDSv2
+        # is required (or 200 when optional), so 000 specifically verifies that
+        # the host forwarding rule blocked the request.
+        metadata_get_res = await env.exec(
+            [
+                "curl",
+                "-sS",
+                "--max-time",
+                "5",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "http://169.254.169.254/latest/meta-data/instance-id",
+            ],
+            timeout=15,
+        )
+        assert metadata_get_res.stdout.strip() == "000", (
+            "cloud instance metadata reachable from sandbox VM "
+            f"(curl returned http_code={metadata_get_res.stdout.strip()!r}). "
+            "Was the metadata forwarding block installed?"
+        )
+
+        metadata_token_res = await env.exec(
             [
                 "curl",
                 "-sS",
@@ -92,9 +116,9 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata() -> None:
             ],
             timeout=15,
         )
-        assert metadata_res.stdout.strip() == "000", (
-            "cloud instance metadata reachable from sandbox VM "
-            f"(curl returned http_code={metadata_res.stdout.strip()!r}). "
+        assert metadata_token_res.stdout.strip() == "000", (
+            "cloud instance metadata token endpoint reachable from sandbox VM "
+            f"(curl returned http_code={metadata_token_res.stdout.strip()!r}). "
             "Was the metadata forwarding block installed?"
         )
 

@@ -35,7 +35,9 @@ def test_provisioners_block_forwarded_cloud_metadata(
 ) -> None:
     script = provisioner.read_text()
 
-    assert "-t raw -C PREROUTING -d 169.254.169.254/32 -j DROP" in script
-    assert "-t raw -C PREROUTING -d fd00:ec2::254/128 -j DROP" in script
+    assert "iptables -w -t raw -C PREROUTING -d 169.254.169.254/32 -j DROP" in script
+    assert "iptables -w -t raw -I PREROUTING 1 -d 169.254.169.254/32 -j DROP" in script
+    assert "ip6tables -w -t raw -C PREROUTING -d fd00:ec2::254/128 -j DROP" in script
+    assert "ip6tables -w -t raw -I PREROUTING 1 -d fd00:ec2::254/128 -j DROP" in script
     assert "ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh" in script
     assert "systemctl enable inspect-proxmox-block-cloud-metadata.service" in script
