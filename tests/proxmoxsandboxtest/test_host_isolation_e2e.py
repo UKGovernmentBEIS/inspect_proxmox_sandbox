@@ -15,12 +15,14 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
 from .proxmox_sandbox_utils import setup_sandbox
 
 
-async def test_sandbox_vm_cannot_reach_pveproxy_or_ssh() -> None:
-    """A sandbox VM brought up via sample_init can't curl pveproxy or SSH.
+async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata() -> None:
+    """A sandbox VM can't reach host services or cloud instance metadata.
 
     The VM reaches the host over its SDN bridge, so its packets never ingress
     on the host's management interface and hit the default-deny policy — even
-    when aimed at the SDN gateway IP where pveproxy also listens.
+    when aimed at the SDN gateway IP where pveproxy also listens. Metadata
+    traffic is forwarded rather than host-bound, so provisioning also installs
+    an explicit forwarding block for the fixed metadata endpoints.
     """
     task_name = "test_host_isolation_e2e"
     config = ProxmoxSandboxEnvironmentConfig()
@@ -70,6 +72,30 @@ async def test_sandbox_vm_cannot_reach_pveproxy_or_ssh() -> None:
         )
         assert ssh_res.stdout.strip() == "blocked", (
             f"SSH on {gw}:22 reachable from sandbox VM: {ssh_res.stdout!r}"
+        )
+
+        metadata_res = await env.exec(
+            [
+                "curl",
+                "-sS",
+                "--max-time",
+                "5",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-X",
+                "PUT",
+                "-H",
+                "X-aws-ec2-metadata-token-ttl-seconds: 60",
+                "http://169.254.169.254/latest/api/token",
+            ],
+            timeout=15,
+        )
+        assert metadata_res.stdout.strip() == "000", (
+            "cloud instance metadata reachable from sandbox VM "
+            f"(curl returned http_code={metadata_res.stdout.strip()!r}). "
+            "Was the metadata forwarding block installed?"
         )
 
     finally:

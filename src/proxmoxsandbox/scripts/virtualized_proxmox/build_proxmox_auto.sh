@@ -255,6 +255,42 @@ pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp
 pvesh set /nodes/proxmox/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
 
+# Block forwarded sandbox traffic to cloud instance metadata while preserving
+# metadata access for processes running directly on the Proxmox host. Install
+# this as a boot service because the template is powered off below and later
+# cloned into fresh Proxmox instances.
+cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
+#!/bin/bash
+set -euo pipefail
+
+iptables -w -t raw -C PREROUTING -d 169.254.169.254/32 -j DROP 2>/dev/null \
+    || iptables -w -t raw -I PREROUTING 1 -d 169.254.169.254/32 -j DROP
+
+if command -v ip6tables >/dev/null; then
+    ip6tables -w -t raw -C PREROUTING -d fd00:ec2::254/128 -j DROP 2>/dev/null \
+        || ip6tables -w -t raw -I PREROUTING 1 -d fd00:ec2::254/128 -j DROP
+fi
+BLOCK_METADATA
+chmod +x /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
+
+cat > /etc/systemd/system/inspect-proxmox-block-cloud-metadata.service << 'BLOCK_METADATA_UNIT'
+[Unit]
+Description=Block sandbox forwarding to cloud instance metadata
+After=network-online.target pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BLOCK_METADATA_UNIT
+
+systemctl daemon-reload
+systemctl enable inspect-proxmox-block-cloud-metadata.service
+
 touch /var/local/inspect-proxmox-on-first-boot.done
 
 # shut down to signal to virt-install that installation is complete

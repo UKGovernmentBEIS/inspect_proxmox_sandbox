@@ -68,6 +68,9 @@ aws ec2 wait image-available --region "$REGION" --image-ids <ami-id>
 aws ec2 terminate-instances --region "$REGION" --instance-ids <instance-id>
 ```
 
+Rebuild AMIs created with older versions of these scripts so the persistent
+guest-to-metadata forwarding block is present on the host.
+
 ## Everyday: launch from the AMI
 
 Find the AMI ID for the latest Proxmox AMI you built:
@@ -87,7 +90,7 @@ aws ec2 run-instances --region "$REGION" \
     --cpu-options "NestedVirtualization=enabled" \
     --subnet-id "$SUBNET_ID" \
     --security-group-ids "$SECURITY_GROUP_ID" \
-    --metadata-options "InstanceMetadataTags=enabled"
+    --metadata-options "HttpTokens=required,HttpPutResponseHopLimit=1,HttpProtocolIpv6=disabled,InstanceMetadataTags=enabled"
     # add --iam-instance-profile Name=<profile> if SSM access doesn't come from DHMC
 ```
 
@@ -122,6 +125,11 @@ outbound traffic via iptables MASQUERADE. VM gateway: `10.10.10.1`. DNS:
 `169.254.169.253` (VPC resolver). VMs can't bind directly to the VPC subnet
 because EC2 only routes to IPs on attached ENIs.
 
+Sandbox forwarding to the EC2 metadata endpoints (`169.254.169.254` and
+`fd00:ec2::254`) is blocked on the Proxmox host. Processes running directly on
+the host retain IMDS access. Keep `HttpPutResponseHopLimit=1`; increasing it
+allows nested guests to receive IMDSv2 token responses.
+
 ## Metrics (CloudWatch)
 
 The instance ships a localhost CloudWatch agent that forwards Proxmox's `pvestatd`
@@ -136,8 +144,8 @@ instance-id. It is additionally labelled with the instance `Name` tag **only if
 the launcher enables instance metadata tags**. Like the hostname and root
 password (see fixup services below), this is a per-launch attribute set at
 `run-instances` time — it is **not** baked into the AMI. Pass
-`--metadata-options InstanceMetadataTags=enabled` (as `launch.sh` does for the
-build instance, and as the everyday-launch example above does) or you get
+`InstanceMetadataTags=enabled` in `--metadata-options` (as `launch.sh` does for
+the build instance, and as the everyday-launch example above does) or you get
 instance-id only.
 
 ## EC2-specific bits handled by `userdata.sh`
@@ -151,6 +159,7 @@ instance-id only.
   (see <https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/>).
 - `/run/dnsmasq/resolv.conf` shim for SDN dnsmasq DNS forwarding.
 - AMI fixup services for hostname + SSL cert + root password regeneration on every boot.
+- A boot-time firewall rule blocking sandbox forwarding to EC2 instance metadata.
 - CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
 
 ## Other scripts

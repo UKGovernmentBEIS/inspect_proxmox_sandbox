@@ -38,8 +38,9 @@ If you don't already have a Proxmox instance, see [CONTRIBUTING.md](CONTRIBUTING
 
 By default a sandbox VM can reach the Proxmox host's own services — the API
 (`pveproxy`, port 8006), SSH, etc. — via the SDN gateway, the `vmbr0` IP, or the
-host's external NIC. For cyber evals especially, you want those blocked so agents
-can't attack the Proxmox control plane.
+host's external NIC. Forwarded traffic can also reach cloud instance metadata
+services. For cyber evals especially, you want those blocked so agents can't
+attack the Proxmox or cloud control planes.
 
 This is **configured on the host at provisioning time, not by this library** — it
 needs the host's live routing table to know which interface external API/SSH
@@ -48,10 +49,11 @@ provisioning scripts in this repo (`scripts/virtualized_proxmox/build_proxmox_au
 and `scripts/ec2/userdata.sh`) set it up automatically, so hosts you create with
 them are isolated out of the box.
 
-If you provision Proxmox some other way, run these once **on the node**. They
-accept the management ports only on the default-route interface (where external
-callers arrive) and leave SDN DNS/DHCP open; sandbox VMs sit on other bridges and
-hit the default-deny policy:
+If you provision Proxmox some other way, configure equivalent persistent rules
+**on the node**. The Proxmox rules accept management ports only on the
+default-route interface (where external callers arrive) and leave SDN DNS/DHCP
+open. The raw-table rules block forwarded sandbox traffic to the fixed EC2
+metadata endpoints without preventing host processes from using them:
 
 ```bash
 NIC=$(ip route show default | awk '{print $5}' | head -1)
@@ -62,7 +64,18 @@ pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto
 pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1
 pvesh set /nodes/$(hostname)/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
+iptables -w -t raw -C PREROUTING -d 169.254.169.254/32 -j DROP 2>/dev/null \
+    || iptables -w -t raw -I PREROUTING 1 -d 169.254.169.254/32 -j DROP
+if command -v ip6tables >/dev/null; then
+    ip6tables -w -t raw -C PREROUTING -d fd00:ec2::254/128 -j DROP 2>/dev/null \
+        || ip6tables -w -t raw -I PREROUTING 1 -d fd00:ec2::254/128 -j DROP
+fi
 ```
+
+Persist the raw-table rules across reboots using your host firewall tooling or
+a systemd unit. The bundled provisioning scripts install such a unit.
+Upgrading this package does not modify existing Proxmox hosts or templates;
+rebuild them or apply these rules manually.
 
 ### Single Proxmox Instance
 
