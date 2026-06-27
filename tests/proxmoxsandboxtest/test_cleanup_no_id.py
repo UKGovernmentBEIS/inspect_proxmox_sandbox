@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
+from proxmoxsandbox._impl.sdn_commands import is_ephemeral_zone
 
 
 def _make_infra(
@@ -112,6 +113,62 @@ async def test_cleanup_targets_provider_zone_via_regex():
     zones_passed = args[0]
     assert zones_passed == {"tlo123z"}, (
         f"only the regex-matching zone should be targeted; got: {zones_passed}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("zone_id", "ephemeral"),
+    [
+        ("tlo123z", True),
+        ("000000z", True),
+        # Near-miss user-owned names that share a 7-char prefix with a
+        # provider zone — these must NOT be claimed for deletion.
+        ("abc123za", False),
+        ("abc123z-prod", False),
+        ("abc123zz", False),
+        # Conforming substring not at the start.
+        ("xabc123z", False),
+        # Static built-in SDN.
+        ("inspvmz", False),
+        # Generic user-named zones.
+        ("user_zone", False),
+        ("a254c5f5", False),
+    ],
+)
+def test_is_ephemeral_zone_anchored(zone_id: str, ephemeral: bool) -> None:
+    """is_ephemeral_zone matches only exact provider zone names.
+
+    Cleanup uses this predicate as the ownership boundary for non-interactive
+    SDN deletion, so a prefix or substring match would let cleanup destroy
+    unrelated infrastructure on a shared Proxmox host.
+    """
+    assert is_ephemeral_zone(zone_id) is ephemeral
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_zone_with_matching_prefix_only():
+    """A user zone whose 7-char *prefix* matches ZONE_REGEX is left alone.
+
+    The provider only ever creates zone names of exactly 7 characters
+    (`{3 chars}{3 digits}z`); a longer name with that prefix is somebody
+    else's zone and must not be swept.
+    """
+    infra = _make_infra(
+        vms=[],
+        zones=[
+            {"zone": "abc123za", "type": "simple"},  # near-miss, NOT ours
+            {"zone": "tlo123z", "type": "simple"},  # ours
+        ],
+        vnets=[],
+    )
+
+    await infra.cleanup_no_id(skip_confirmation=True)
+
+    args, _ = infra.sdn_commands.tear_down_sdn_zones_and_vnets.call_args
+    zones_passed = args[0]
+    assert zones_passed == {"tlo123z"}, (
+        "near-miss user zone with matching prefix wrongly targeted; "
+        f"got: {zones_passed}"
     )
 
 

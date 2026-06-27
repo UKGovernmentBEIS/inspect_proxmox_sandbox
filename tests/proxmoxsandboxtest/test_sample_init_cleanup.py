@@ -245,12 +245,15 @@ async def test_sample_init_precheck_ignores_pre_existing_vnets(
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     sdn_mock = MagicMock()
-    # Pre-existing user vnets in user-named zones; neither matches ZONE_REGEX.
-    # Also include the static built-in SDN, which is intentionally permanent.
+    # Pre-existing user vnets in user-named zones; none matches ZONE_REGEX.
+    # Includes the static built-in SDN (intentionally permanent) and a
+    # near-miss user zone whose 7-char *prefix* would match an unanchored
+    # pattern but which is not a provider zone.
     sdn_mock.read_all_vnets = AsyncMock(
         return_value=[
             {"vnet": "monitor", "zone": "a254c5f5"},
             {"vnet": "inspvmv0", "zone": "inspvmz"},
+            {"vnet": "abc123v", "zone": "abc123za"},
         ]
     )
     infra = _make_infra_mock(
