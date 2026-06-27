@@ -286,8 +286,7 @@ class SdnCommands(abc.ABC):
         # sanity check so that we don't get into trouble later
         # in inspect sandbox cleanup
         if not (
-            re.fullmatch(ZONE_REGEX, sdn_zone_id)
-            or sdn_zone_id.startswith(STATIC_SDN_START)
+            is_ephemeral_zone(sdn_zone_id) or sdn_zone_id.startswith(STATIC_SDN_START)
         ):
             raise ValueError("Invalid zone ID")
 
