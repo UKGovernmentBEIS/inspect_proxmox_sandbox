@@ -342,7 +342,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             async_proxmox_api = AsyncProxmoxAPI(
                 host=f"{instance.host}:{instance.port}",
                 user=f"{instance.user}@{instance.user_realm}",
-                password=instance.password,
+                password=instance.password.get_secret_value(),
                 verify_tls=instance.verify_tls,
             )
 
@@ -503,7 +503,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         return AsyncProxmoxAPI(
             host=f"{config.host}:{config.port}",
             user=f"{config.user}@{config.user_realm}",
-            password=config.password,
+            password=config.password.get_secret_value(),
             verify_tls=config.verify_tls,
         )
 
@@ -608,7 +608,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                         f"NOT releasing instance {instance.instance_id} "
                         f"from pool '{pool_id}' - "
                         f"cleanup failed, instance may be dirty\n"
-                        f"instance={instance}\n"
+                        f"instance_id={instance.instance_id}\n"
+                        f"host={instance.host}\n"
+                        f"port={instance.port}\n"
+                        f"node={instance.node}\n"
                         f"pool_id={pool_id}\n"
                         f"cleanup_succeeded={cleanup_succeeded}"
                     )
@@ -623,7 +626,20 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
-        cls.logger.debug(f"task cleanup activated; {cleanup=}; {config=}")
+        config_type = type(config).__name__ if config is not None else None
+        if isinstance(config, ProxmoxSandboxEnvironmentConfig):
+            cls.logger.debug(
+                f"task cleanup activated; {cleanup=}; "
+                f"config_type={config_type}; "
+                f"instance_pool_id={config.instance_pool_id}; "
+                f"host={config.host}; "
+                f"port={config.port}; "
+                f"node={config.node}"
+            )
+        else:
+            cls.logger.debug(
+                f"task cleanup activated; {cleanup=}; config_type={config_type}"
+            )
 
         if cleanup:
             # Sweep orphaned resources across all Proxmox instances that
@@ -649,7 +665,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 async_proxmox_api = AsyncProxmoxAPI(
                     host=f"{instance.host}:{instance.port}",
                     user=f"{instance.user}@{instance.user_realm}",
-                    password=instance.password,
+                    password=instance.password.get_secret_value(),
                     verify_tls=instance.verify_tls,
                 )
                 infra_commands = InfraCommands.build(
