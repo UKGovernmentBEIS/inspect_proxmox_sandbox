@@ -144,6 +144,13 @@ async def test_single_instance_single_sample(
             "test_task", config, {}
         )
 
+        mock_proxmox_api.assert_called_once_with(
+            host="10.0.1.10:8006",
+            user="root@pam",
+            password="test",
+            verify_tls=False,
+        )
+
         # Verify: Environment created, instance acquired from pool
         assert "default" in environments
         assert pool.qsize() == 0  # Instance taken from pool

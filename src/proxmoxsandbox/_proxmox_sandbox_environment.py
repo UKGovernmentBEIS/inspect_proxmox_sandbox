@@ -626,7 +626,20 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
-        cls.logger.debug(f"task cleanup activated; {cleanup=}; {config=}")
+        config_type = type(config).__name__ if config is not None else None
+        if isinstance(config, ProxmoxSandboxEnvironmentConfig):
+            cls.logger.debug(
+                f"task cleanup activated; {cleanup=}; "
+                f"config_type={config_type}; "
+                f"instance_pool_id={config.instance_pool_id}; "
+                f"host={config.host}; "
+                f"port={config.port}; "
+                f"node={config.node}"
+            )
+        else:
+            cls.logger.debug(
+                f"task cleanup activated; {cleanup=}; config_type={config_type}"
+            )
 
         if cleanup:
             # Sweep orphaned resources across all Proxmox instances that
