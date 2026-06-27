@@ -6,7 +6,7 @@ from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
 
@@ -241,7 +241,7 @@ class ProxmoxInstanceConfig(BaseModel, frozen=True):
     port: int
     user: str
     user_realm: str
-    password: str
+    password: SecretStr
     node: str
     verify_tls: bool
 
@@ -322,8 +322,8 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
     port: int = Field(default_factory=lambda: int(getenv("PROXMOX_PORT", "8006")))
     user: str = Field(default_factory=lambda: getenv("PROXMOX_USER", "root"))
     user_realm: str = Field(default_factory=lambda: getenv("PROXMOX_REALM", "pam"))
-    password: str = Field(
-        default_factory=lambda: getenv("PROXMOX_PASSWORD", "password")
+    password: SecretStr = Field(
+        default_factory=lambda: SecretStr(getenv("PROXMOX_PASSWORD", "password"))
     )
     node: str = Field(default_factory=lambda: getenv("PROXMOX_NODE", "proxmox"))
     verify_tls: bool = Field(

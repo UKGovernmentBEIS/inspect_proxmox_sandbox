@@ -67,7 +67,7 @@ def test_load_instances_from_file():
         assert instances[0].port == 8006
         assert instances[0].user == "root"
         assert instances[0].user_realm == "pam"
-        assert instances[0].password == "secret"
+        assert instances[0].password.get_secret_value() == "secret"
         assert instances[0].node == "pve1"
         assert instances[0].verify_tls is False
 
@@ -77,7 +77,7 @@ def test_load_instances_from_file():
         assert instances[1].port == 8006
         assert instances[1].user == "root"
         assert instances[1].user_realm == "pam"
-        assert instances[1].password == "secret"
+        assert instances[1].password.get_secret_value() == "secret"
         assert instances[1].node == "pve2"
         assert instances[1].verify_tls is True
 
@@ -116,7 +116,7 @@ def test_load_instances_from_env_vars():
         assert instances[0].port == 8006
         assert instances[0].user == "admin"
         assert instances[0].user_realm == "pve"
-        assert instances[0].password == "test123"
+        assert instances[0].password.get_secret_value() == "test123"
         assert instances[0].node == "node1"
         assert instances[0].verify_tls is False
 
