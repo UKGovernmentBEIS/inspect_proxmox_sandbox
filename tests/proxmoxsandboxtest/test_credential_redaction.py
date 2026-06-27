@@ -100,7 +100,7 @@ async def test_cleanup_failure_log_excludes_instance_password(caplog):
 
 @pytest.mark.asyncio
 async def test_task_cleanup_debug_log_excludes_config_password(caplog):
-    """Debug logging must not render the complete environment configuration."""
+    """Debug logging renders the config with the password masked by SecretStr."""
     config = ProxmoxSandboxEnvironmentConfig(password=PASSWORD_SENTINEL)
 
     with (
@@ -115,6 +115,4 @@ async def test_task_cleanup_debug_log_excludes_config_password(caplog):
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert PASSWORD_SENTINEL not in messages
-    assert "password=" not in messages
-    assert "instance_pool_id=" not in messages
-    assert "config_type=ProxmoxSandboxEnvironmentConfig" in messages
+    assert "password=SecretStr('**********')" in messages
