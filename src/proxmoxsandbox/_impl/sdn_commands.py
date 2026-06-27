@@ -28,7 +28,23 @@ from proxmoxsandbox.schema import (
 # The alias may be None for a given ID.
 VnetAliases: TypeAlias = List[Tuple[str, str | None]]
 
-ZONE_REGEX = "...[0-9]{3}z"
+# Ephemeral zones the provider creates are named exactly
+# `{task_name[:3] sanitised to [a-z0-9]}{000-999}z`. This pattern is the
+# ownership boundary for automatic, non-interactive cleanup, so it must be
+# anchored at both ends — a prefix match would let a pre-existing zone such
+# as `abc123za` be swept and deleted as if the provider owned it. Use
+# `is_ephemeral_zone()` rather than matching this directly.
+ZONE_REGEX = r"^[a-z0-9]{3}[0-9]{3}z$"
+
+
+def is_ephemeral_zone(zone_id: str) -> bool:
+    """Return True iff *zone_id* names a provider-created ephemeral SDN zone.
+
+    `re.fullmatch` is used so the entire name must conform; `re.match`
+    would accept any name with a conforming prefix.
+    """
+    return re.fullmatch(ZONE_REGEX, zone_id) is not None
+
 
 # A static SDN used for creating built-in VMs. It is created on demand
 # and not torn down afterwards.
@@ -270,7 +286,7 @@ class SdnCommands(abc.ABC):
         # sanity check so that we don't get into trouble later
         # in inspect sandbox cleanup
         if not (
-            re.match(ZONE_REGEX, sdn_zone_id)
+            re.fullmatch(ZONE_REGEX, sdn_zone_id)
             or sdn_zone_id.startswith(STATIC_SDN_START)
         ):
             raise ValueError("Invalid zone ID")

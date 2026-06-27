@@ -28,7 +28,7 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
-from proxmoxsandbox._impl.sdn_commands import ZONE_REGEX, IpamMapping
+from proxmoxsandbox._impl.sdn_commands import IpamMapping, is_ephemeral_zone
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
 from proxmoxsandbox.schema import (
@@ -524,7 +524,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         try:
             vnets = await infra_commands.sdn_commands.read_all_vnets()
             leftover_vnets = [
-                v for v in vnets if "zone" in v and re.match(ZONE_REGEX, v["zone"])
+                v for v in vnets if "zone" in v and is_ephemeral_zone(v["zone"])
             ]
 
             if leftover_vnets:
