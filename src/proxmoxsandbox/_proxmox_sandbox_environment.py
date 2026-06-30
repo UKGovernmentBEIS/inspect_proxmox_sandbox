@@ -1176,13 +1176,18 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         """
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
-        # Note, per https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vm_id}/agent/file-read
-        # read from proxmox API is limited to 16777216 bytes
+        # Per https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vm_id}/agent/file-read
+        # the agent file-read API is hard-limited to 16777216 bytes. We cap the
+        # read at the (possibly test-overridden) Inspect limit, never above
+        # 16 MiB. Passing `count` also keeps PVE from trying to return the whole
+        # file in one oversized body, which for content over ~10 MiB triggers a
+        # "597 Broken pipe" from the proxy hop (see read_file_capped).
+        cap = min(SandboxEnvironmentLimits.MAX_READ_FILE_SIZE, 16777216)
         try:
-            read_get_response = await self.agent_commands.read_file(
+            data_bytes, truncated = await self.agent_commands.read_file_capped(
                 vm_id=self.vm_id,
                 filepath=file,
-                max_size=min(SandboxEnvironmentLimits.MAX_READ_FILE_SIZE, 16777216),
+                count=cap,
             )
         except Exception as ex:
             if "Agent error" in str(ex):
@@ -1198,17 +1203,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     raise ex
             else:
                 raise ex
-        if (
-            getattr(read_get_response, "truncated", False)
-            or len(read_get_response["content"])
-            >= SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
-        ):
-            raise OutputLimitExceededError("Output size exceeds 16 MiB limit.", file)
-        bytes_data = _recover_qga_bytes(read_get_response["content"])
+        if truncated:
+            # File has more bytes than the cap. Report the active limit (the
+            # 16 MiB Proxmox ceiling, or a smaller test-overridden one).
+            limit_str = (
+                SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR
+                if SandboxEnvironmentLimits.MAX_READ_FILE_SIZE <= 16777216
+                else "16 MiB"
+            )
+            raise OutputLimitExceededError(limit_str, None)
         if text:
-            return bytes_data.decode("utf-8")
+            return data_bytes.decode("utf-8")
         else:
-            return bytes_data
+            return data_bytes
 
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:

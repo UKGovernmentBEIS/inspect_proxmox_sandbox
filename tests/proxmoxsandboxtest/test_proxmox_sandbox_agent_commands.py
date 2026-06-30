@@ -83,6 +83,63 @@ async def test_exec_10mb_limit(
     assert len(body) > 1_000_000
 
 
+async def test_exec_large_binary_output_surfaces_cleanly(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    """Oversized exec output must raise OutputLimitExceededError, not crash.
+
+    Regression for the "597 Broken pipe" sample crash: the file-read of
+    script.stdout was issued without a `count` cap, so PVE tried to return the
+    whole (binary, base64-inflated) stdout in one JSON body and the
+    pveproxy->pvedaemon hop tore it down with a non-standard "597 Broken pipe"
+    that escaped the retry layer and propagated. High-entropy binary is the
+    worst case (it inflates ~2x on the wire), so this reproduces the original
+    `cat <binary>` shape rather than plain ASCII. With the read capped at
+    max_size the response stays deliverable and the overflow surfaces cleanly.
+    """
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("binary stdout repro is Linux-only")
+
+    # 30 MiB of random bytes straight to stdout, well over the 10 MiB exec cap.
+    with pytest.raises(OutputLimitExceededError):
+        await proxmox_sandbox_environment.exec(
+            ["sh", "-c", "head -c 31457280 /dev/urandom"], timeout=120
+        )
+
+
+async def test_read_file_large_binary_surfaces_cleanly(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    """read_file round-trips a multi-MiB binary file and rejects oversized ones.
+
+    Same "597 Broken pipe" root cause as the exec regression, on the read_file
+    path: a >~10 MiB binary read used to inflate past the proxy hop's limit and
+    crash. The fix reads via decode=0 (compact, content-independent body) so a
+    full 16 MiB read stays deliverable and an oversized file raises
+    OutputLimitExceededError instead. The 14 MiB case also guards the decode=0
+    segment-decode (PVE concatenates per-1 MiB-chunk base64).
+    """
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("binary repro is Linux-only")
+    env = proxmox_sandbox_environment
+
+    # 14 MiB binary (multi-chunk, not 3-aligned) must round-trip byte-exact.
+    await env.exec(
+        ["sh", "-c", "head -c 14680064 /dev/urandom > /tmp/rf14"], timeout=60
+    )
+    md5_guest = (await env.exec(["md5sum", "/tmp/rf14"])).stdout.split()[0]
+    data = await env.read_file("/tmp/rf14", text=False)
+    assert isinstance(data, bytes) and len(data) == 14680064
+    assert hashlib.md5(data).hexdigest() == md5_guest
+
+    # 20 MiB (over the 16 MiB cap) must fail cleanly, not crash with a 597.
+    await env.exec(
+        ["sh", "-c", "head -c 20971520 /dev/urandom > /tmp/rf20"], timeout=60
+    )
+    with pytest.raises(OutputLimitExceededError):
+        await env.read_file("/tmp/rf20", text=False)
+
+
 CURRENT_DIR = Path(__file__).parent
 
 
@@ -150,8 +207,19 @@ async def test_self_check(
         "test_read_and_write_large_file_binary",
     ]
 
-    return await check_results_of_self_check(
+    results = await check_results_of_self_check(
         proxmox_sandbox_environment, known_failures
+    )
+
+    # The 16 MiB hard cap means we can't round-trip the 50 MiB file this test
+    # writes, so it stays a known failure - but it must fail *gracefully* with
+    # OutputLimitExceededError, not a raw transport crash. That distinction is
+    # exactly what the original "597 Broken pipe" sample crash slipped through:
+    # the known-failure exclusion was outcome-blind.
+    large_file_result = results["test_read_and_write_large_file_binary"]
+    assert "OutputLimitExceededError" in str(large_file_result), (
+        "Oversized read_file must fail with OutputLimitExceededError, got: "
+        f"{large_file_result!r}"
     )
 
 
@@ -177,3 +245,4 @@ async def check_results_of_self_check(sandbox_env, known_failures=[]):
             failures.append(f"Test {test_name} failed: {result}")
     if failures:
         assert False, "\n".join(failures)
+    return self_check_results

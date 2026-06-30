@@ -210,6 +210,15 @@ class AgentCommands:
             ),
         )
 
+    async def read_file_capped(self, vm_id: int, filepath: str, count: int):
+        """Retried decode=0 read; returns (data_bytes, truncated)."""
+        return await self._retry_on_qga_error(
+            f"read_file_capped vm={vm_id} {filepath}",
+            lambda: self.async_proxmox.read_file_capped(
+                self.node, vm_id, filepath, count
+            ),
+        )
+
     async def create_snapshot(self, vm_id: int, snapshot_name: str) -> None:
         path = f"/nodes/{self.node}/qemu/{vm_id}/snapshot"
         data: ProxmoxJsonDataType = {"snapname": snapshot_name, "vmstate": 1}

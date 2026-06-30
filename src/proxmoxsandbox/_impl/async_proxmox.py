@@ -1,11 +1,13 @@
 import asyncio
+import base64
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import pycurl
@@ -203,13 +205,24 @@ class AsyncProxmoxAPI:
             # ping to refresh token if needed, so we don't have to do it in the stream
             await self._ping_qemu_agent(node, vm_id)
 
+            # Cap the read at max_size via the API's `count` param. Without it
+            # PVE reads up to its 16 MiB default and tries to ship the whole
+            # file back in one base64-inflated JSON body; for content over
+            # ~10 MiB the pveproxy->pvedaemon hop tears that body down and
+            # returns a non-standard "597 Broken pipe", which escapes the retry
+            # layer and crashes the sample. Bounding the read keeps the response
+            # deliverable, so an oversized file surfaces as a clean
+            # OutputLimitExceededError (below) instead.
+            params: Dict[str, Union[str, int]] = {"file": filepath}
+            if max_size:
+                params["count"] = max_size
             async with client.stream(
                 "GET",
                 f"{self.api_base_url}{path}",
                 headers={
                     "Cookie": f"PVEAuthCookie={self.ticket}",
                 },
-                params={"file": filepath},
+                params=params,
             ) as response:
                 response.raise_for_status()
 
@@ -237,6 +250,57 @@ class AsyncProxmoxAPI:
                 # Combine chunks and parse JSON
                 full_response = b"".join(chunks)
                 return httpx.Response(200, content=full_response).json()["data"]
+
+    # `decode=0` content is the concatenation of each ~1 MiB read chunk's own
+    # base64; 1 MiB is not a multiple of 3, so segments carry their own `=`
+    # padding and the whole string won't decode in one pass. Each maximal
+    # base64 run (optionally padding-terminated) is one segment.
+    _B64_SEGMENT = re.compile(rb"[A-Za-z0-9+/]+={0,2}")
+
+    async def read_file_capped(
+        self, node: str, vm_id: int, filepath: str, count: int
+    ) -> Tuple[bytes, bool]:
+        """Read up to `count` bytes of a guest file; return (data, truncated).
+
+        Uses the agent file-read `decode=0` mode (content forwarded as base64)
+        rather than `decode=1` (content as Latin-1-mangled UTF-8). decode=1
+        inflates binary 2-6x on the wire, so for files over ~10 MiB the JSON
+        body overruns the pveproxy->pvedaemon hop and returns a non-standard
+        "597 Broken pipe" that escapes the retry layer and crashes the caller.
+        decode=0 keeps the body at ~4/3 the content size regardless of the
+        bytes, so a full 16 MiB read stays deliverable. `count` bounds the read;
+        PVE sets `truncated` when the file holds more than that.
+        """
+        path = f"/nodes/{node}/qemu/{vm_id}/agent/file-read"
+        async with httpx.AsyncClient(
+            verify=self.verify_tls,
+            timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
+        ) as client:
+            await self._ping_qemu_agent(node, vm_id)
+            response = await client.get(
+                f"{self.api_base_url}{path}",
+                headers={"Cookie": f"PVEAuthCookie={self.ticket}"},
+                params={"file": filepath, "count": count, "decode": 0},
+            )
+            if response.is_error:
+                # Mirror request()'s error so callers can still match the agent's
+                # message text (e.g. "No such file", "Is a directory").
+                message = (
+                    f"HTTP response error: {response.status_code} "
+                    f"{response.reason_phrase}"
+                )
+                if response.text:
+                    message += f": {response.text}"
+                raise httpx.HTTPStatusError(
+                    message, request=response.request, response=response
+                )
+            data = response.json()["data"]
+        content: str = data.get("content") or ""
+        raw = b"".join(
+            base64.b64decode(seg)
+            for seg in self._B64_SEGMENT.findall(content.encode("ascii"))
+        )
+        return raw, bool(data.get("truncated"))
 
     async def upload_file_with_curl(
         self,
