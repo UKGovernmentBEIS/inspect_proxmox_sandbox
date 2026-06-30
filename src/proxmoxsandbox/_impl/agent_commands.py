@@ -1,11 +1,10 @@
 import asyncio
 import base64
 from logging import getLogger
-from typing import List
+from typing import List, Tuple
 
 import httpx
 from inspect_ai.util import (
-    SandboxEnvironmentLimits,
     trace_action,
 )
 
@@ -168,56 +167,35 @@ class AgentCommands:
                 lambda: self.async_proxmox.request("POST", path, json=data),
             )
 
-    async def read_file_or_blank(
-        self,
-        vm_id: int,
-        filepath: str,
-        max_size: int = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE,
-    ):
+    async def read_file_capped(
+        self, vm_id: int, filepath: str, count: int
+    ) -> Tuple[bytes, bool]:
+        """Retried decode=0 read of up to `count` bytes; returns (data, truncated)."""
         with trace_action(
             self.logger,
             self.TRACE_NAME,
-            f"read_file_or_blank {vm_id=} {filepath=} {max_size=}",
+            f"read_file_capped {vm_id=} {filepath=} {count=}",
         ):
-            try:
-                return await self.read_file(vm_id, filepath, max_size)
-            except httpx.HTTPStatusError as e:
-                if (
-                    e.response.status_code == 500
-                    and "no such file" in e.response.reason_phrase.casefold()
-                ):
-                    return {"content": ""}
-                else:
-                    raise e
+            return await self._retry_on_qga_error(
+                f"read_file_capped vm={vm_id} {filepath}",
+                lambda: self.async_proxmox.read_file_capped(
+                    self.node, vm_id, filepath, count
+                ),
+            )
 
-    async def read_file(
-        self,
-        vm_id: int,
-        filepath: str,
-        max_size: int = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE,
-    ):
-        # this is a hack; it would be better to use a type here with
-        # e.g. size_bytes and friendly_name
-        max_size_str = (
-            SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR
-            if max_size == SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
-            else SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR
-        )
-        return await self._retry_on_qga_error(
-            f"read_file vm={vm_id} {filepath}",
-            lambda: self.async_proxmox.read_file(
-                self.node, vm_id, filepath, max_size, max_size_str
-            ),
-        )
-
-    async def read_file_capped(self, vm_id: int, filepath: str, count: int):
-        """Retried decode=0 read; returns (data_bytes, truncated)."""
-        return await self._retry_on_qga_error(
-            f"read_file_capped vm={vm_id} {filepath}",
-            lambda: self.async_proxmox.read_file_capped(
-                self.node, vm_id, filepath, count
-            ),
-        )
+    async def read_file_capped_or_blank(
+        self, vm_id: int, filepath: str, count: int
+    ) -> Tuple[bytes, bool]:
+        """Like read_file_capped but returns (b"", False) for a missing file."""
+        try:
+            return await self.read_file_capped(vm_id, filepath, count)
+        except httpx.HTTPStatusError as e:
+            msg = str(e).casefold()
+            if e.response.status_code == 500 and (
+                "no such file" in msg or "failed to open file" in msg
+            ):
+                return b"", False
+            raise
 
     async def create_snapshot(self, vm_id: int, snapshot_name: str) -> None:
         path = f"/nodes/{self.node}/qemu/{vm_id}/snapshot"

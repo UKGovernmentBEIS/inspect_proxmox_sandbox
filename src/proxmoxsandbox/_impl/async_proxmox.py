@@ -12,24 +12,11 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 import httpx
 import pycurl
 from inspect_ai.util import (
-    OutputLimitExceededError,
     trace_action,
 )
 from pydantic import BaseModel
-from pydantic_core import from_json
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
-
-
-def _parse_truncated_file_read(raw: bytes) -> str:
-    r"""Extract data.content from a QGA file-read body cut off at the size limit.
-
-    The cut can land inside a JSON `\\uXXXX` escape, so we let pydantic_core's
-    'trailing-strings' mode drop the incomplete trailing token. Hand-closing the
-    string with a `"` instead produced things like `\\u00"` -> invalid escape (#77).
-    """
-    parsed = from_json(raw, allow_partial="trailing-strings")
-    return parsed.get("data", {}).get("content", "") or ""
 
 
 class ProxmoxVersionInfo(BaseModel):
@@ -177,80 +164,6 @@ class AsyncProxmoxAPI:
     async def _ping_qemu_agent(self, node: str, vm_id: int):
         await self.request("POST", f"/nodes/{node}/qemu/{vm_id}/agent/ping")
 
-    async def read_file(
-        self, node: str, vm_id: int, filepath: str, max_size: int, max_size_str: str
-    ):
-        """Read a file from the VM using QEMU agent with optional size limit.
-
-        Args:
-            node (str): The node name
-            vm_id (int): The VM ID
-            filepath (str): Path to the file to read
-            max_size (int, optional): Maximum number of bytes to read.
-                None means no limit.
-            max_size_str (str): Human-readable string of the max_size
-
-        Returns:
-            dict: The file contents and metadata
-
-        Raises:
-            FileTooLargeError: If the file size exceeds max_size
-        """
-        path = f"/nodes/{node}/qemu/{vm_id}/agent/file-read"
-
-        async with httpx.AsyncClient(
-            verify=self.verify_tls,
-            timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
-        ) as client:
-            # ping to refresh token if needed, so we don't have to do it in the stream
-            await self._ping_qemu_agent(node, vm_id)
-
-            # Cap the read at max_size via the API's `count` param. Without it
-            # PVE reads up to its 16 MiB default and tries to ship the whole
-            # file back in one base64-inflated JSON body; for content over
-            # ~10 MiB the pveproxy->pvedaemon hop tears that body down and
-            # returns a non-standard "597 Broken pipe", which escapes the retry
-            # layer and crashes the sample. Bounding the read keeps the response
-            # deliverable, so an oversized file surfaces as a clean
-            # OutputLimitExceededError (below) instead.
-            params: Dict[str, Union[str, int]] = {"file": filepath}
-            if max_size:
-                params["count"] = max_size
-            async with client.stream(
-                "GET",
-                f"{self.api_base_url}{path}",
-                headers={
-                    "Cookie": f"PVEAuthCookie={self.ticket}",
-                },
-                params=params,
-            ) as response:
-                response.raise_for_status()
-
-                # Check Content-Length if available
-                content_length = response.headers.get("content-length")
-                if content_length and max_size:
-                    if int(content_length) > max_size:
-                        await response.aclose()
-                        raise OutputLimitExceededError(max_size_str, None)
-
-                # Read the response in chunks
-                chunks = []
-                total_size = 0
-
-                async for chunk in response.aiter_bytes(chunk_size=8192):
-                    chunks.append(chunk)
-                    total_size += len(chunk)
-
-                    if max_size and total_size > max_size:
-                        await response.aclose()
-
-                        truncated_content = _parse_truncated_file_read(b"".join(chunks))
-                        raise OutputLimitExceededError(max_size_str, truncated_content)
-
-                # Combine chunks and parse JSON
-                full_response = b"".join(chunks)
-                return httpx.Response(200, content=full_response).json()["data"]
-
     # `decode=0` content is the concatenation of each ~1 MiB read chunk's own
     # base64; 1 MiB is not a multiple of 3, so segments carry their own `=`
     # padding and the whole string won't decode in one pass. Each maximal
@@ -262,14 +175,16 @@ class AsyncProxmoxAPI:
     ) -> Tuple[bytes, bool]:
         """Read up to `count` bytes of a guest file; return (data, truncated).
 
-        Uses the agent file-read `decode=0` mode (content forwarded as base64)
-        rather than `decode=1` (content as Latin-1-mangled UTF-8). decode=1
-        inflates binary 2-6x on the wire, so for files over ~10 MiB the JSON
-        body overruns the pveproxy->pvedaemon hop and returns a non-standard
-        "597 Broken pipe" that escapes the retry layer and crashes the caller.
-        decode=0 keeps the body at ~4/3 the content size regardless of the
-        bytes, so a full 16 MiB read stays deliverable. `count` bounds the read;
-        PVE sets `truncated` when the file holds more than that.
+        Uses the agent file-read `decode`/`count` params, documented at
+        https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vmid}/agent/file-read
+        (also limits any read to 16 MiB). `decode=0` forwards content as base64;
+        the default `decode=1` returns it as Latin-1-mangled UTF-8 that inflates
+        binary 2-6x on the wire, so for files over ~10 MiB the JSON body overruns
+        the pveproxy->pvedaemon hop and returns a non-standard "597 Broken pipe"
+        that escapes the retry layer and crashes the caller. `decode=0` keeps the
+        body at ~4/3 the content size regardless of the bytes, so a full 16 MiB
+        read stays deliverable. `count` bounds the read; PVE sets `truncated`
+        when the file holds more than that.
         """
         path = f"/nodes/{node}/qemu/{vm_id}/agent/file-read"
         async with httpx.AsyncClient(

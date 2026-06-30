@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Internal: all guest reads (`read_file` and command stdout/stderr) now use the agent file-read `decode=0` mode (content forwarded as base64) instead of the default `decode=1` (Latin-1-mangled UTF-8). decode=1 inflated binary 2-6x on the wire — the 597 root cause — and required un-mangling on read; decode=0 keeps the wire body at ~4/3 the content size regardless of the bytes and is lossless, removing the mangling-recovery path entirely.
 - Fix: reading a guest file or command output larger than ~10 MiB no longer crashes with a non-standard HTTP 597 "Broken pipe". The agent file-read was issued without a `count` cap, so Proxmox tried to return the whole file in one base64-inflated JSON body that the `pveproxy`→`pvedaemon` hop could not deliver. `read_file()` now reads via the agent's `decode=0` mode (a compact, content-independent response body) so a full 16 MiB read stays deliverable and oversized files surface as `OutputLimitExceededError`; `exec()` output reads are capped at the output limit so they cannot overrun the proxy either.
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process (e.g. `pkill -f`); it returns a failed `ExecResult` (`128+signal`, or `137` when the signal is unavailable) instead of raising a misleading `TimeoutError`
 

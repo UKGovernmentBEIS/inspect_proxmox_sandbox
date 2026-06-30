@@ -38,49 +38,33 @@ _EMOJI = "\U0001f600"
 _EMOJI_BYTES = _EMOJI.encode("utf-8")  # b"\xf0\x9f\x98\x80"
 
 
-@pytest.mark.parametrize("lead", ["", "a"], ids=["even-offset", "odd-offset"])
 async def test_exec_10mb_limit(
-    proxmox_sandbox_environment: ProxmoxSandboxEnvironment, lead: str
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
 ) -> None:
-    # Output over MAX_EXEC_OUTPUT_SIZE (10 MiB) must truncate cleanly, even when
-    # the cut lands in the middle of a multi-byte sequence (issue #77). An all-'a'
-    # version of this test never hit that: plain ASCII has no multi-byte sequences
-    # for the cut to split, so it always parsed cleanly.
-    #
-    # read_file streams the file-read response in 8192-byte chunks and stops once
-    # the total first exceeds 10 MiB, so the cut is at a fixed, even byte offset
-    # (1281*8192 = 10493952). Each non-ASCII output byte comes back as a 2-byte
-    # sequence on the wire (Proxmox re-encodes raw bytes via latin-1), and every
-    # byte of our emoji is non-ASCII, so the whole payload is 2-byte wire pairs.
-    # Whether the cut splits one of those pairs depends on the parity of the offset
-    # at which they start, which we can't predict exactly (the JSON field order is
-    # non-deterministic). So we run two outputs differing by a single leading byte:
-    # their pairs sit on opposite parities, so exactly one variant lands mid-sequence
-    # and reproduces the crash. Pre-fix that variant raised
-    # `ValueError: invalid unicode code point`; both must now truncate cleanly.
+    # Output over MAX_EXEC_OUTPUT_SIZE (10 MiB) must truncate cleanly and surface
+    # as OutputLimitExceededError. The read uses decode=0 (raw bytes), so the
+    # truncated output is whole bytes decoded as UTF-8 - multi-byte sequences
+    # round-trip and a cut inside a 4-byte char leaves at most one trailing
+    # U+FFFD, never a parse crash (the byte-boundary fragility of decode=1, and
+    # its even/odd-offset test, are gone).
     if proxmox_sandbox_environment._is_windows():
-        pytest.skip("byte-level multi-byte boundary repro is Linux-only")
+        pytest.skip("multi-byte output repro is Linux-only")
 
     count = pow(2, 20) * 3  # 3 Mi emoji * 4 bytes = 12 MiB, well over the 10 MiB limit
     escaped = "".join(f"\\x{b:02x}" for b in _EMOJI_BYTES)
     exec_cmd = [
         "perl",
         "-e",
-        f'binmode STDOUT; print "{lead}", "{escaped}" x {count}',
+        f'binmode STDOUT; print "{escaped}" x {count}',
     ]
 
     with pytest.raises(OutputLimitExceededError) as exc_info:
         await proxmox_sandbox_environment.exec(exec_cmd, timeout=120)
 
-    # Partial output is recovered and decoded like a full read: the optional ASCII
-    # lead, then whole emoji. The size cut can fall inside a 4-byte sequence, leaving
-    # at most one trailing U+FFFD replacement char rather than crashing the parse.
     truncated = exc_info.value.truncated_output
     assert isinstance(truncated, str)
-    assert truncated.startswith(lead)
-    body = truncated[len(lead) :]
-    assert body.rstrip("�").strip(_EMOJI) == ""
-    assert len(body) > 1_000_000
+    assert truncated.rstrip("�").strip(_EMOJI) == ""
+    assert len(truncated) > 1_000_000
 
 
 async def test_exec_large_binary_output_surfaces_cleanly(
