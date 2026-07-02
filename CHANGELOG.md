@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: reading a large or binary guest file / command output no longer crashes with a non-standard HTTP 597 "Broken pipe". Root cause: `pveproxy` gzips the file-read response when the client accepts compression, and a large *incompressible* body (a real binary — compressible content shrinks and slips under the limit) dies mid-transfer with a 597 that escaped the retry layer. Guest file reads now send `Accept-Encoding: identity` to opt out of that compression. Reads also moved from the default `decode=1` (content as Latin-1-mangled UTF-8, ~2-6x on the wire, requiring un-mangling) to `decode=0` (base64, ~4/3 the content size and lossless) with a bounded `count`, so oversized files/output surface as `OutputLimitExceededError` and the Latin-1 mangling-recovery path is removed.
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process (e.g. `pkill -f`); it returns a failed `ExecResult` (`128+signal`, or `137` when the signal is unavailable) instead of raising a misleading `TimeoutError`
 
 ## 0.11.0 - 2026-06-01
