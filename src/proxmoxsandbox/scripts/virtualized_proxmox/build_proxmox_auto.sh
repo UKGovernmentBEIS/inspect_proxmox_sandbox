@@ -255,6 +255,63 @@ pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp
 pvesh set /nodes/proxmox/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
 
+# IPv6 is not supported for sandbox guests on this provider. SDN vnet bridges are
+# created per sample with generated names, so we can't pin a rule to them; instead
+# default.disable_ipv6 makes every interface created after boot (i.e. the vnets)
+# come up with no IPv6. The already-up management NIC keeps its own setting.
+cat > /etc/sysctl.d/99-inspect-proxmox-disable-ipv6.conf << 'SYSCTL_V6'
+net.ipv6.conf.default.disable_ipv6 = 1
+SYSCTL_V6
+
+# Confine sandbox guests at the host's forwarding layer. Re-applied every boot
+# because the template is powered off below and later cloned into fresh instances;
+# iptables rules live in kernel state and don't survive the clone/reboot.
+cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
+#!/bin/bash
+set -euo pipefail
+
+# Enforce RFC 3927: a router must not forward IPv4 link-local (169.254.0.0/16),
+# but Linux forwards it anyway, so a sandbox guest can otherwise reach the host's
+# metadata service over its on-link route. 169.254.169.254 covers
+# AWS/GCP/Azure/Oracle/DO; README notes Alibaba/Azure-WireServer outside the range.
+#
+# Destination drop in raw PREROUTING (interface-agnostic, ahead of any FORWARD
+# ACCEPT; host requests are OUTPUT so unaffected) -- this blocks the metadata vector.
+iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
+# Source drop in FORWARD, not raw PREROUTING: belt-and-braces for full RFC
+# conformance. FORWARD leaves the host's own on-link replies (IMDS/DNS, at INPUT)
+# intact; a raw PREROUTING -s rule would drop them and break the host.
+iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
+
+# Belt-and-braces for the unsupported IPv6 case: drop forwarded guest v6 outright.
+# FORWARD only sees transit traffic, so the host's own v6 (INPUT/OUTPUT) is intact.
+if command -v ip6tables >/dev/null; then
+    ip6tables -w -C FORWARD -j DROP 2>/dev/null \
+        || ip6tables -w -A FORWARD -j DROP
+fi
+BLOCK_METADATA
+chmod +x /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
+
+cat > /etc/systemd/system/inspect-proxmox-block-cloud-metadata.service << 'BLOCK_METADATA_UNIT'
+[Unit]
+Description=Confine sandbox guests (link-local forwarding block, IPv6 drop)
+After=network-online.target pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BLOCK_METADATA_UNIT
+
+systemctl daemon-reload
+systemctl enable inspect-proxmox-block-cloud-metadata.service
+
 touch /var/local/inspect-proxmox-on-first-boot.done
 
 # shut down to signal to virt-install that installation is complete

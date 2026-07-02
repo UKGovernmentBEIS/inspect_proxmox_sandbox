@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process (e.g. `pkill -f`); it returns a failed `ExecResult` (`128+signal`, or `137` when the signal is unavailable) instead of raising a misleading `TimeoutError`
+- Prevent sandbox VMs from accessing cloud instance metadata credentials when using the bundled provisioning scripts. Both provisioners enforce RFC 3927 section 7 (drop forwarded IPv4 link-local `169.254.0.0/16` — destination in `raw PREROUTING`, source in `FORWARD` so host replies are unaffected — covering AWS/GCP/Azure/Oracle/DO metadata) and disable IPv6 for sandbox guests. Rebuild existing Proxmox AMIs/templates or apply the documented host rules to install this protection
 
 ## 0.11.0 - 2026-06-01
 
