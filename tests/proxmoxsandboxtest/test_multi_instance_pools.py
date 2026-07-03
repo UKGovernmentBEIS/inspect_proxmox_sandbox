@@ -68,13 +68,6 @@ def mock_infra_commands():
         yield infra
 
 
-@pytest.fixture(autouse=True)
-def cleanup_infra_instances():
-    """Clear InfraCommands._instances after each test."""
-    yield
-    InfraCommands._instances.clear()
-
-
 @pytest.fixture
 def simple_config_file():
     """Create config file with one instance."""
@@ -172,8 +165,6 @@ async def test_single_instance_single_sample(
         # Cleanup
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        # Clear pools for next test
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.fixture
@@ -332,7 +323,6 @@ async def test_two_pools_two_configs(
         # Cleanup
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -358,7 +348,6 @@ async def test_wrong_pool_id_raises_error(
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -402,7 +391,6 @@ async def test_pool_exhaustion_blocks(
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -441,7 +429,6 @@ async def test_sample_error_releases_instance(
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
                 del os.environ["PROXMOX_CONFIG_FILE"]
-            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -471,7 +458,6 @@ async def test_empty_instances_list():
         os.unlink(temp_path)
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -499,7 +485,6 @@ async def test_concurrent_task_init_calls(multi_pool_config_file):
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -538,4 +523,3 @@ async def test_cleanup_with_interrupted_flag(
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
