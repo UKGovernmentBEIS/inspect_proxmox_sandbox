@@ -89,12 +89,16 @@ class VmSourceConfig(BaseModel, frozen=True):
     Attributes:
         existing_vm_template_tag: Clone VM from existing Proxmox template with this tag
         ova: Create VM from this OVA file in the local (not Proxmox) filesystem.
-        built_in: Use this provider's built-in VM template (currently "ubuntu24.04"
-            is supported)
+        ova_url: Create VM from an OVA file downloaded from this URL.
+        ova_url_filename: Filename for the OVA downloaded from ova_url.  If not
+            provided, the filename is inferred from the URL.
+        built_in: Use this provider's built-in VM template.
     """
 
     existing_vm_template_tag: str | None = None
     ova: Path | None = None
+    ova_url: str | None = None
+    ova_url_filename: str | None = None
     # Ubuntu 24.04 is supported because an OVA is publicly available from a reliable
     # source.
     # From Proxmox 9.0 onwards, qcow2 and raw are also supported, allowing Debian 13,
@@ -108,6 +112,7 @@ class VmSourceConfig(BaseModel, frozen=True):
             for name, value in {
                 "existing_vm_template_tag": self.existing_vm_template_tag,
                 "ova": self.ova,
+                "ova_url": self.ova_url,
                 "built_in": self.built_in,
             }.items()
             if value is not None
@@ -118,6 +123,9 @@ class VmSourceConfig(BaseModel, frozen=True):
                 "Exactly one source must be set. "
                 + f"Found {len(set_sources)}: {', '.join(set_sources) or 'none'}"
             )
+
+        if self.ova_url_filename is not None and self.ova_url is None:
+            raise ValueError("ova_url_filename can only be set if ova_url is also set")
 
         return self
 
