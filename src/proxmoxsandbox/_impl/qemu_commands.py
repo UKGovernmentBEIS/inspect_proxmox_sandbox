@@ -8,7 +8,6 @@ from typing import Collection, Dict, List, Set
 import httpx
 import tenacity
 from inspect_ai.util import trace_action
-from pydantic.networks import HttpUrl
 
 from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
@@ -233,128 +232,112 @@ class QemuCommands(abc.ABC):
 
         if vm_config.vm_source_config.built_in:
             vm_id_to_clone = built_in_vm_ids[vm_config.vm_source_config.built_in]
-
-            if vm_id_to_clone is None:
-                raise ValueError(
-                    "couldn't find template VM for "
-                    + f"{vm_config.vm_source_config.built_in}"
-                )
-
             preserve_tags = False
         elif vm_config.vm_source_config.ova is not None:
-            if isinstance(vm_config.vm_source_config.ova, HttpUrl):
-                raise NotImplementedError(
-                    f"Not supported: {type(vm_config.vm_source_config.ova)}"
+            ova_size = vm_config.vm_source_config.ova.stat().st_size
+            ova_tag = f"ova-{vm_config.vm_source_config.ova.name}-{ova_size}"
+            ova_tag = re.sub(r"[^a-zA-Z0-9_\-]", "_", ova_tag)
+            ova_tag = ova_tag.lower()
+            self.logger.info(f"Looking for existing template with tag: {ova_tag}")
+
+            existing_vms = await self.list_vms()
+
+            found_existing_template = None
+            for existing_vm in existing_vms:
+                if (
+                    "tags" in existing_vm
+                    and "template" in existing_vm
+                    and existing_vm["template"] == 1
+                    and "inspect" in existing_vm["tags"].split(";")
+                    and ova_tag in existing_vm["tags"].split(";")
+                ):
+                    found_existing_template = existing_vm["vmid"]
+                    self.logger.info(
+                        f"Found existing template: vmid={found_existing_template}"
+                    )
+                    break
+
+            if found_existing_template is None:
+                self.logger.info("No existing template found, importing from OVA")
+                await self.storage_commands.upload_file_to_storage(
+                    file=vm_config.vm_source_config.ova,
+                    content_type="import",
+                    size_check=ova_size,
                 )
-            if isinstance(vm_config.vm_source_config.ova, Path):
-                ova_size = vm_config.vm_source_config.ova.stat().st_size
-                ova_tag = f"ova-{vm_config.vm_source_config.ova.name}-{ova_size}"
-                ova_tag = re.sub(r"[^a-zA-Z0-9_\-]", "_", ova_tag)
-                ova_tag = ova_tag.lower()
-                self.logger.info(f"Looking for existing template with tag: {ova_tag}")
 
-                existing_vms = await self.list_vms()
+                json_for_create: ProxmoxJsonDataType = {
+                    "node": self.node,
+                    "cpu": vm_config.cpu if vm_config.cpu else "host",
+                    "scsihw": "virtio-scsi-single",
+                    "start": False,
+                }
+                if vm_config.os_type is not None:
+                    json_for_create["ostype"] = vm_config.os_type
 
-                found_existing_template = None
-                for existing_vm in existing_vms:
-                    if (
-                        "tags" in existing_vm
-                        and "template" in existing_vm
-                        and existing_vm["template"] == 1
-                        and "inspect" in existing_vm["tags"].split(";")
-                        and ova_tag in existing_vm["tags"].split(";")
-                    ):
-                        found_existing_template = existing_vm["vmid"]
-                        self.logger.info(
-                            f"Found existing template: vmid={found_existing_template}"
-                        )
-                        break
+                disk_prefix = (
+                    "scsi"
+                    if vm_config.disk_controller is None
+                    else vm_config.disk_controller
+                )
 
-                if found_existing_template is None:
-                    self.logger.info("No existing template found, importing from OVA")
-                    await self.storage_commands.upload_file_to_storage(
-                        file=vm_config.vm_source_config.ova,
-                        content_type="import",
-                        size_check=ova_size,
+                self.other_config_json(vm_config, json_for_create)
+
+                vmdks = []
+                with tarfile.open(vm_config.vm_source_config.ova, "r") as tar:
+                    file_list = tar.getnames()
+
+                    for file_name in file_list:
+                        if file_name.endswith(".vmdk"):
+                            vmdks.append(file_name)
+
+                # this logic is reverse-engineered from the Proxmox GUI
+                # and may be brittle
+                for i, vmdk in enumerate(vmdks):
+                    json_for_create[f"{disk_prefix}{i}"] = (
+                        f"{self.image_storage}:0,import-from={LOCAL_STORAGE}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
                     )
 
-                    json_for_create: ProxmoxJsonDataType = {
-                        "node": self.node,
-                        "cpu": vm_config.cpu if vm_config.cpu else "host",
-                        "scsihw": "virtio-scsi-single",
-                        "start": False,
-                    }
-                    if vm_config.os_type is not None:
-                        json_for_create["ostype"] = vm_config.os_type
+                new_vm_template_id = await self.find_next_available_vm_id()
+                json_for_create["vmid"] = new_vm_template_id
 
-                    disk_prefix = (
-                        "scsi"
-                        if vm_config.disk_controller is None
-                        else vm_config.disk_controller
-                    )
+                with trace_action(
+                    self.logger,
+                    self.TRACE_NAME,
+                    f"create VM from OVA {new_vm_template_id=}",
+                ):
 
-                    self.other_config_json(vm_config, json_for_create)
-
-                    vmdks = []
-                    with tarfile.open(vm_config.vm_source_config.ova, "r") as tar:
-                        file_list = tar.getnames()
-
-                        for file_name in file_list:
-                            if file_name.endswith(".vmdk"):
-                                vmdks.append(file_name)
-
-                    # this logic is reverse-engineered from the Proxmox GUI
-                    # and may be brittle
-                    for i, vmdk in enumerate(vmdks):
-                        json_for_create[f"{disk_prefix}{i}"] = (
-                            f"{self.image_storage}:0,import-from={LOCAL_STORAGE}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
-                        )
-
-                    new_vm_template_id = await self.find_next_available_vm_id()
-                    json_for_create["vmid"] = new_vm_template_id
-
-                    with trace_action(
-                        self.logger,
-                        self.TRACE_NAME,
-                        f"create VM from OVA {new_vm_template_id=}",
-                    ):
-
-                        async def create() -> None:
-                            await self.async_proxmox.request(
-                                "POST", f"/nodes/{self.node}/qemu", json=json_for_create
-                            )
-
-                        await self.task_wrapper.do_action_and_wait_for_tasks(create)
-
-                    await self.configure_network_and_tags(
-                        vm_config=vm_config,
-                        sdn_vnet_aliases=sdn_vnet_aliases,
-                        vm_id=new_vm_template_id,
-                        extra_tags=[ova_tag],
-                    )
-
-                    async def convert_to_template() -> None:
+                    async def create() -> None:
                         await self.async_proxmox.request(
-                            "POST",
-                            f"/nodes/{self.node}/qemu/{new_vm_template_id}/template",
+                            "POST", f"/nodes/{self.node}/qemu", json=json_for_create
                         )
 
-                    await self.task_wrapper.do_action_and_wait_for_tasks(
-                        convert_to_template
+                    await self.task_wrapper.do_action_and_wait_for_tasks(create)
+
+                await self.configure_network_and_tags(
+                    vm_config=vm_config,
+                    sdn_vnet_aliases=sdn_vnet_aliases,
+                    vm_id=new_vm_template_id,
+                    extra_tags=[ova_tag],
+                )
+
+                async def convert_to_template() -> None:
+                    await self.async_proxmox.request(
+                        "POST",
+                        f"/nodes/{self.node}/qemu/{new_vm_template_id}/template",
                     )
 
-                    await self.remove_existing_nics(new_vm_template_id)
-                    self.logger.info(f"New template created: vmid={new_vm_template_id}")
-
-                else:
-                    new_vm_template_id = found_existing_template
-
-                vm_id_to_clone = new_vm_template_id
-                preserve_tags = vm_config.is_sandbox
-            else:
-                raise NotImplementedError(
-                    f"Not supported: {type(vm_config.vm_source_config.ova)}"
+                await self.task_wrapper.do_action_and_wait_for_tasks(
+                    convert_to_template
                 )
+
+                await self.remove_existing_nics(new_vm_template_id)
+                self.logger.info(f"New template created: vmid={new_vm_template_id}")
+
+            else:
+                new_vm_template_id = found_existing_template
+
+            vm_id_to_clone = new_vm_template_id
+            preserve_tags = vm_config.is_sandbox
         elif vm_config.vm_source_config.existing_vm_template_tag:
             existing_vms = await self.list_vms()
 
