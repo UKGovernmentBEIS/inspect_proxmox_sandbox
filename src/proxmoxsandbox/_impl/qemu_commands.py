@@ -213,8 +213,6 @@ class QemuCommands(abc.ABC):
         vm_config: VmConfig,
         built_in_vm_ids: Dict[str, int],
     ) -> int:
-        new_vm_id: int | None = None
-
         if (
             vm_config.disk_controller is not None
             and vm_config.vm_source_config.ova is None
@@ -230,6 +228,9 @@ class QemuCommands(abc.ABC):
                 "os_type is only supported for OVA or existing_vm_template_tag"
             )
 
+        vm_id_to_clone: int
+        preserve_tags: bool
+
         if vm_config.vm_source_config.built_in:
             vm_id_to_clone = built_in_vm_ids[vm_config.vm_source_config.built_in]
 
@@ -239,9 +240,7 @@ class QemuCommands(abc.ABC):
                     + f"{vm_config.vm_source_config.built_in}"
                 )
 
-            new_vm_id = await self.clone_vm_and_start(
-                vm_config, vm_id_to_clone, sdn_vnet_aliases, False
-            )
+            preserve_tags = False
         elif vm_config.vm_source_config.ova is not None:
             if isinstance(vm_config.vm_source_config.ova, HttpUrl):
                 raise NotImplementedError(
@@ -350,13 +349,8 @@ class QemuCommands(abc.ABC):
                 else:
                     new_vm_template_id = found_existing_template
 
-                new_vm_id = await self.clone_vm_and_start(
-                    vm_config,
-                    new_vm_template_id,
-                    sdn_vnet_aliases,
-                    vm_config.is_sandbox,
-                )
-
+                vm_id_to_clone = new_vm_template_id
+                preserve_tags = vm_config.is_sandbox
             else:
                 raise NotImplementedError(
                     f"Not supported: {type(vm_config.vm_source_config.ova)}"
@@ -392,13 +386,17 @@ class QemuCommands(abc.ABC):
                 )
 
             vm_id_to_clone = found_vm[0]["vmid"]
-
-            new_vm_id = await self.clone_vm_and_start(
-                vm_config, vm_id_to_clone, sdn_vnet_aliases, True
-            )
-
+            preserve_tags = True
         else:
             raise NotImplementedError(f"Not supported: {vm_config.vm_source_config=}")
+
+        new_vm_id = await self.clone_vm_and_start(
+            vm_config=vm_config,
+            vm_id_to_clone=vm_id_to_clone,
+            sdn_vnet_aliases=sdn_vnet_aliases,
+            preserve_tags=preserve_tags,
+        )
+
         if new_vm_id is None:
             raise ValueError("No VM ID?")
         return new_vm_id
