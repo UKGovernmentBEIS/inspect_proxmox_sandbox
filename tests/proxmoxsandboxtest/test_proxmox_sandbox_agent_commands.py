@@ -12,6 +12,8 @@ from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironmen
 
 from .proxmox_sandbox_utils import setup_requests_logging
 
+pytestmark = pytest.mark.proxmox
+
 
 async def test_exec_timeout_with_sigterm_handler_no_retryerror(
     proxmox_sandbox_environment: ProxmoxSandboxEnvironment,

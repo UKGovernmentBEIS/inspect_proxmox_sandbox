@@ -26,6 +26,9 @@ dependencies = [
 asyncio_mode = "auto"
 pythonpath = ["tests"]
 testpaths = ["tests/**/*.py"]
+markers = [
+  "proxmox: test requires a live Proxmox instance",
+]
 
 [build-system]
 requires = ["hatchling"]

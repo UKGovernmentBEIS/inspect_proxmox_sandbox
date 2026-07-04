@@ -1,7 +1,10 @@
+import pytest
 from pytest import raises
 
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, SdnCommands
 from proxmoxsandbox.schema import DhcpRange, SdnConfig, SubnetConfig, VnetConfig
+
+pytestmark = pytest.mark.proxmox
 
 
 async def test_create_sdn_no_vnets(ids_start: str, sdn_commands: SdnCommands) -> None:

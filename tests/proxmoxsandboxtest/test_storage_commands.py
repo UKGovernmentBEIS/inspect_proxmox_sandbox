@@ -4,9 +4,12 @@ from pathlib import Path
 from typing import BinaryIO, cast
 
 import pycdlib
+import pytest
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
+
+pytestmark = pytest.mark.proxmox
 
 
 async def test_upload_size_check_different(
