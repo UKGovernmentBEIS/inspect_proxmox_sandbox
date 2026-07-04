@@ -1,8 +1,9 @@
 import abc
 import re
-import tarfile
 from logging import getLogger
+from pathlib import PurePosixPath
 from typing import Collection, Dict, List, Set
+from urllib.parse import urlsplit
 
 import httpx
 import tenacity
@@ -233,6 +234,40 @@ class QemuCommands(abc.ABC):
         else:
             return filtered[0]["vmid"]
 
+    async def _probe_url_name_and_size(
+        self,
+        url: str,
+    ) -> tuple[str, int]:
+        """Infer the filename and byte size from a URL without downloading it.
+
+        The filename comes from the last segment of the URL path. The size comes from a
+        ranged GET (asking for a single byte), reading the total from ``Content-Range``.
+        """
+        filename = PurePosixPath(urlsplit(url).path).name
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            # Using HEAD would be more normal, but e.g. s3 presigned GET URLs will 403
+            # on HEAD requests. If GET doesn't work, we probably won't be able to
+            # download it anyway.
+            resp = await client.get(url, headers={"Range": "bytes=0-0"})
+            resp.raise_for_status()
+
+            if resp.status_code == 206:
+                content_range = resp.headers.get("content-range", "")
+                total = content_range.rpartition("/")[2]
+                if total and total != "*":
+                    return filename, int(total)
+
+            # fallback e.g. in cases where we got a 200
+            content_length = resp.headers.get("content-length")
+            if content_length is not None:
+                return filename, int(content_length)
+
+        raise ValueError(
+            f"Couldn't determine the size of {url=}"
+            f" ({resp.status_code=}, {resp.headers=})"
+        )
+
     async def create_and_start_vm(
         self,
         sdn_vnet_aliases: VnetAliases,
@@ -242,12 +277,14 @@ class QemuCommands(abc.ABC):
         if (
             vm_config.disk_controller is not None
             and vm_config.vm_source_config.ova is None
+            and vm_config.vm_source_config.ova_url is None
         ):
             raise NotImplementedError("disk_controller is only supported for OVA")
 
         if (
             vm_config.os_type != "l26"
             and vm_config.vm_source_config.ova is None
+            and vm_config.vm_source_config.ova_url is None
             and vm_config.vm_source_config.existing_vm_template_tag is None
         ):
             raise NotImplementedError(
@@ -260,11 +297,34 @@ class QemuCommands(abc.ABC):
         if vm_config.vm_source_config.built_in:
             vm_id_to_clone = built_in_vm_ids[vm_config.vm_source_config.built_in]
             preserve_tags = False
-        elif vm_config.vm_source_config.ova is not None:
-            ova_size = vm_config.vm_source_config.ova.stat().st_size
-            ova_tag = f"ova-{vm_config.vm_source_config.ova.name}-{ova_size}"
+        elif vm_config.vm_source_config.existing_vm_template_tag:
+            tag = vm_config.vm_source_config.existing_vm_template_tag
+            found_id = await self._find_inspect_template_id(tag=tag)
+
+            if found_id is None:
+                raise ValueError(f"Couldn't find VM with tag {tag}")
+
+            vm_id_to_clone = found_id
+            preserve_tags = True
+        else:
+            if vm_config.vm_source_config.ova is not None:
+                ova_name = vm_config.vm_source_config.ova.name
+                ova_size = vm_config.vm_source_config.ova.stat().st_size
+            elif vm_config.vm_source_config.ova_url is not None:
+                url_name, ova_size = await self._probe_url_name_and_size(
+                    url=vm_config.vm_source_config.ova_url
+                )
+                self.logger.info(f"Inferred from ova_url: {url_name=}, {ova_size=}")
+                ova_name = vm_config.vm_source_config.ova_url_filename or url_name
+            else:
+                raise NotImplementedError(
+                    f"Not supported: {vm_config.vm_source_config=}"
+                )
+
+            ova_tag = f"ova-{ova_name}-{ova_size}"
             ova_tag = re.sub(r"[^a-zA-Z0-9_\-]", "_", ova_tag)
             ova_tag = ova_tag.lower()
+
             self.logger.info(f"Looking for existing template with tag: {ova_tag}")
 
             found_existing_template = await self._find_inspect_template_id(tag=ova_tag)
@@ -274,11 +334,25 @@ class QemuCommands(abc.ABC):
                 self.logger.info(f"Found existing template: vmid={vm_id_to_clone}")
             else:
                 self.logger.info("No existing template found, importing from OVA")
-                await self.storage_commands.upload_file_to_storage(
-                    file=vm_config.vm_source_config.ova,
-                    content_type="import",
-                    size_check=ova_size,
-                )
+
+                if vm_config.vm_source_config.ova is not None:
+                    await self.storage_commands.upload_file_to_storage(
+                        file=vm_config.vm_source_config.ova,
+                        content_type="import",
+                        filename=ova_name,
+                        size_check=ova_size,
+                    )
+                elif vm_config.vm_source_config.ova_url is not None:
+                    await self.storage_commands.download_url_to_storage(
+                        url=vm_config.vm_source_config.ova_url,
+                        content_type="import",
+                        filename=ova_name,
+                        size_check=ova_size,
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"Not supported: {vm_config.vm_source_config=}"
+                    )
 
                 json_for_create: ProxmoxJsonDataType = {
                     "node": self.node,
@@ -297,19 +371,18 @@ class QemuCommands(abc.ABC):
 
                 self.other_config_json(vm_config, json_for_create)
 
-                vmdks = []
-                with tarfile.open(vm_config.vm_source_config.ova, "r") as tar:
-                    file_list = tar.getnames()
+                vmdks = await self.storage_commands.list_import_archive_disks(
+                    import_filename=ova_name
+                )
 
-                    for file_name in file_list:
-                        if file_name.endswith(".vmdk"):
-                            vmdks.append(file_name)
+                if not vmdks:
+                    raise ValueError(f"No vmdks found in {ova_name}")
 
                 # this logic is reverse-engineered from the Proxmox GUI
                 # and may be brittle
                 for i, vmdk in enumerate(vmdks):
                     json_for_create[f"{disk_prefix}{i}"] = (
-                        f"{self.image_storage}:0,import-from={LOCAL_STORAGE}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
+                        f"{self.image_storage}:0,import-from={LOCAL_STORAGE}:import/{ova_name}/{vmdk},format=qcow2,cache=writeback"
                     )
 
                 new_vm_template_id = await self.find_next_available_vm_id()
@@ -350,17 +423,6 @@ class QemuCommands(abc.ABC):
                 vm_id_to_clone = new_vm_template_id
 
             preserve_tags = vm_config.is_sandbox
-        elif vm_config.vm_source_config.existing_vm_template_tag:
-            tag = vm_config.vm_source_config.existing_vm_template_tag
-            found_id = await self._find_inspect_template_id(tag=tag)
-
-            if found_id is None:
-                raise ValueError(f"Couldn't find VM with tag {tag}")
-
-            vm_id_to_clone = found_id
-            preserve_tags = True
-        else:
-            raise NotImplementedError(f"Not supported: {vm_config.vm_source_config=}")
 
         new_vm_id = await self.clone_vm_and_start(
             vm_config=vm_config,
