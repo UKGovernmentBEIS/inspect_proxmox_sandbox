@@ -206,6 +206,34 @@ class QemuCommands(abc.ABC):
             alias: vnet_id for vnet_id, alias in sdn_vnet_aliases if alias is not None
         }
 
+    @staticmethod
+    def vm_is_inspect(vm: dict, template: bool, with_tag: str | None = None) -> bool:
+        if "tags" not in vm:
+            return False
+        tags = set(vm["tags"].split(";"))
+        if "inspect" not in tags:
+            return False
+        if with_tag is not None and with_tag not in tags:
+            return False
+        is_template = vm.get("template") == 1
+        return template == is_template
+
+    async def _find_inspect_template_id(self, tag: str) -> int | None:
+        existing_vms = await self.list_vms()
+        filtered = [
+            vm
+            for vm in existing_vms
+            if self.vm_is_inspect(vm, template=True, with_tag=tag)
+        ]
+        if not filtered:
+            return None
+        elif len(filtered) > 1:
+            raise ValueError(
+                f"Found multiple inspect templates with tag {tag}: {filtered}"
+            )
+        else:
+            return filtered[0]["vmid"]
+
     async def create_and_start_vm(
         self,
         sdn_vnet_aliases: VnetAliases,
@@ -240,24 +268,12 @@ class QemuCommands(abc.ABC):
             ova_tag = ova_tag.lower()
             self.logger.info(f"Looking for existing template with tag: {ova_tag}")
 
-            existing_vms = await self.list_vms()
+            found_existing_template = await self._find_inspect_template_id(tag=ova_tag)
 
-            found_existing_template = None
-            for existing_vm in existing_vms:
-                if (
-                    "tags" in existing_vm
-                    and "template" in existing_vm
-                    and existing_vm["template"] == 1
-                    and "inspect" in existing_vm["tags"].split(";")
-                    and ova_tag in existing_vm["tags"].split(";")
-                ):
-                    found_existing_template = existing_vm["vmid"]
-                    self.logger.info(
-                        f"Found existing template: vmid={found_existing_template}"
-                    )
-                    break
-
-            if found_existing_template is None:
+            if found_existing_template is not None:
+                vm_id_to_clone = found_existing_template
+                self.logger.info(f"Found existing template: vmid={vm_id_to_clone}")
+            else:
                 self.logger.info("No existing template found, importing from OVA")
                 await self.storage_commands.upload_file_to_storage(
                     file=vm_config.vm_source_config.ova,
@@ -332,43 +348,17 @@ class QemuCommands(abc.ABC):
 
                 await self.remove_existing_nics(new_vm_template_id)
                 self.logger.info(f"New template created: vmid={new_vm_template_id}")
+                vm_id_to_clone = new_vm_template_id
 
-            else:
-                new_vm_template_id = found_existing_template
-
-            vm_id_to_clone = new_vm_template_id
             preserve_tags = vm_config.is_sandbox
         elif vm_config.vm_source_config.existing_vm_template_tag:
-            existing_vms = await self.list_vms()
+            tag = vm_config.vm_source_config.existing_vm_template_tag
+            found_id = await self._find_inspect_template_id(tag=tag)
 
-            found_vm = []
+            if found_id is None:
+                raise ValueError(f"Couldn't find VM with tag {tag}")
 
-            for existing_vm in existing_vms:
-                if (
-                    "template" in existing_vm
-                    and existing_vm["template"] == 1
-                    and "tags" in existing_vm
-                    and "inspect" in existing_vm["tags"].split(";")
-                    and vm_config.vm_source_config.existing_vm_template_tag
-                    in existing_vm["tags"].split(";")
-                ):
-                    found_vm.append(existing_vm)
-                    break
-
-            if len(found_vm) == 0:
-                raise ValueError(
-                    "Couldn't find VM with tag "
-                    + f"{vm_config.vm_source_config.existing_vm_template_tag}"
-                )
-
-            if len(found_vm) > 1:
-                raise ValueError(
-                    "Found multiple VMs with tag "
-                    + f"{vm_config.vm_source_config.existing_vm_template_tag}: "
-                    + f"{found_vm=}"
-                )
-
-            vm_id_to_clone = found_vm[0]["vmid"]
+            vm_id_to_clone = found_id
             preserve_tags = True
         else:
             raise NotImplementedError(f"Not supported: {vm_config.vm_source_config=}")
