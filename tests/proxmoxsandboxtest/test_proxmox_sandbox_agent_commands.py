@@ -108,6 +108,35 @@ async def test_read_file_large_binary_surfaces_cleanly(
         await env.read_file("/tmp/rf20", text=False)
 
 
+async def test_read_file_under_cap_but_wire_expanding_round_trips(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    r"""A file under the 16 MiB cap whose content expanded on the wire (#81).
+
+    Under the old decode=1 path the limit was counted against JSON wire bytes,
+    not raw bytes. A control byte JSON-escapes to `\u00XX` (6x), so this 8 MiB
+    file ballooned to ~48 MiB on the wire and tripped the output limit - a file
+    well under any documented cap, rejected purely because of its content. With
+    decode=0 the limit is the raw-byte `count`, so it round-trips byte-exact.
+    """
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("byte-level wire-expansion repro is Linux-only")
+    env = proxmox_sandbox_environment
+
+    # 8 MiB of 0x01: raw is under the 16 MiB cap, but each byte is `\u0001`
+    # (6 chars) in the decode=1 JSON, so the old wire size was ~48 MiB.
+    size = 8 * 1024 * 1024
+    await env.exec(
+        ["sh", "-c", f"head -c {size} /dev/zero | tr '\\0' '\\1' > /tmp/rf_ctrl"],
+        timeout=60,
+    )
+    md5_guest = (await env.exec(["md5sum", "/tmp/rf_ctrl"])).stdout.split()[0]
+    data = await env.read_file("/tmp/rf_ctrl", text=False)
+    assert isinstance(data, bytes)
+    assert data == b"\x01" * size
+    assert hashlib.md5(data).hexdigest() == md5_guest
+
+
 async def test_file_read_597_is_response_compression(
     proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
 ) -> None:
