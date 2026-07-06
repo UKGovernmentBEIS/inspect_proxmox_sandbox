@@ -268,13 +268,7 @@ class InfraCommands(abc.ABC):
         noticed_vms = list()
 
         for vm in await self.qemu_commands.list_vms():
-            if (
-                "tags" in vm
-                and "inspect" in vm["tags"].split(";")
-                and (
-                    ("template" in vm and vm["template"] == 0) or ("template" not in vm)
-                )
-            ):
+            if self.qemu_commands.vm_is_inspect(vm, template=False):
                 existing_vm = await self.qemu_commands.read_vm(vm["vmid"])
                 for key in existing_vm.keys():
                     if key.startswith("net"):

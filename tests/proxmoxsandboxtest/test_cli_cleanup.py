@@ -3,7 +3,7 @@
 import json
 import os
 import tempfile
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -84,10 +84,36 @@ async def test_cli_cleanup_all_instances(multi_instance_config_file):
 
     try:
         with (
-            patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"),
+            patch(
+                "proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"
+            ) as mock_proxmox_api,
             patch.object(InfraCommands, "build", side_effect=create_mock_infra),
         ):
             await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
+
+            mock_proxmox_api.assert_has_calls(
+                [
+                    call(
+                        host="10.0.1.10:8006",
+                        user="root@pam",
+                        password="test",
+                        verify_tls=False,
+                    ),
+                    call(
+                        host="10.0.1.11:8006",
+                        user="root@pam",
+                        password="test",
+                        verify_tls=False,
+                    ),
+                    call(
+                        host="10.0.1.20:8006",
+                        user="root@pam",
+                        password="test",
+                        verify_tls=False,
+                    ),
+                ]
+            )
+            assert mock_proxmox_api.call_count == 3
 
             # Verify InfraCommands.build was called for each instance
             assert len(mock_infra_instances) == 3
