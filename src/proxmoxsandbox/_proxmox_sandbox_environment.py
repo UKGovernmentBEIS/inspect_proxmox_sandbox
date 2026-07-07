@@ -65,13 +65,6 @@ def _split_chunks(
 _EXEC_POLL_GRACE_SECONDS = _IN_GUEST_KILL_GRACE + 3
 
 
-def _recover_qga_bytes(mangled: str) -> bytes:
-    # Proxmox's file-read returns each raw file byte as a Latin-1 codepoint, then
-    # serialises that as UTF-8 JSON, so non-ASCII bytes arrive double-encoded
-    # (e.g. "é" -> "Ã©"). Encoding back to ISO-8859-1 recovers the original bytes.
-    return mangled.encode("iso-8859-1")
-
-
 class ReturnCodeNotWritten(Exception):
     """The exec wrapper exited without writing its returncode file."""
 
@@ -899,40 +892,30 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         reraise=True,
     )
     async def _read_return_code(self, tmp_start) -> int:
-        returncode_string = (
-            await self.agent_commands.read_file_or_blank(
-                vm_id=self.vm_id,
-                filepath=f"{tmp_start}script.returncode",
-                max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
-            )
-        )["content"]
-        returncode_string_stripped = returncode_string.strip()
+        raw, _truncated = await self.agent_commands.read_file_capped_or_blank(
+            vm_id=self.vm_id,
+            filepath=f"{tmp_start}script.returncode",
+            count=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
+        )
+        returncode_string_stripped = raw.decode("utf-8", errors="replace").strip()
         if len(returncode_string_stripped) == 0:
             raise ReturnCodeNotWritten()
         return int(returncode_string_stripped)
 
     async def _read_exec_output(self, filepath: str) -> str:
-        try:
-            response = await self.agent_commands.read_file_or_blank(
-                vm_id=self.vm_id,
-                filepath=filepath,
-                max_size=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
+        # decode=0 gives raw bytes; decode UTF-8 errors="replace" (output is
+        # arbitrary bytes). Oversized output is flagged via `truncated`.
+        raw, truncated = await self.agent_commands.read_file_capped_or_blank(
+            vm_id=self.vm_id,
+            filepath=filepath,
+            count=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
+        )
+        text = raw.decode("utf-8", errors="replace")
+        if truncated:
+            raise OutputLimitExceededError(
+                SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR, text
             )
-        except OutputLimitExceededError as ex:
-            # truncated_output arrives in Proxmox's mangled wire form; decode it the
-            # same way as a full read so the truncated text matches what a non-truncated
-            # read would have produced, rather than leaking mojibake to the caller.
-            if ex.truncated_output is not None:
-                ex.truncated_output = self._decode_exec_output(ex.truncated_output)
-            raise
-        return self._decode_exec_output(response["content"])
-
-    @staticmethod
-    def _decode_exec_output(content: str) -> str:
-        # ExecResult.stdout/stderr are str, so undo Proxmox's file-read mangling
-        # (see _recover_qga_bytes) and decode as UTF-8. errors="replace" because
-        # a command's output can be arbitrary bytes, not necessarily valid UTF-8.
-        return _recover_qga_bytes(content).decode("utf-8", errors="replace")
+        return text
 
     # Platform-specific "file not found" messages from the QEMU guest agent.
     _FILE_NOT_FOUND_ERRORS = [
@@ -1192,13 +1175,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         """
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
-        # Note, per https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vm_id}/agent/file-read
-        # read from proxmox API is limited to 16777216 bytes
+        # PVE caps agent file-read at 16 MiB; cap at the (test-overridable)
+        # Inspect limit, never above that.
+        cap = min(SandboxEnvironmentLimits.MAX_READ_FILE_SIZE, 16777216)
         try:
-            read_get_response = await self.agent_commands.read_file(
+            data_bytes, truncated = await self.agent_commands.read_file_capped(
                 vm_id=self.vm_id,
                 filepath=file,
-                max_size=min(SandboxEnvironmentLimits.MAX_READ_FILE_SIZE, 16777216),
+                count=cap,
             )
         except Exception as ex:
             if "Agent error" in str(ex):
@@ -1214,17 +1198,18 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     raise ex
             else:
                 raise ex
-        if (
-            getattr(read_get_response, "truncated", False)
-            or len(read_get_response["content"])
-            >= SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
-        ):
-            raise OutputLimitExceededError("Output size exceeds 16 MiB limit.", file)
-        bytes_data = _recover_qga_bytes(read_get_response["content"])
+        if truncated:
+            # File exceeds the cap; report the active limit (16 MiB or a test override).
+            limit_str = (
+                SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR
+                if SandboxEnvironmentLimits.MAX_READ_FILE_SIZE <= 16777216
+                else "16 MiB"
+            )
+            raise OutputLimitExceededError(limit_str, None)
         if text:
-            return bytes_data.decode("utf-8")
+            return data_bytes.decode("utf-8")
         else:
-            return bytes_data
+            return data_bytes
 
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:

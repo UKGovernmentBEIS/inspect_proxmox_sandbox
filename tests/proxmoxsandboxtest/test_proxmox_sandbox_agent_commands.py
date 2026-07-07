@@ -2,6 +2,7 @@ import hashlib
 from pathlib import Path
 from typing import List
 
+import httpx
 import pytest
 import tenacity
 from inspect_ai.util import OutputLimitExceededError
@@ -38,49 +39,157 @@ _EMOJI = "\U0001f600"
 _EMOJI_BYTES = _EMOJI.encode("utf-8")  # b"\xf0\x9f\x98\x80"
 
 
-@pytest.mark.parametrize("lead", ["", "a"], ids=["even-offset", "odd-offset"])
 async def test_exec_10mb_limit(
-    proxmox_sandbox_environment: ProxmoxSandboxEnvironment, lead: str
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
 ) -> None:
-    # Output over MAX_EXEC_OUTPUT_SIZE (10 MiB) must truncate cleanly, even when
-    # the cut lands in the middle of a multi-byte sequence (issue #77). An all-'a'
-    # version of this test never hit that: plain ASCII has no multi-byte sequences
-    # for the cut to split, so it always parsed cleanly.
-    #
-    # read_file streams the file-read response in 8192-byte chunks and stops once
-    # the total first exceeds 10 MiB, so the cut is at a fixed, even byte offset
-    # (1281*8192 = 10493952). Each non-ASCII output byte comes back as a 2-byte
-    # sequence on the wire (Proxmox re-encodes raw bytes via latin-1), and every
-    # byte of our emoji is non-ASCII, so the whole payload is 2-byte wire pairs.
-    # Whether the cut splits one of those pairs depends on the parity of the offset
-    # at which they start, which we can't predict exactly (the JSON field order is
-    # non-deterministic). So we run two outputs differing by a single leading byte:
-    # their pairs sit on opposite parities, so exactly one variant lands mid-sequence
-    # and reproduces the crash. Pre-fix that variant raised
-    # `ValueError: invalid unicode code point`; both must now truncate cleanly.
+    # Oversized exec output must surface as OutputLimitExceededError. decode=0
+    # reads whole bytes, so multi-byte output survives truncation (at most one
+    # trailing U+FFFD).
     if proxmox_sandbox_environment._is_windows():
-        pytest.skip("byte-level multi-byte boundary repro is Linux-only")
+        pytest.skip("multi-byte output repro is Linux-only")
 
     count = pow(2, 20) * 3  # 3 Mi emoji * 4 bytes = 12 MiB, well over the 10 MiB limit
     escaped = "".join(f"\\x{b:02x}" for b in _EMOJI_BYTES)
     exec_cmd = [
         "perl",
         "-e",
-        f'binmode STDOUT; print "{lead}", "{escaped}" x {count}',
+        f'binmode STDOUT; print "{escaped}" x {count}',
     ]
 
     with pytest.raises(OutputLimitExceededError) as exc_info:
         await proxmox_sandbox_environment.exec(exec_cmd, timeout=120)
 
-    # Partial output is recovered and decoded like a full read: the optional ASCII
-    # lead, then whole emoji. The size cut can fall inside a 4-byte sequence, leaving
-    # at most one trailing U+FFFD replacement char rather than crashing the parse.
     truncated = exc_info.value.truncated_output
     assert isinstance(truncated, str)
-    assert truncated.startswith(lead)
-    body = truncated[len(lead) :]
-    assert body.rstrip("�").strip(_EMOJI) == ""
-    assert len(body) > 1_000_000
+    assert truncated.rstrip("�").strip(_EMOJI) == ""
+    assert len(truncated) > 1_000_000
+
+
+async def test_exec_large_binary_output_surfaces_cleanly(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    """Oversized (binary) exec output raises OutputLimitExceededError, not a 597."""
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("binary stdout repro is Linux-only")
+
+    # 30 MiB of random bytes straight to stdout, well over the 10 MiB exec cap.
+    with pytest.raises(OutputLimitExceededError):
+        await proxmox_sandbox_environment.exec(
+            ["sh", "-c", "head -c 31457280 /dev/urandom"], timeout=120
+        )
+
+
+async def test_read_file_large_binary_surfaces_cleanly(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    """read_file round-trips a multi-MiB binary and rejects oversized files.
+
+    14 MiB round-trips byte-exact (also exercises the decode=0 segment-decode);
+    20 MiB (over the 16 MiB cap) raises OutputLimitExceededError, not a 597.
+    """
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("binary repro is Linux-only")
+    env = proxmox_sandbox_environment
+
+    # 14 MiB binary (multi-chunk, not 3-aligned) must round-trip byte-exact.
+    await env.exec(
+        ["sh", "-c", "head -c 14680064 /dev/urandom > /tmp/rf14"], timeout=60
+    )
+    md5_guest = (await env.exec(["md5sum", "/tmp/rf14"])).stdout.split()[0]
+    data = await env.read_file("/tmp/rf14", text=False)
+    assert isinstance(data, bytes) and len(data) == 14680064
+    assert hashlib.md5(data).hexdigest() == md5_guest
+
+    # 20 MiB (over the 16 MiB cap) must fail cleanly, not crash with a 597.
+    await env.exec(
+        ["sh", "-c", "head -c 20971520 /dev/urandom > /tmp/rf20"], timeout=60
+    )
+    with pytest.raises(OutputLimitExceededError):
+        await env.read_file("/tmp/rf20", text=False)
+
+
+async def test_read_file_under_cap_but_wire_expanding_round_trips(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    r"""A file under the 16 MiB cap whose content expanded on the wire (#81).
+
+    Under the old decode=1 path the limit was counted against JSON wire bytes,
+    not raw bytes. A control byte JSON-escapes to `\u00XX` (6x), so this 8 MiB
+    file ballooned to ~48 MiB on the wire and tripped the output limit - a file
+    well under any documented cap, rejected purely because of its content. With
+    decode=0 the limit is the raw-byte `count`, so it round-trips byte-exact.
+    """
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("byte-level wire-expansion repro is Linux-only")
+    env = proxmox_sandbox_environment
+
+    # 8 MiB of 0x01: raw is under the 16 MiB cap, but each byte is `\u0001`
+    # (6 chars) in the decode=1 JSON, so the old wire size was ~48 MiB.
+    size = 8 * 1024 * 1024
+    await env.exec(
+        ["sh", "-c", f"head -c {size} /dev/zero | tr '\\0' '\\1' > /tmp/rf_ctrl"],
+        timeout=60,
+    )
+    md5_guest = (await env.exec(["md5sum", "/tmp/rf_ctrl"])).stdout.split()[0]
+    data = await env.read_file("/tmp/rf_ctrl", text=False)
+    assert isinstance(data, bytes)
+    assert data == b"\x01" * size
+    assert hashlib.md5(data).hexdigest() == md5_guest
+
+
+async def test_file_read_597_is_response_compression(
+    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
+) -> None:
+    """Pin the upstream 597: it depends on negotiated response compression.
+
+    A large incompressible body truncates mid-transfer (597) when gzip is
+    accepted but delivers fine as `identity` - which is why read_file_capped
+    sends Accept-Encoding: identity. decode=1 here makes the body big enough to
+    trip it.
+    """
+    if proxmox_sandbox_environment._is_windows():
+        pytest.skip("Linux-only")
+    env = proxmox_sandbox_environment
+    api = env.agent_commands.async_proxmox
+
+    # ~14 MiB of incompressible random -> decode=1 body well past the cliff.
+    await env.exec(
+        ["sh", "-c", "head -c 14680064 /dev/urandom > /tmp/incompressible"], timeout=60
+    )
+    await api.request("GET", "/version")  # ensure a ticket
+    url = (
+        f"{api.api_base_url}/nodes/{env.agent_commands.node}"
+        f"/qemu/{env.vm_id}/agent/file-read"
+    )
+
+    async def read_with(accept_encoding: str) -> httpx.Response:
+        async with httpx.AsyncClient(
+            verify=api.verify_tls,
+            timeout=httpx.Timeout(connect=15, read=120, write=60, pool=60),
+        ) as client:
+            return await client.get(
+                url,
+                headers={
+                    "Cookie": f"PVEAuthCookie={api.ticket}",
+                    "Accept-Encoding": accept_encoding,
+                },
+                params={"file": "/tmp/incompressible", "decode": 1},
+            )
+
+    # identity: the full body is delivered.
+    identity_resp = await read_with("identity")
+    assert identity_resp.status_code == 200
+    assert len(identity_resp.content) > 14_000_000
+
+    # any negotiated compression: pveproxy tears the large incompressible body
+    # down with a non-standard 596/597. (If a future Proxmox stops doing this,
+    # this assertion flips - which is the signal that the workaround can go.)
+    for accept_encoding in ("gzip", "gzip, deflate, br"):
+        resp = await read_with(accept_encoding)
+        assert resp.status_code in (596, 597), (
+            f"expected 596/597 for Accept-Encoding={accept_encoding!r}, "
+            f"got {resp.status_code}"
+        )
 
 
 CURRENT_DIR = Path(__file__).parent
@@ -150,8 +259,17 @@ async def test_self_check(
         "test_read_and_write_large_file_binary",
     ]
 
-    return await check_results_of_self_check(
+    results = await check_results_of_self_check(
         proxmox_sandbox_environment, known_failures
+    )
+
+    # 50 MiB can't round-trip (16 MiB cap) so it stays a known failure - but it
+    # must fail *gracefully* (OutputLimitExceededError), not a raw 597. The old
+    # outcome-blind exclusion is how the crash slipped through.
+    large_file_result = results["test_read_and_write_large_file_binary"]
+    assert "OutputLimitExceededError" in str(large_file_result), (
+        "Oversized read_file must fail with OutputLimitExceededError, got: "
+        f"{large_file_result!r}"
     )
 
 
@@ -177,3 +295,4 @@ async def check_results_of_self_check(sandbox_env, known_failures=[]):
             failures.append(f"Test {test_name} failed: {result}")
     if failures:
         assert False, "\n".join(failures)
+    return self_check_results
