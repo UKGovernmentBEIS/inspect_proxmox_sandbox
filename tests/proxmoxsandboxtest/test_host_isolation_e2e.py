@@ -7,12 +7,16 @@ integration suite — if it fails, the host you're testing against wasn't
 provisioned correctly (e.g. a hand-rolled Proxmox missing the firewall config).
 """
 
+import pytest
+
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
 
 from .proxmox_sandbox_utils import setup_sandbox
+
+pytestmark = pytest.mark.req_proxmox
 
 
 async def test_sandbox_vm_cannot_reach_pveproxy_or_ssh() -> None:
