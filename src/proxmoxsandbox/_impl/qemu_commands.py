@@ -2,7 +2,6 @@ import abc
 import re
 import tarfile
 from logging import getLogger
-from pathlib import Path
 from typing import Collection, Dict, List, Set
 
 import httpx
