@@ -16,7 +16,7 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
 
 from .proxmox_sandbox_utils import setup_sandbox
 
-pytestmark = pytest.mark.proxmox
+pytestmark = pytest.mark.req_proxmox
 
 
 async def test_sandbox_vm_cannot_reach_pveproxy_or_ssh() -> None:

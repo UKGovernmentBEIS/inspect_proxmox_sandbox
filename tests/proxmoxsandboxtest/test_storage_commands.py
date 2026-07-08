@@ -9,7 +9,7 @@ import pytest
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 
-pytestmark = pytest.mark.proxmox
+pytestmark = pytest.mark.req_proxmox
 
 
 async def test_upload_size_check_different(

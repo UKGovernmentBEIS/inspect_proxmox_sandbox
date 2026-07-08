@@ -23,7 +23,7 @@ from .proxmox_sandbox_utils import setup_sandbox
 
 CURRENT_DIR = Path(__file__).parent
 
-pytestmark = pytest.mark.proxmox
+pytestmark = pytest.mark.req_proxmox
 
 
 async def test_static_ip() -> None:

@@ -32,4 +32,4 @@ jobs:
 
       - run: uv sync --locked
 
-      - run: uv run pytest -m "not proxmox"
+      - run: uv run pytest -m "not req_proxmox"

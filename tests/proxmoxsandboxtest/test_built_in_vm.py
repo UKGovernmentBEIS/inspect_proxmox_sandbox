@@ -3,7 +3,7 @@ import pytest
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 
-pytestmark = pytest.mark.proxmox
+pytestmark = pytest.mark.req_proxmox
 
 
 async def test_ubuntu(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:

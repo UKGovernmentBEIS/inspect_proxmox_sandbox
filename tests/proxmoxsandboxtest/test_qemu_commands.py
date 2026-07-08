@@ -15,7 +15,7 @@ from proxmoxsandbox.schema import (
 
 CURRENT_DIR = Path(__file__).parent  # noqa: F821
 
-pytestmark = pytest.mark.proxmox
+pytestmark = pytest.mark.req_proxmox
 
 
 async def test_simple_vm_non_sandbox(
