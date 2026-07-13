@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
-- Prevent sandbox VMs from accessing cloud instance metadata credentials and Disable IPv6 for sandbox guests (when using the bundled provisioning scripts)
+- Prevent VMs from accessing cloud instance metadata credentials, disable IPv6 for sandbox guests (when using the bundled provisioning scripts)
 
 ## 0.11.0 - 2026-06-01
 
