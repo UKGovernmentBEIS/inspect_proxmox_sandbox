@@ -85,7 +85,8 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata() -> None:
         metadata_get_res = await env.exec(
             [
                 "curl",
-                "-sS",
+                "--silent",
+                "--show-error",
                 "--max-time",
                 "5",
                 "-o",
