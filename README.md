@@ -52,17 +52,16 @@ them are isolated out of the box.
 If you provision Proxmox some other way, configure equivalent persistent rules
 **on the node**. The Proxmox rules accept management ports only on the
 default-route interface (where external callers arrive) and leave SDN DNS/DHCP
-open. The remaining rules enforce RFC 3927 section 7, which Linux's forward path
-ignores: a router must not forward IPv4 link-local (`169.254.0.0/16`) traffic, but
-Linux forwards it anyway, so dropping it stops a sandbox guest reaching the host's
-cloud metadata service — and any other link-local endpoint — over its on-link route. The
+open. The remaining rules enforce RFC 3927 section 7: a router must not forward IPv4 link-local (`169.254.0.0/16`) traffic.
+Dropping it stops a sandbox guest reaching the host's
+cloud metadata service — and any other link-local endpoint. The
 destination drop goes in `raw PREROUTING` (host requests are `OUTPUT`, never
 `PREROUTING`, so the host keeps its own access); the source drop goes in
 `FORWARD`, **not** `PREROUTING`, so the host's own replies (e.g. an IMDS or
 `169.254.169.253` DNS response, delivered to `INPUT`) are left intact — a
-`raw PREROUTING -s` rule would drop them and break the host. IPv6 is not
-supported for sandbox guests, so it is disabled on guest interfaces and
-forwarded v6 is dropped:
+`raw PREROUTING -s` rule would drop them and break the host. 
+
+We also recommend disabling forwarding of IPv6 for VMs, unless you really know what you are doing.
 
 ```bash
 NIC=$(ip route show default | awk '{print $5}' | head -1)
