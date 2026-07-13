@@ -38,8 +38,9 @@ If you don't already have a Proxmox instance, see [CONTRIBUTING.md](CONTRIBUTING
 
 By default a sandbox VM can reach the Proxmox host's own services — the API
 (`pveproxy`, port 8006), SSH, etc. — via the SDN gateway, the `vmbr0` IP, or the
-host's external NIC. For cyber evals especially, you want those blocked so agents
-can't attack the Proxmox control plane.
+host's external NIC. Forwarded traffic can also reach cloud instance metadata
+services. For cyber evals especially, you want those blocked so agents can't
+attack the Proxmox or cloud control planes.
 
 This is **configured on the host at provisioning time, not by this library** — it
 needs the host's live routing table to know which interface external API/SSH
@@ -48,10 +49,19 @@ provisioning scripts in this repo (`scripts/virtualized_proxmox/build_proxmox_au
 and `scripts/ec2/userdata.sh`) set it up automatically, so hosts you create with
 them are isolated out of the box.
 
-If you provision Proxmox some other way, run these once **on the node**. They
-accept the management ports only on the default-route interface (where external
-callers arrive) and leave SDN DNS/DHCP open; sandbox VMs sit on other bridges and
-hit the default-deny policy:
+If you provision Proxmox some other way, configure equivalent persistent rules
+**on the node**. The Proxmox rules accept management ports only on the
+default-route interface (where external callers arrive) and leave SDN DNS/DHCP
+open. The remaining rules enforce RFC 3927 section 7: a router must not forward IPv4 link-local (`169.254.0.0/16`) traffic.
+Dropping it stops a sandbox guest reaching the host's
+cloud metadata service — and any other link-local endpoint. The
+destination drop goes in `raw PREROUTING` (host requests are `OUTPUT`, never
+`PREROUTING`, so the host keeps its own access); the source drop goes in
+`FORWARD`, **not** `PREROUTING`, so the host's own replies (e.g. an IMDS or
+`169.254.169.253` DNS response, delivered to `INPUT`) are left intact — a
+`raw PREROUTING -s` rule would drop them and break the host. 
+
+We also recommend disabling forwarding of IPv6 for VMs, unless you really know what you are doing.
 
 ```bash
 NIC=$(ip route show default | awk '{print $5}' | head -1)
@@ -62,7 +72,29 @@ pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto
 pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1
 pvesh set /nodes/$(hostname)/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
+iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
+iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
+sysctl -w net.ipv6.conf.default.disable_ipv6=1   # new SDN bridges come up v6-off
+if command -v ip6tables >/dev/null; then
+    ip6tables -w -C FORWARD -j DROP 2>/dev/null || ip6tables -w -A FORWARD -j DROP
+fi
 ```
+
+Most clouds (AWS, GCP, Azure, Oracle, DigitalOcean) serve metadata from
+`169.254.169.254`, covered above. Two providers sit outside the link-local
+range: **Alibaba Cloud** uses `100.100.100.200`, and **Azure** exposes the
+WireServer at `168.63.129.16` (guest-agent goal state / extension settings). On
+those clouds, add a `-d <ip>/32 -j DROP` raw-table rule for each — the host
+keeps access since its own traffic doesn't traverse `PREROUTING`.
+
+You must persist these rules across reboots (the bundled provisioning scripts do
+this, if you need an example.)
+
+These work under either firewall backend (`pve-firewall` or the nftables
+`proxmox-firewall`); the latter won't touch these chains. On `iptables-legacy`
+hosts they won't show in `nft list ruleset` — use `iptables -t raw -S` / `-S FORWARD`.
 
 ### Single Proxmox Instance
 

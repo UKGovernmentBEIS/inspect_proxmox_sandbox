@@ -2,9 +2,10 @@
 
 ## Unreleased
 
+- Prevent VMs from accessing cloud instance metadata credentials, disable IPv6 for sandbox guests (when using the bundled provisioning scripts)
 - Fix: reading a large or binary guest file / command output no longer crashes with HTTP 597 "Broken pipe".
 - Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs
-- Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process (e.g. `pkill -f`); it returns a failed `ExecResult` (`128+signal`, or `137` when the signal is unavailable) instead of raising a misleading `TimeoutError`
+- Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 
 ## 0.11.0 - 2026-06-01
 
