@@ -14,7 +14,7 @@ VIRTUALIZED_SCRIPT = (
 )
 
 
-def test_ec2_launch_requires_imdsv2_with_one_hop() -> None:
+def test_launch_contains_expected_imds_settings() -> None:
     launch = (EC2_SCRIPTS / "launch.sh").read_text()
 
     assert (
@@ -30,7 +30,7 @@ def test_ec2_launch_requires_imdsv2_with_one_hop() -> None:
         VIRTUALIZED_SCRIPT,
     ],
 )
-def test_provisioners_enforce_rfc3927_and_disable_ipv6(provisioner: Path) -> None:
+def test_provisioners_contain_expected_iptables_rules(provisioner: Path) -> None:
     # Both provisioners enforce RFC 3927 section 7 (a router must not forward IPv4
     # link-local), rather than denylisting one cloud's metadata IP, and treat
     # IPv6 as unsupported for sandbox guests. The two blocks are kept identical.
