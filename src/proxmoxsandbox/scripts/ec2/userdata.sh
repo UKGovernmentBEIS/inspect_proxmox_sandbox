@@ -377,10 +377,7 @@ cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
 #!/bin/bash
 set -euo pipefail
 
-# Enforce RFC 3927: a router must not forward IPv4 link-local (169.254.0.0/16),
-# but Linux forwards it anyway, so a sandbox guest can otherwise reach the host's
-# metadata service over its on-link route. 169.254.169.254 covers
-# AWS/GCP/Azure/Oracle/DO; README notes Alibaba/Azure-WireServer outside the range.
+# Enforce RFC 3927: a router must not forward IPv4 link-local (169.254.0.0/16).
 #
 # Destination drop in raw PREROUTING (interface-agnostic, ahead of any FORWARD
 # ACCEPT; host requests are OUTPUT so unaffected) -- this blocks the metadata vector.
