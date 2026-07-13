@@ -290,12 +290,8 @@ runcmd:
             get_args(get_args(VmSourceConfig.model_fields["built_in"].annotation)[0])
         ):
             for existing_vm in existing_vms:
-                if (
-                    "tags" in existing_vm
-                    and "template" in existing_vm
-                    and existing_vm["template"] == 1
-                    and "inspect" in existing_vm["tags"].split(";")
-                    and f"builtin-{existing_vm_name}" in existing_vm["tags"].split(";")
+                if self.qemu_commands.vm_is_inspect(
+                    existing_vm, template=True, with_tag=f"builtin-{existing_vm_name}"
                 ):
                     found_builtins[existing_vm_name] = existing_vm["vmid"]
                     break

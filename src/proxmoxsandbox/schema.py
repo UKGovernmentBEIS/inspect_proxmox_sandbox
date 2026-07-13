@@ -6,7 +6,7 @@ from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
 
@@ -218,7 +218,7 @@ class VmConfig(BaseModel, frozen=True):
     cpu: Optional[str] = None
 
 
-class ProxmoxInstanceConfig(BaseModel, frozen=True):
+class ProxmoxInstanceConfig(BaseModel):
     """
     Configuration for a single Proxmox instance.
 
@@ -235,13 +235,15 @@ class ProxmoxInstanceConfig(BaseModel, frozen=True):
         verify_tls: Whether to verify the Proxmox server's TLS certificate
     """
 
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
+
     instance_id: str
     pool_id: str
     host: str
     port: int
     user: str
     user_realm: str
-    password: str
+    password: SecretStr
     node: str
     verify_tls: bool
 
@@ -286,7 +288,7 @@ def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
     return ()
 
 
-class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
+class ProxmoxSandboxEnvironmentConfig(BaseModel):
     """
     Configuration for a Proxmox sandbox environment.
 
@@ -308,6 +310,8 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
         verify_tls: Whether to verify the Proxmox server's TLS certificate
     """
 
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
+
     # Which pool to use (references pool_id in PROXMOX_CONFIG_FILE)
     instance_pool_id: str = "default"
 
@@ -322,8 +326,8 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
     port: int = Field(default_factory=lambda: int(getenv("PROXMOX_PORT", "8006")))
     user: str = Field(default_factory=lambda: getenv("PROXMOX_USER", "root"))
     user_realm: str = Field(default_factory=lambda: getenv("PROXMOX_REALM", "pam"))
-    password: str = Field(
-        default_factory=lambda: getenv("PROXMOX_PASSWORD", "password")
+    password: SecretStr = Field(
+        default_factory=lambda: SecretStr(getenv("PROXMOX_PASSWORD", "password"))
     )
     node: str = Field(default_factory=lambda: getenv("PROXMOX_NODE", "proxmox"))
     verify_tls: bool = Field(
