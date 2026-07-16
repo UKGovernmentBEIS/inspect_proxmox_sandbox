@@ -1,33 +1,22 @@
 import asyncio
+import base64
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import pycurl
 from inspect_ai.util import (
-    OutputLimitExceededError,
     trace_action,
 )
 from pydantic import BaseModel
-from pydantic_core import from_json
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
-
-
-def _parse_truncated_file_read(raw: bytes) -> str:
-    r"""Extract data.content from a QGA file-read body cut off at the size limit.
-
-    The cut can land inside a JSON `\\uXXXX` escape, so we let pydantic_core's
-    'trailing-strings' mode drop the incomplete trailing token. Hand-closing the
-    string with a `"` instead produced things like `\\u00"` -> invalid escape (#77).
-    """
-    parsed = from_json(raw, allow_partial="trailing-strings")
-    return parsed.get("data", {}).get("content", "") or ""
 
 
 class ProxmoxVersionInfo(BaseModel):
@@ -175,68 +164,57 @@ class AsyncProxmoxAPI:
     async def _ping_qemu_agent(self, node: str, vm_id: int):
         await self.request("POST", f"/nodes/{node}/qemu/{vm_id}/agent/ping")
 
-    async def read_file(
-        self, node: str, vm_id: int, filepath: str, max_size: int, max_size_str: str
-    ):
-        """Read a file from the VM using QEMU agent with optional size limit.
+    # decode=0 concatenates each ~1 MiB chunk's own base64 (chunks aren't
+    # 3-aligned, so each keeps its padding) - decode segment by segment, not in
+    # one pass.
+    _B64_SEGMENT = re.compile(rb"[A-Za-z0-9+/]+={0,2}")
 
-        Args:
-            node (str): The node name
-            vm_id (int): The VM ID
-            filepath (str): Path to the file to read
-            max_size (int, optional): Maximum number of bytes to read.
-                None means no limit.
-            max_size_str (str): Human-readable string of the max_size
+    async def read_file_capped(
+        self, node: str, vm_id: int, filepath: str, count: int
+    ) -> Tuple[bytes, bool]:
+        """Read up to `count` bytes of a guest file; return (data, truncated).
 
-        Returns:
-            dict: The file contents and metadata
-
-        Raises:
-            FileTooLargeError: If the file size exceeds max_size
+        Uses agent file-read decode=0 (base64), not the default decode=1:
+        decode=1 returns Latin-1-mangled UTF-8 that inflates binary ~2-6x, and
+        large responses then fail with an upstream "597 Broken pipe". API:
+        https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vmid}/agent/file-read
         """
         path = f"/nodes/{node}/qemu/{vm_id}/agent/file-read"
-
         async with httpx.AsyncClient(
             verify=self.verify_tls,
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
-            # ping to refresh token if needed, so we don't have to do it in the stream
             await self._ping_qemu_agent(node, vm_id)
-
-            async with client.stream(
-                "GET",
+            response = await client.get(
                 f"{self.api_base_url}{path}",
                 headers={
                     "Cookie": f"PVEAuthCookie={self.ticket}",
+                    # Opt out of pveproxy response compression: it truncates
+                    # large incompressible bodies mid-transfer, surfacing as an
+                    # upstream "597 Broken pipe".
+                    "Accept-Encoding": "identity",
                 },
-                params={"file": filepath},
-            ) as response:
-                response.raise_for_status()
-
-                # Check Content-Length if available
-                content_length = response.headers.get("content-length")
-                if content_length and max_size:
-                    if int(content_length) > max_size:
-                        await response.aclose()
-                        raise OutputLimitExceededError(max_size_str, None)
-
-                # Read the response in chunks
-                chunks = []
-                total_size = 0
-
-                async for chunk in response.aiter_bytes(chunk_size=8192):
-                    chunks.append(chunk)
-                    total_size += len(chunk)
-
-                    if max_size and total_size > max_size:
-                        await response.aclose()
-
-                        truncated_content = _parse_truncated_file_read(b"".join(chunks))
-                        raise OutputLimitExceededError(max_size_str, truncated_content)
-
-                # Combine chunks and parse JSON
-                full_response = b"".join(chunks)
-                return httpx.Response(200, content=full_response).json()["data"]
+                params={"file": filepath, "count": count, "decode": 0},
+            )
+            if response.is_error:
+                # Mirror request()'s error so callers can still match the agent's
+                # message text (e.g. "No such file", "Is a directory").
+                message = (
+                    f"HTTP response error: {response.status_code} "
+                    f"{response.reason_phrase}"
+                )
+                if response.text:
+                    message += f": {response.text}"
+                raise httpx.HTTPStatusError(
+                    message, request=response.request, response=response
+                )
+            data = response.json()["data"]
+        content: str = data.get("content") or ""
+        raw = b"".join(
+            base64.b64decode(seg)
+            for seg in self._B64_SEGMENT.findall(content.encode("ascii"))
+        )
+        return raw, bool(data.get("truncated"))
 
     async def upload_file_with_curl(
         self,

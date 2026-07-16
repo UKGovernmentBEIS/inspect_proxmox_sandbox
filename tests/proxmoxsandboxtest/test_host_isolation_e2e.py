@@ -7,6 +7,8 @@ integration suite — if it fails, the host you're testing against wasn't
 provisioned correctly (e.g. a hand-rolled Proxmox missing the firewall config).
 """
 
+import pytest
+
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
@@ -14,13 +16,17 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
 
 from .proxmox_sandbox_utils import setup_sandbox
 
+pytestmark = pytest.mark.req_proxmox
 
-async def test_sandbox_vm_cannot_reach_pveproxy_or_ssh() -> None:
-    """A sandbox VM brought up via sample_init can't curl pveproxy or SSH.
+
+async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata() -> None:
+    """A sandbox VM can't reach host services or cloud instance metadata.
 
     The VM reaches the host over its SDN bridge, so its packets never ingress
     on the host's management interface and hit the default-deny policy — even
-    when aimed at the SDN gateway IP where pveproxy also listens.
+    when aimed at the SDN gateway IP where pveproxy also listens. Metadata
+    traffic is forwarded rather than host-bound, so provisioning also installs
+    an explicit forwarding block for the fixed metadata endpoints.
     """
     task_name = "test_host_isolation_e2e"
     config = ProxmoxSandboxEnvironmentConfig()
@@ -70,6 +76,56 @@ async def test_sandbox_vm_cannot_reach_pveproxy_or_ssh() -> None:
         )
         assert ssh_res.stdout.strip() == "blocked", (
             f"SSH on {gw}:22 reachable from sandbox VM: {ssh_res.stdout!r}"
+        )
+
+        # A token PUT can time out solely because HttpPutResponseHopLimit=1,
+        # even when IMDS is reachable. A tokenless GET returns 401 when IMDSv2
+        # is required (or 200 when optional), so 000 specifically verifies that
+        # the host forwarding rule blocked the request.
+        metadata_get_res = await env.exec(
+            [
+                "curl",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "5",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "http://169.254.169.254/latest/meta-data/instance-id",
+            ],
+            timeout=15,
+        )
+        assert metadata_get_res.stdout.strip() == "000", (
+            "cloud instance metadata reachable from sandbox VM "
+            f"(curl returned http_code={metadata_get_res.stdout.strip()!r}). "
+            "Was the metadata forwarding block installed?"
+        )
+
+        metadata_token_res = await env.exec(
+            [
+                "curl",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "5",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-X",
+                "PUT",
+                "-H",
+                "X-aws-ec2-metadata-token-ttl-seconds: 60",
+                "http://169.254.169.254/latest/api/token",
+            ],
+            timeout=15,
+        )
+        assert metadata_token_res.stdout.strip() == "000", (
+            "cloud instance metadata token endpoint reachable from sandbox VM "
+            f"(curl returned http_code={metadata_token_res.stdout.strip()!r}). "
+            "Was the metadata forwarding block installed?"
         )
 
     finally:
