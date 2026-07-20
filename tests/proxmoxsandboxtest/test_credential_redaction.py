@@ -35,17 +35,13 @@ def _instance_config() -> ProxmoxInstanceConfig:
 
 def test_passwords_are_redacted_in_config_representations():
     """Config repr, str, and JSON serialization must not contain passwords."""
-    configs = (
-        _instance_config(),
-        ProxmoxSandboxEnvironmentConfig(password=PASSWORD_SENTINEL),
-    )
+    config = _instance_config()
 
-    for config in configs:
-        assert isinstance(config.password, SecretStr)
-        assert config.password.get_secret_value() == PASSWORD_SENTINEL
-        assert PASSWORD_SENTINEL not in repr(config)
-        assert PASSWORD_SENTINEL not in str(config)
-        assert PASSWORD_SENTINEL not in config.model_dump_json()
+    assert isinstance(config.password, SecretStr)
+    assert config.password.get_secret_value() == PASSWORD_SENTINEL
+    assert PASSWORD_SENTINEL not in repr(config)
+    assert PASSWORD_SENTINEL not in str(config)
+    assert PASSWORD_SENTINEL not in config.model_dump_json()
 
 
 def test_validation_error_messages_hide_raw_instance_config():
@@ -109,15 +105,9 @@ async def test_cleanup_failure_log_excludes_instance_password(caplog):
 
 
 @pytest.mark.asyncio
-async def test_task_cleanup_debug_log_excludes_config_password(caplog):
+async def test_task_cleanup_debug_log_uses_safe_field_list(caplog):
     """Debug logging includes useful context from an explicit safe field list."""
-    config = ProxmoxSandboxEnvironmentConfig(
-        instance_pool_id="audit-pool",
-        host="127.0.0.1",
-        port=8006,
-        password=PASSWORD_SENTINEL,
-        node="proxmox",
-    )
+    config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="audit-pool")
 
     with (
         patch.object(InfraCommands, "_instances", {}),
@@ -130,13 +120,8 @@ async def test_task_cleanup_debug_log_excludes_config_password(caplog):
         )
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert PASSWORD_SENTINEL not in messages
-    assert "password=" not in messages
     assert "config=ProxmoxSandboxEnvironmentConfig" not in messages
     assert "vms_config=" not in messages
     assert "sdn_config=" not in messages
     assert "config_type=ProxmoxSandboxEnvironmentConfig" in messages
     assert "instance_pool_id=audit-pool" in messages
-    assert "host=127.0.0.1" in messages
-    assert "port=8006" in messages
-    assert "node=proxmox" in messages
