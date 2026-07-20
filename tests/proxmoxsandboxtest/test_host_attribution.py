@@ -1,25 +1,27 @@
-"""Tests that each sample durably records the pool instance it actually ran on.
+"""Tests that each sample logs the pool instance it actually ran on.
 
 The frozen ProxmoxSandboxEnvironmentConfig defaults host/port/node from
 process env vars, and that config is what Inspect serialises into each
-sample's `sandbox` field — so with a pool, every sample used to be
-attributed to the single PROXMOX_HOST env default regardless of which
-instance it acquired. sample_init now stamps the acquired instance into the
-Inspect sample store (`proxmox:*` keys), which lands in the .eval log.
+sample's `sandbox` field — so with a pool, every sample would be attributed
+to the single PROXMOX_HOST env default regardless of which instance it
+acquired. sample_init now logs the acquired instance at INFO level so a
+sample can be attributed to the Proxmox server it ran on.
 """
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from inspect_ai.util._store import Store, init_subtask_store
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 from proxmoxsandbox.schema import ProxmoxSandboxEnvironmentConfig
+
+LOGGER_NAME = "proxmoxsandbox._proxmox_sandbox_environment"
 
 # Sentinel env default: TEST-NET-3, provably not a real pool instance.
 ENV_SENTINEL_HOST = "203.0.113.255"
@@ -115,10 +117,10 @@ def _instance(instance_id: str, host: str, node: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_sample_records_acquired_instance_not_env_default(
-    mock_proxmox_api, mock_infra_commands
+async def test_sample_logs_acquired_instance_not_env_default(
+    mock_proxmox_api, mock_infra_commands, caplog
 ):
-    """The store must record the acquired pool instance, not the env default."""
+    """The log must name the acquired pool instance, not the env default."""
     config_file = _config_file([_instance("pool-inst-1", "10.0.1.10", "pve1")])
     os.environ["PROXMOX_CONFIG_FILE"] = config_file
     os.environ["PROXMOX_HOST"] = ENV_SENTINEL_HOST
@@ -127,23 +129,26 @@ async def test_sample_records_acquired_instance_not_env_default(
         await ProxmoxSandboxEnvironment.task_init("test_task", None)
         config = ProxmoxSandboxEnvironmentConfig()
 
-        sample_store = Store()
-        init_subtask_store(sample_store)
-        environments = await ProxmoxSandboxEnvironment.sample_init(
-            "test_task", config, {}
-        )
+        with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+            environments = await ProxmoxSandboxEnvironment.sample_init(
+                "test_task", config, {}
+            )
 
-        # The bug: the frozen config field is the env default. Documented
-        # here as the trap — do not use it for host attribution.
+        # The trap: the frozen config field is the env default. Do not use it
+        # for host attribution.
         assert config.host == ENV_SENTINEL_HOST
         assert config.node == "env-default-sentinel"
 
-        # The fix: the store records the instance actually acquired.
-        assert sample_store.get("proxmox:instance_id") == "pool-inst-1"
-        assert sample_store.get("proxmox:host") == "10.0.1.10"
-        assert sample_store.get("proxmox:port") == 8006
-        assert sample_store.get("proxmox:node") == "pve1"
-        assert sample_store.get("proxmox:pool_id") == "default"
+        # The fix: the log records the instance actually acquired.
+        acquired = [r for r in caplog.records if "Acquired instance" in r.message]
+        assert len(acquired) == 1
+        message = acquired[0].message
+        assert "pool-inst-1" in message
+        assert "host=10.0.1.10" in message
+        assert "port=8006" in message
+        assert "node=pve1" in message
+        assert ENV_SENTINEL_HOST not in message
+        assert "env-default-sentinel" not in message
 
         await ProxmoxSandboxEnvironment.sample_cleanup(
             "test_task", config, environments, False
@@ -153,10 +158,10 @@ async def test_sample_records_acquired_instance_not_env_default(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_samples_record_distinct_instances(
-    mock_proxmox_api, mock_infra_commands
+async def test_concurrent_samples_log_distinct_instances(
+    mock_proxmox_api, mock_infra_commands, caplog
 ):
-    """Two concurrent samples over a 2-instance pool record different hosts.
+    """Two concurrent samples over a 2-instance pool log different hosts.
 
     Mirrors the incident: concurrent epochs each logged host=PROXMOX_HOST
     even though they provably ran on different Proxmox servers.
@@ -175,10 +180,7 @@ async def test_concurrent_samples_record_distinct_instances(
 
         hold_both = asyncio.Barrier(2)
 
-        async def run_sample(sample_store: Store) -> None:
-            # Each asyncio task has its own context, so this store is
-            # per-sample — the same isolation Inspect's task runner provides.
-            init_subtask_store(sample_store)
+        async def run_sample() -> None:
             environments = await ProxmoxSandboxEnvironment.sample_init(
                 "test_task", config, {}
             )
@@ -189,37 +191,42 @@ async def test_concurrent_samples_record_distinct_instances(
                 "test_task", config, environments, False
             )
 
-        store_a, store_b = Store(), Store()
-        await asyncio.gather(run_sample(store_a), run_sample(store_b))
+        with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+            await asyncio.gather(run_sample(), run_sample())
+
+        acquired = [
+            r.message for r in caplog.records if "Acquired instance" in r.message
+        ]
+        assert len(acquired) == 2
 
         by_id = {
-            "pool-inst-1": ("10.0.1.10", "pve1"),
-            "pool-inst-2": ("10.0.1.11", "pve2"),
+            "pool-inst-1": ("host=10.0.1.10", "node=pve1"),
+            "pool-inst-2": ("host=10.0.1.11", "node=pve2"),
         }
         recorded_ids = set()
-        for sample_store in (store_a, store_b):
-            instance_id = sample_store.get("proxmox:instance_id")
+        for message in acquired:
+            instance_id = next(i for i in by_id if i in message)
             recorded_ids.add(instance_id)
             expected_host, expected_node = by_id[instance_id]
-            assert sample_store.get("proxmox:host") == expected_host
-            assert sample_store.get("proxmox:node") == expected_node
-            assert sample_store.get("proxmox:host") != ENV_SENTINEL_HOST
+            assert expected_host in message
+            assert expected_node in message
+            assert ENV_SENTINEL_HOST not in message
 
         assert recorded_ids == {"pool-inst-1", "pool-inst-2"}, (
-            f"both samples recorded the same instance: {recorded_ids}"
+            f"both samples logged the same instance: {recorded_ids}"
         )
     finally:
         os.unlink(config_file)
 
 
 @pytest.mark.asyncio
-async def test_failed_sample_init_still_records_instance(
-    mock_proxmox_api, mock_infra_commands
+async def test_failed_sample_init_still_logs_instance(
+    mock_proxmox_api, mock_infra_commands, caplog
 ):
-    """Samples that fail during VM creation still record which instance they used.
+    """Samples that fail during VM creation still log which instance they used.
 
     Attribution matters most for failure forensics (the motivating incident
-    was diagnosed from QGA retry warnings), so the stamp happens immediately
+    was diagnosed from QGA retry warnings), so the log happens immediately
     after acquisition, before anything can fail.
     """
     config_file = _config_file([_instance("pool-inst-1", "10.0.1.10", "pve1")])
@@ -231,12 +238,15 @@ async def test_failed_sample_init_still_records_instance(
         await ProxmoxSandboxEnvironment.task_init("test_task", None)
         config = ProxmoxSandboxEnvironmentConfig()
 
-        sample_store = Store()
-        init_subtask_store(sample_store)
-        with pytest.raises(ValueError, match="boom"):
-            await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
+        with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+            with pytest.raises(ValueError, match="boom"):
+                await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
 
-        assert sample_store.get("proxmox:instance_id") == "pool-inst-1"
-        assert sample_store.get("proxmox:host") == "10.0.1.10"
+        acquired = [
+            r.message for r in caplog.records if "Acquired instance" in r.message
+        ]
+        assert len(acquired) == 1
+        assert "pool-inst-1" in acquired[0]
+        assert "host=10.0.1.10" in acquired[0]
     finally:
         os.unlink(config_file)

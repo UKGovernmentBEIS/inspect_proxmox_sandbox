@@ -18,7 +18,6 @@ from inspect_ai.util import (
     SandboxEnvironmentLimits,
     concurrency,
     sandboxenv,
-    store,
     trace_action,
 )
 from pydantic import BaseModel
@@ -323,19 +322,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         # ACQUIRE instance from pool (blocks if all in use)
         instance = await cls.proxmox_pool.acquire_instance(pool_id)
-        cls.logger.info(
-            f"Acquired instance {instance.instance_id} from pool '{pool_id}'"
-        )
 
         # The frozen config's host/port/node are env-var defaults, not the
-        # acquired instance, so they misattribute pooled samples. Record the
-        # real instance in the sample store, which lands in the .eval log.
-        sample_store = store()
-        sample_store.set("proxmox:instance_id", instance.instance_id)
-        sample_store.set("proxmox:host", instance.host)
-        sample_store.set("proxmox:port", instance.port)
-        sample_store.set("proxmox:node", instance.node)
-        sample_store.set("proxmox:pool_id", pool_id)
+        # acquired instance, so they misattribute pooled samples. Log the real
+        # instance so a sample can be attributed to a Proxmox server.
+        cls.logger.info(
+            f"Acquired instance {instance.instance_id} from pool '{pool_id}': "
+            f"host={instance.host} port={instance.port} node={instance.node}"
+        )
 
         # Track variables for cleanup on failure
         infra_commands = None
