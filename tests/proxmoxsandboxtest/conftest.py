@@ -22,7 +22,12 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
-from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+from proxmoxsandbox.schema import (
+    ProxmoxInstanceConfig,
+    VmConfig,
+    VmSourceConfig,
+    _load_single_instance_from_env,
+)
 
 # Set PROXMOX_WINDOWS_TEMPLATE_TAG to run tests against a Windows VM.
 # The value should match the tag on an existing Proxmox VM template.
@@ -37,29 +42,30 @@ async def sandbox_env_config() -> ProxmoxSandboxEnvironmentConfig:
 
 
 @pytest.fixture
+async def instance_config() -> ProxmoxInstanceConfig:
+    return _load_single_instance_from_env()
+
+
+@pytest.fixture
 async def async_proxmox_api(
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
+    instance_config: ProxmoxInstanceConfig,
 ) -> AsyncGenerator[AsyncProxmoxAPI, None]:
-    yield AsyncProxmoxAPI(
-        host=f"{sandbox_env_config.host}:{sandbox_env_config.port}",
-        user=f"{sandbox_env_config.user}@{sandbox_env_config.user_realm}",
-        password=sandbox_env_config.password.get_secret_value(),
-        verify_tls=sandbox_env_config.verify_tls,
-    )
+    yield AsyncProxmoxAPI.from_instance_config(instance_config)
 
 
 @pytest.fixture
 async def infra_commands(
     async_proxmox_api: AsyncProxmoxAPI,
     sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
+    instance_config: ProxmoxInstanceConfig,
 ) -> InfraCommands:
     target = ProxmoxTarget(
-        host=sandbox_env_config.host,
-        port=sandbox_env_config.port,
-        node=sandbox_env_config.node,
+        host=instance_config.host,
+        port=instance_config.port,
+        node=instance_config.node,
     )
     instance = InfraCommands.build(
-        async_proxmox_api, sandbox_env_config.node, sandbox_env_config.image_storage
+        async_proxmox_api, instance_config.node, sandbox_env_config.image_storage
     )
     InfraCommands.set_instance(target, instance)
     return instance
@@ -73,12 +79,10 @@ async def sdn_commands(infra_commands: InfraCommands) -> SdnCommands:
 @pytest.fixture
 async def storage_commands(
     async_proxmox_api: AsyncProxmoxAPI,
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
+    instance_config: ProxmoxInstanceConfig,
 ) -> LocalStorageCommands:
     task_wrapper = TaskWrapper(async_proxmox_api)
-    return LocalStorageCommands(
-        async_proxmox_api, sandbox_env_config.node, task_wrapper
-    )
+    return LocalStorageCommands(async_proxmox_api, instance_config.node, task_wrapper)
 
 
 @pytest.fixture

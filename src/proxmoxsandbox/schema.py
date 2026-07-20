@@ -248,6 +248,26 @@ class ProxmoxInstanceConfig(BaseModel):
     verify_tls: bool
 
 
+def _load_single_instance_from_env() -> ProxmoxInstanceConfig:
+    """
+    Load a single Proxmox instance configuration from environment variables.
+
+    Returns:
+        ProxmoxInstanceConfig object
+    """
+    return ProxmoxInstanceConfig(
+        instance_id="default",
+        pool_id="default",
+        host=getenv("PROXMOX_HOST", "localhost"),
+        port=int(getenv("PROXMOX_PORT", "8006")),
+        user=getenv("PROXMOX_USER", "root"),
+        user_realm=getenv("PROXMOX_REALM", "pam"),
+        password=getenv("PROXMOX_PASSWORD", "password"),
+        node=getenv("PROXMOX_NODE", "proxmox"),
+        verify_tls=getenv("PROXMOX_VERIFY_TLS", "1") == "1",
+    )
+
+
 def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
     """
     Load Proxmox instance configurations from file or environment variables.
@@ -268,21 +288,8 @@ def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
             return tuple(ProxmoxInstanceConfig(**inst) for inst in instances_data)
 
     # Priority 2: Single instance from env vars
-    host = getenv("PROXMOX_HOST")
-    if host:
-        return (
-            ProxmoxInstanceConfig(
-                instance_id="default",
-                pool_id="default",
-                host=host,
-                port=int(getenv("PROXMOX_PORT", "8006")),
-                user=getenv("PROXMOX_USER", "root"),
-                user_realm=getenv("PROXMOX_REALM", "pam"),
-                password=getenv("PROXMOX_PASSWORD", "password"),
-                node=getenv("PROXMOX_NODE", "proxmox"),
-                verify_tls=getenv("PROXMOX_VERIFY_TLS", "1") == "1",
-            ),
-        )
+    if getenv("PROXMOX_HOST"):
+        return (_load_single_instance_from_env(),)
 
     # No configuration found - return empty tuple
     return ()

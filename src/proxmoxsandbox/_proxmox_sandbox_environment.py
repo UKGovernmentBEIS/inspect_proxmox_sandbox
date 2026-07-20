@@ -607,10 +607,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             cls.logger.debug(
                 f"task cleanup activated; {cleanup=}; "
                 f"config_type={config_type}; "
-                f"instance_pool_id={config.instance_pool_id}; "
-                f"host={config.host}; "
-                f"port={config.port}; "
-                f"node={config.node}"
+                f"instance_pool_id={config.instance_pool_id}"
             )
         else:
             cls.logger.debug(
