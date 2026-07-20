@@ -151,8 +151,6 @@ export PROXMOX_CONFIG_FILE=/path/to/instances.json
 
 Instances with the same `pool_id` form a pool. Each eval sample acquires one instance from its pool, uses it exclusively, and releases it back when done. Concurrency is automatically limited to the total number of instances.
 
-Each sample logs the instance it acquired at `INFO` level (`Acquired instance <id> from pool '<pool>': host=<host> port=<port> node=<node>`), which lands in the sample transcript of the `.eval` log — check it to attribute a sample to a Proxmox server. Do not use the `host`/`port`/`node` fields of the sample's serialised sandbox config for this: with a pool those fields are not connected to the instance the sample ran on. To suppress these lines, run with `--log-level-transcript warning`.
-
 ## Configuring
 
 Here is a full example sandbox configuration. 
