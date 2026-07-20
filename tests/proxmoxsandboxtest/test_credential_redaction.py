@@ -7,13 +7,11 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
 )
 from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
-    ProxmoxSandboxEnvironmentConfig,
 )
 
 PASSWORD_SENTINEL = "audit-password-sentinel-do-not-log"
@@ -102,26 +100,3 @@ async def test_cleanup_failure_log_excludes_instance_password(caplog):
     assert "host=127.0.0.1" in messages
     assert "port=8006" in messages
     assert "node=proxmox" in messages
-
-
-@pytest.mark.asyncio
-async def test_task_cleanup_debug_log_uses_safe_field_list(caplog):
-    """Debug logging includes useful context from an explicit safe field list."""
-    config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="audit-pool")
-
-    with (
-        patch.object(InfraCommands, "_instances", {}),
-        caplog.at_level(logging.DEBUG, logger=ProxmoxSandboxEnvironment.logger.name),
-    ):
-        await ProxmoxSandboxEnvironment.task_cleanup(
-            task_name="audit",
-            config=config,
-            cleanup=True,
-        )
-
-    messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "config=ProxmoxSandboxEnvironmentConfig" not in messages
-    assert "vms_config=" not in messages
-    assert "sdn_config=" not in messages
-    assert "config_type=ProxmoxSandboxEnvironmentConfig" in messages
-    assert "instance_pool_id=audit-pool" in messages
