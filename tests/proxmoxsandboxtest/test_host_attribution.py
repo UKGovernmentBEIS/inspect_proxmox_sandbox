@@ -23,6 +23,18 @@ from proxmoxsandbox.schema import ProxmoxSandboxEnvironmentConfig
 
 LOGGER_NAME = "proxmoxsandbox._proxmox_sandbox_environment"
 
+
+def test_provider_logger_opted_into_info():
+    """The provider lowers its own logger to INFO so its lines reach the .eval.
+
+    Inspect leaves third-party package loggers at the root WARNING default, so
+    without this the attribution line would never be created under a default
+    `inspect eval`. Users can still suppress via --log-level-transcript warning.
+    """
+    assert logging.getLogger("proxmoxsandbox").level == logging.INFO
+    assert logging.getLogger(LOGGER_NAME).isEnabledFor(logging.INFO)
+
+
 # Sentinel env default: TEST-NET-3, provably not a real pool instance.
 ENV_SENTINEL_HOST = "203.0.113.255"
 
