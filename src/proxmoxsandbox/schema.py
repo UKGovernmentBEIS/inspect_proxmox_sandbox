@@ -328,19 +328,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
 
-    # Single-instance fields (used when configuring via environment variables)
-    host: str = Field(default_factory=lambda: getenv("PROXMOX_HOST", "localhost"))
-    port: int = Field(default_factory=lambda: int(getenv("PROXMOX_PORT", "8006")))
-    user: str = Field(default_factory=lambda: getenv("PROXMOX_USER", "root"))
-    user_realm: str = Field(default_factory=lambda: getenv("PROXMOX_REALM", "pam"))
-    password: SecretStr = Field(
-        default_factory=lambda: SecretStr(getenv("PROXMOX_PASSWORD", "password"))
-    )
-    node: str = Field(default_factory=lambda: getenv("PROXMOX_NODE", "proxmox"))
-    verify_tls: bool = Field(
-        default_factory=lambda: getenv("PROXMOX_VERIFY_TLS", "1") == "1"
-    )
-
     image_storage: str = Field(
         default_factory=lambda: getenv("PROXMOX_IMAGE_STORAGE", "local-lvm")
     )
