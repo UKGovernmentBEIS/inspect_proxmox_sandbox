@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
@@ -60,9 +61,7 @@ def test_validation_error_messages_hide_raw_instance_config():
 
 def test_password_is_unwrapped_only_for_api_authentication():
     """The API client still receives the configured plaintext credential."""
-    config = ProxmoxSandboxEnvironmentConfig(password=PASSWORD_SENTINEL)
-
-    api = ProxmoxSandboxEnvironment._create_async_proxmox_api(config)
+    api = AsyncProxmoxAPI.from_instance_config(_instance_config())
 
     assert api.password == PASSWORD_SENTINEL
 

@@ -331,13 +331,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         proxmox_ids_start = None
 
         try:
-            # Create API using acquired instance's credentials
-            async_proxmox_api = AsyncProxmoxAPI(
-                host=f"{instance.host}:{instance.port}",
-                user=f"{instance.user}@{instance.user_realm}",
-                password=instance.password.get_secret_value(),
-                verify_tls=instance.verify_tls,
-            )
+            async_proxmox_api = AsyncProxmoxAPI.from_instance_config(instance)
 
             target = ProxmoxTarget(
                 host=instance.host, port=instance.port, node=instance.node
@@ -488,17 +482,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 )
 
             raise
-
-    @classmethod
-    def _create_async_proxmox_api(
-        cls, config: ProxmoxSandboxEnvironmentConfig
-    ) -> AsyncProxmoxAPI:
-        return AsyncProxmoxAPI(
-            host=f"{config.host}:{config.port}",
-            user=f"{config.user}@{config.user_realm}",
-            password=config.password.get_secret_value(),
-            verify_tls=config.verify_tls,
-        )
 
     @classmethod
     async def _ensure_instance_clean(
@@ -655,12 +638,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if id is None:
             await cls.create_proxmox_instance_pools()
             for instance in cls.proxmox_pool.all_instances():
-                async_proxmox_api = AsyncProxmoxAPI(
-                    host=f"{instance.host}:{instance.port}",
-                    user=f"{instance.user}@{instance.user_realm}",
-                    password=instance.password.get_secret_value(),
-                    verify_tls=instance.verify_tls,
-                )
+                async_proxmox_api = AsyncProxmoxAPI.from_instance_config(instance)
                 infra_commands = InfraCommands.build(
                     async_proxmox_api,
                     instance.node,
