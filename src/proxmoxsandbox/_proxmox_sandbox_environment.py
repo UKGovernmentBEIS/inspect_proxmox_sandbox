@@ -4,7 +4,7 @@ import errno
 import re
 import shlex
 import time
-from logging import getLogger
+from logging import INFO, NOTSET, getLogger
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Generator, List, Tuple, Type, Union
 
@@ -36,6 +36,15 @@ from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
 )
+
+# Inspect only lowers its own package loggers below the root WARNING default, so a
+# third-party provider's INFO never reaches the .eval transcript. As an Inspect
+# extension we opt our own logger in; a user can still silence it with
+# --log-level-transcript warning (that gate is downstream of this level).
+# Guarded on NOTSET so we never clobber a level a host application set before
+# this module was imported (e.g. someone who wants proxmoxsandbox at DEBUG).
+if getLogger("proxmoxsandbox").level == NOTSET:
+    getLogger("proxmoxsandbox").setLevel(INFO)
 
 # Above this many raw stdin bytes, exec() writes stdin to a file and redirects
 # from it instead of inlining base64 into the shell script — see exec() below.
@@ -322,8 +331,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         # ACQUIRE instance from pool (blocks if all in use)
         instance = await cls.proxmox_pool.acquire_instance(pool_id)
+
+        # The frozen config's host/port/node are env-var defaults, not the
+        # acquired instance, so they misattribute pooled samples. Log the real
+        # instance so a sample can be attributed to a Proxmox server.
         cls.logger.info(
-            f"Acquired instance {instance.instance_id} from pool '{pool_id}'"
+            f"Acquired instance {instance.instance_id} from pool '{pool_id}': "
+            f"host={instance.host} port={instance.port} node={instance.node}"
         )
 
         # Track variables for cleanup on failure
