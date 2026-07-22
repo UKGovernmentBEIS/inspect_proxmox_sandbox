@@ -51,6 +51,7 @@ PERMANENT_ERRORS = [
         "Agent error: failed to open file "
         "'/tmp/x.returncode': No such file or directory",
     ),
+    _http_error(500, "Agent error: failed to read file: Is a directory"),
     _PID_GONE,  # surfaced immediately; get_agent_exec_status turns it into a disk read
 ]
 

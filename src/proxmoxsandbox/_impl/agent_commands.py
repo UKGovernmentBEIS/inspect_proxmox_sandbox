@@ -30,9 +30,9 @@ from proxmoxsandbox._impl.async_proxmox import (
 # exec-status read is single-shot (the agent discards a finished process's
 # output once read), so get_agent_exec_status falls back to the on-disk results
 # if a retry finds the PID gone.
-# Exception: a 500 for a missing file / gone PID is surfaced immediately (it
-# will not change on retry); callers turn those into empty content / a disk
-# fallback.
+# Exception: a 500 for a missing file, an unreadable file (e.g. "Is a
+# directory"), or a gone PID is surfaced immediately (it will not change on
+# retry); callers turn those into empty content / a disk fallback / an error.
 _QGA_MAX_RETRIES = 5
 _QGA_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt, capped below
 _QGA_RETRY_MAX_DELAY = 20.0  # seconds
@@ -72,6 +72,10 @@ class AgentCommands:
             if status_code == 500 and (
                 "no such file" in str(exc).casefold()
                 or "failed to open file" in str(exc).casefold()
+                # Guest-side read errno (e.g. "Is a directory", "Permission
+                # denied"): won't change on retry. Transient large-read
+                # failures come back as 596/597, not 500.
+                or "failed to read file" in str(exc).casefold()
                 # exec-status for a finished+already-read PID; not transient.
                 # get_agent_exec_status converts this into a disk fallback.
                 or _is_pid_gone(exc)
