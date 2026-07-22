@@ -308,13 +308,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
             normally.
         sdn_config: Software-defined networking configuration
         vms_config: Configurations for virtual machines
-        host: The hostname or IP address of the Proxmox server
-        port: The port number for the Proxmox API, usually 8006
-        user: The username for Proxmox authentication
-        user_realm: The authentication realm for the Proxmox user
-        password: The password for Proxmox authentication
-        node: The name of the Proxmox node
-        verify_tls: Whether to verify the Proxmox server's TLS certificate
     """
 
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
