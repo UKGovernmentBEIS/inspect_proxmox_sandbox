@@ -52,11 +52,9 @@ if getLogger("proxmoxsandbox").level == NOTSET:
 # for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
 _INLINE_STDIN_LIMIT = 30 * 1024
 
-# 40KB chunks to be safe, to take base64 encoding into account
-# note this 40KB limit was based on the Proxmox <=8.3 limit of
-# 60Kb, but this was increased in Proxmox 8.4, so could
-# potentially be increased here. Would need to check the
-# version number to ensure backward compatibility.
+# Chunk raw writes so the base64-encoded content stays under PVE's 61440-char
+# file-write `content` cap (see the exec-stdin note in exec()): 40 KiB raw is
+# ~54 KiB base64, comfortably under.
 _WRITE_CHUNK_SIZE = 40 * 1024
 
 _IN_GUEST_KILL_GRACE = 5

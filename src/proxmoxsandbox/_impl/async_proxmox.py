@@ -76,6 +76,16 @@ class AsyncProxmoxAPI:
             raise ValueError("Need to be logged in")
         return self.discovered_proxmox_version
 
+    def release_at_least(self, required_major: int, required_minor: int = 0) -> bool:
+        """True if the pve-manager release is >= the given major.minor."""
+        release_string = self.get_discovered_proxmox_version().release
+        # Parse version string (e.g., "9.2.1" or "9.0")
+        match = re.match(r"(\d+)\.(\d+)", release_string)
+        if not match:
+            raise ValueError(f"Could not parse Proxmox version: {release_string}")
+        major, minor = int(match.group(1)), int(match.group(2))
+        return (major, minor) >= (required_major, required_minor)
+
     async def request(
         self,
         method: str,
@@ -169,14 +179,19 @@ class AsyncProxmoxAPI:
     # one pass.
     _B64_SEGMENT = re.compile(rb"[A-Za-z0-9+/]+={0,2}")
 
+    _warned_legacy_file_read: bool = False
+
     async def read_file_capped(
         self, node: str, vm_id: int, filepath: str, count: int
     ) -> Tuple[bytes, bool]:
         """Read up to `count` bytes of a guest file; return (data, truncated).
 
-        Uses agent file-read decode=0 (base64), not the default decode=1:
-        decode=1 returns Latin-1-mangled UTF-8 that inflates binary ~2-6x, and
-        large responses then fail with an upstream "597 Broken pipe". API:
+        On PVE >= 9.2, uses agent file-read decode=0 (base64) with a bounded
+        `count`, not the default decode=1: decode=1 returns Latin-1-mangled UTF-8
+        that inflates binary ~2-6x, and large responses then fail with an upstream
+        "597 Broken pipe". The count/offset/decode options were added in
+        qemu-server 9.1.5 (shipped in PVE 9.2); older versions reject them, so we
+        fall back to a plain decode=1 read there (see _decode_legacy_file_read). API:
         https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vmid}/agent/file-read
         """
         path = f"/nodes/{node}/qemu/{vm_id}/agent/file-read"
@@ -184,7 +199,10 @@ class AsyncProxmoxAPI:
             verify=self.verify_tls,
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
+            # ping first: it logs in if needed, so the version is discovered
+            # before we decide which file-read variant to use.
             await self._ping_qemu_agent(node, vm_id)
+            modern = self.release_at_least(9, 2)
             response = await client.get(
                 f"{self.api_base_url}{path}",
                 headers={
@@ -194,7 +212,11 @@ class AsyncProxmoxAPI:
                     # upstream "597 Broken pipe".
                     "Accept-Encoding": "identity",
                 },
-                params={"file": filepath, "count": count, "decode": 0},
+                params=(
+                    {"file": filepath, "count": count, "decode": 0}
+                    if modern
+                    else {"file": filepath}
+                ),
             )
             if response.is_error:
                 # Mirror request()'s error so callers can still match the agent's
@@ -210,11 +232,36 @@ class AsyncProxmoxAPI:
                 )
             data = response.json()["data"]
         content: str = data.get("content") or ""
+        if not modern:
+            return self._decode_legacy_file_read(content, data, count)
         raw = b"".join(
             base64.b64decode(seg)
             for seg in self._B64_SEGMENT.findall(content.encode("ascii"))
         )
         return raw, bool(data.get("truncated"))
+
+    def _decode_legacy_file_read(
+        self, content: str, data: dict, count: int
+    ) -> Tuple[bytes, bool]:
+        """decode=1 fallback for PVE < 9.2 (no count/decode params).
+
+        Under decode=1 each raw file byte arrives as a Latin-1 codepoint serialised
+        into UTF-8 JSON, so encoding back to iso-8859-1 recovers the bytes. PVE caps
+        the read at 16 MiB itself; we additionally honour `count` client-side.
+        """
+        if not self._warned_legacy_file_read:
+            self._warned_legacy_file_read = True
+            self.logger.warning(
+                "Proxmox %s is < 9.2: using the legacy guest file-read path. "
+                "Large or binary read_file/exec-output reads are less efficient "
+                "and may fail on very large files; the decode fix from "
+                "qemu-server 9.1.5 is unavailable. Upgrade to PVE >= 9.2 for the "
+                "full fix.",
+                self.get_discovered_proxmox_version().release,
+            )
+        raw = content.encode("iso-8859-1")
+        truncated = bool(data.get("truncated")) or len(raw) > count
+        return raw[:count], truncated
 
     async def upload_file_with_curl(
         self,
