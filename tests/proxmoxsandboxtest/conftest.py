@@ -31,6 +31,25 @@ from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 WINDOWS_TEMPLATE_TAG = os.getenv("PROXMOX_WINDOWS_TEMPLATE_TAG")
 
 
+@pytest.fixture(autouse=True)
+def reset_global_pool_state():
+    """Reset process-global pool and instance registries around every test.
+
+    QueueBasedProxmoxPool._instance_pools and InfraCommands._instances are
+    class-level, so they persist for the whole session. initialize() is a no-op
+    for a pool_id that already exists, so a 'default' pool left behind by an
+    earlier test (e.g. an e2e test built from PROXMOX_HOST) would otherwise be
+    reused by a later test that meant to build its own config. Every pool
+    consumer is function-scoped and re-runs task_init, so resetting around each
+    test is safe and removes the need for per-test bookkeeping.
+    """
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
+    yield
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
+
+
 @pytest.fixture
 async def sandbox_env_config() -> ProxmoxSandboxEnvironmentConfig:
     return ProxmoxSandboxEnvironmentConfig()

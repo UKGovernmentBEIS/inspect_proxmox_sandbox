@@ -2,8 +2,7 @@ import abc
 import re
 import tarfile
 from logging import getLogger
-from pathlib import Path
-from typing import Collection, Dict, List, Set
+from typing import Collection, Dict, List, Literal, Set
 
 import httpx
 import tenacity
@@ -218,6 +217,57 @@ class QemuCommands(abc.ABC):
         is_template = vm.get("template") == 1
         return template == is_template
 
+    @staticmethod
+    def _detect_disk_controller(vm_config: dict) -> Literal["scsi", "ide"]:
+        """Infer the data-disk controller from a Proxmox VM/template config.
+
+        Data disks live on scsiN/ideN keys; the CD-ROM (sata5) and EFI vars
+        disk (efidisk0) sit on other buses and are ignored, as is any scsiN/ideN
+        entry that is itself a CD-ROM. Raises if the data disks span both
+        controllers or none are found, since there is then no single answer.
+        """
+        controllers: Set[str] = set()
+        for key, value in vm_config.items():
+            match = re.fullmatch(r"(scsi|ide)\d+", key)
+            if match is None:
+                continue
+            if "media=cdrom" in str(value).split(","):
+                continue
+            controllers.add(match.group(1))
+        if controllers == {"scsi"}:
+            return "scsi"
+        if controllers == {"ide"}:
+            return "ide"
+        if controllers:
+            problem = (
+                "its data disks span multiple controllers "
+                f"({', '.join(sorted(controllers))})"
+            )
+        else:
+            problem = "no scsi or ide data disks were found"
+        raise ValueError(
+            f"Cannot determine a single disk controller because {problem}. "
+            "If you want to clone it, leave disk_controller unspecified."
+        )
+
+    async def _verify_disk_controller(
+        self, vm_config: VmConfig, vm_id: int, source_desc: str
+    ) -> None:
+        """Check a requested disk_controller against the VM we're about to clone.
+
+        Cloning can't change the controller, so for the built-in and template-tag
+        sources we verify the clone target already matches rather than applying it.
+        No-op if the config didn't request a specific controller.
+        """
+        if vm_config.disk_controller is None:
+            return
+        actual = self._detect_disk_controller(await self.read_vm(vm_id))
+        if actual != vm_config.disk_controller:
+            raise ValueError(
+                f"disk_controller={vm_config.disk_controller!r} was requested "
+                f"but {source_desc} uses {actual!r}"
+            )
+
     async def _find_inspect_template_id(self, tag: str) -> int | None:
         existing_vms = await self.list_vms()
         filtered = [
@@ -241,12 +291,6 @@ class QemuCommands(abc.ABC):
         built_in_vm_ids: Dict[str, int],
     ) -> int:
         if (
-            vm_config.disk_controller is not None
-            and vm_config.vm_source_config.ova is None
-        ):
-            raise NotImplementedError("disk_controller is only supported for OVA")
-
-        if (
             vm_config.os_type != "l26"
             and vm_config.vm_source_config.ova is None
             and vm_config.vm_source_config.existing_vm_template_tag is None
@@ -260,6 +304,11 @@ class QemuCommands(abc.ABC):
 
         if vm_config.vm_source_config.built_in:
             vm_id_to_clone = built_in_vm_ids[vm_config.vm_source_config.built_in]
+            await self._verify_disk_controller(
+                vm_config,
+                vm_id_to_clone,
+                source_desc=f"built-in {vm_config.vm_source_config.built_in!r}",
+            )
             preserve_tags = False
         elif vm_config.vm_source_config.ova is not None:
             ova_size = vm_config.vm_source_config.ova.stat().st_size
@@ -357,6 +406,10 @@ class QemuCommands(abc.ABC):
 
             if found_id is None:
                 raise ValueError(f"Couldn't find VM with tag {tag}")
+
+            await self._verify_disk_controller(
+                vm_config, found_id, source_desc=f"template with tag {tag!r}"
+            )
 
             vm_id_to_clone = found_id
             preserve_tags = True
