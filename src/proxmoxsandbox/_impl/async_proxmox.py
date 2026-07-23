@@ -16,6 +16,8 @@ from inspect_ai.util import (
 )
 from pydantic import BaseModel
 
+from proxmoxsandbox.schema import ProxmoxInstanceConfig
+
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
 
@@ -51,6 +53,15 @@ class AsyncProxmoxAPI:
         self.username = user
         self.password = password
         self.verify_tls = verify_tls
+
+    @classmethod
+    def from_instance_config(cls, instance: ProxmoxInstanceConfig):
+        return cls(
+            host=f"{instance.host}:{instance.port}",
+            user=f"{instance.user}@{instance.user_realm}",
+            password=instance.password.get_secret_value(),
+            verify_tls=instance.verify_tls,
+        )
 
     def __hash__(self):
         return hash((self.api_base_url, self.username, self.password, self.verify_tls))

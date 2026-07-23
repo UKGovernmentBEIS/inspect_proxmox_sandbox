@@ -9,6 +9,7 @@ import pytest
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 
 @pytest.fixture
@@ -84,29 +85,50 @@ async def test_cli_cleanup_all_instances(multi_instance_config_file):
         ):
             await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
 
-            mock_proxmox_api.assert_has_calls(
+            mock_proxmox_api.from_instance_config.assert_has_calls(
                 [
                     call(
-                        host="10.0.1.10:8006",
-                        user="root@pam",
-                        password="test",
-                        verify_tls=False,
+                        ProxmoxInstanceConfig(
+                            instance_id="server-1",
+                            pool_id="pool-a",
+                            host="10.0.1.10",
+                            port=8006,
+                            user="root",
+                            user_realm="pam",
+                            password="test",
+                            node="pve1",
+                            verify_tls=False,
+                        )
                     ),
                     call(
-                        host="10.0.1.11:8006",
-                        user="root@pam",
-                        password="test",
-                        verify_tls=False,
+                        ProxmoxInstanceConfig(
+                            instance_id="server-2",
+                            pool_id="pool-a",
+                            host="10.0.1.11",
+                            port=8006,
+                            user="root",
+                            user_realm="pam",
+                            password="test",
+                            node="pve2",
+                            verify_tls=False,
+                        )
                     ),
                     call(
-                        host="10.0.1.20:8006",
-                        user="root@pam",
-                        password="test",
-                        verify_tls=False,
+                        ProxmoxInstanceConfig(
+                            instance_id="server-3",
+                            pool_id="pool-b",
+                            host="10.0.1.20",
+                            port=8006,
+                            user="root",
+                            user_realm="pam",
+                            password="test",
+                            node="pve3",
+                            verify_tls=False,
+                        )
                     ),
                 ]
             )
-            assert mock_proxmox_api.call_count == 3
+            assert mock_proxmox_api.from_instance_config.call_count == 3
 
             # Verify InfraCommands.build was called for each instance
             assert len(mock_infra_instances) == 3

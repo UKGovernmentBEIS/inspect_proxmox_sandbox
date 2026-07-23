@@ -10,7 +10,10 @@ import pytest
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
-from proxmoxsandbox.schema import ProxmoxSandboxEnvironmentConfig
+from proxmoxsandbox.schema import (
+    ProxmoxInstanceConfig,
+    ProxmoxSandboxEnvironmentConfig,
+)
 
 
 def _make_mock_infra():
@@ -137,11 +140,18 @@ async def test_single_instance_single_sample(
             "test_task", config, {}
         )
 
-        mock_proxmox_api.assert_called_once_with(
-            host="10.0.1.10:8006",
-            user="root@pam",
-            password="test",
-            verify_tls=False,
+        mock_proxmox_api.from_instance_config.assert_called_once_with(
+            ProxmoxInstanceConfig(
+                instance_id="test-1",
+                pool_id="default",
+                host="10.0.1.10",
+                port=8006,
+                user="root",
+                user_realm="pam",
+                password="test",
+                node="pve1",
+                verify_tls=False,
+            )
         )
 
         # Verify: Environment created, instance acquired from pool

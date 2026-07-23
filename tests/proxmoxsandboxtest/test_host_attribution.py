@@ -1,11 +1,7 @@
 """Tests that each sample logs the pool instance it actually ran on.
 
-The frozen ProxmoxSandboxEnvironmentConfig defaults host/port/node from
-process env vars, and that config is what Inspect serialises into each
-sample's `sandbox` field — so with a pool, every sample would be attributed
-to the single PROXMOX_HOST env default regardless of which instance it
-acquired. sample_init now logs the acquired instance at INFO level so a
-sample can be attributed to the Proxmox server it ran on.
+sample_init logs the acquired instance at INFO level so a sample can be
+attributed to the Proxmox server it ran on.
 """
 
 import asyncio
@@ -94,8 +90,7 @@ def mock_infra_commands():
 def cleanup_state():
     """Isolate pool/infra class state and the sentinel env vars per test."""
     saved = {
-        var: os.environ.get(var)
-        for var in ("PROXMOX_HOST", "PROXMOX_NODE", "PROXMOX_CONFIG_FILE")
+        var: os.environ.get(var) for var in ("PROXMOX_HOST", "PROXMOX_CONFIG_FILE")
     }
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
     yield
@@ -126,47 +121,6 @@ def _instance(instance_id: str, host: str, node: str) -> dict:
         "node": node,
         "verify_tls": False,
     }
-
-
-@pytest.mark.asyncio
-async def test_sample_logs_acquired_instance_not_env_default(
-    mock_proxmox_api, mock_infra_commands, caplog
-):
-    """The log must name the acquired pool instance, not the env default."""
-    config_file = _config_file([_instance("pool-inst-1", "10.0.1.10", "pve1")])
-    os.environ["PROXMOX_CONFIG_FILE"] = config_file
-    os.environ["PROXMOX_HOST"] = ENV_SENTINEL_HOST
-    os.environ["PROXMOX_NODE"] = "env-default-sentinel"
-    try:
-        await ProxmoxSandboxEnvironment.task_init("test_task", None)
-        config = ProxmoxSandboxEnvironmentConfig()
-
-        with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
-            environments = await ProxmoxSandboxEnvironment.sample_init(
-                "test_task", config, {}
-            )
-
-        # The trap: the frozen config field is the env default. Do not use it
-        # for host attribution.
-        assert config.host == ENV_SENTINEL_HOST
-        assert config.node == "env-default-sentinel"
-
-        # The fix: the log records the instance actually acquired.
-        acquired = [r for r in caplog.records if "Acquired instance" in r.message]
-        assert len(acquired) == 1
-        message = acquired[0].message
-        assert "pool-inst-1" in message
-        assert "host=10.0.1.10" in message
-        assert "port=8006" in message
-        assert "node=pve1" in message
-        assert ENV_SENTINEL_HOST not in message
-        assert "env-default-sentinel" not in message
-
-        await ProxmoxSandboxEnvironment.sample_cleanup(
-            "test_task", config, environments, False
-        )
-    finally:
-        os.unlink(config_file)
 
 
 @pytest.mark.asyncio
