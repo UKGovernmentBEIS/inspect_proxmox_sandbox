@@ -32,13 +32,6 @@ def mock_proxmox_api():
         yield mock
 
 
-@pytest.fixture(autouse=True)
-def cleanup_infra_instances():
-    """Clear InfraCommands._instances after each test."""
-    yield
-    InfraCommands._instances.clear()
-
-
 def _make_infra_mock(**overrides):
     """Create a mock InfraCommands with sensible defaults.
 
@@ -91,7 +84,6 @@ async def test_sample_init_cleanup_on_create_sdn_failure(
     5. Then release the instance back to pool
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     error_msg = "Duplicate IP ranges found: [('10.129.0.0/24', '10.129.0.0/24')]"
     infra = _make_infra_mock(
@@ -128,7 +120,6 @@ async def test_sample_init_cleanup_on_create_sdn_failure(
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
                 del os.environ["PROXMOX_CONFIG_FILE"]
-            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -142,7 +133,6 @@ async def test_sample_init_no_cleanup_on_early_failure(
     should be attempted since nothing was created.
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     infra = _make_infra_mock(
         find_proxmox_ids_start=AsyncMock(
@@ -171,7 +161,6 @@ async def test_sample_init_no_cleanup_on_early_failure(
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
                 del os.environ["PROXMOX_CONFIG_FILE"]
-            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -189,7 +178,6 @@ async def test_sample_init_precheck_cleans_dirty_instance(
     intentionally ignored — see test_sample_init_precheck_ignores_pre_existing_vnets.
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     sdn_mock = MagicMock()
     # Both vnets live in a zone whose name matches ZONE_REGEX
@@ -226,7 +214,6 @@ async def test_sample_init_precheck_cleans_dirty_instance(
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
                 del os.environ["PROXMOX_CONFIG_FILE"]
-            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -242,7 +229,6 @@ async def test_sample_init_precheck_ignores_pre_existing_vnets(
     doesn't risk wiping user state via cleanup_no_id.
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     sdn_mock = MagicMock()
     # Pre-existing user vnets in user-named zones; neither matches ZONE_REGEX.
@@ -278,7 +264,6 @@ async def test_sample_init_precheck_ignores_pre_existing_vnets(
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
                 del os.environ["PROXMOX_CONFIG_FILE"]
-            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -292,7 +277,6 @@ async def test_sample_init_precheck_cleanup_fails_but_continues(
     and continue (not raise).
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     sdn_mock = MagicMock()
     sdn_mock.read_all_vnets = AsyncMock(
@@ -324,7 +308,6 @@ async def test_sample_init_precheck_cleanup_fails_but_continues(
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
                 del os.environ["PROXMOX_CONFIG_FILE"]
-            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -338,7 +321,6 @@ async def test_sample_init_precheck_read_vnets_fails_but_continues(
     (not raise).
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     sdn_mock = MagicMock()
     sdn_mock.read_all_vnets = AsyncMock(
@@ -371,7 +353,6 @@ async def test_sample_init_precheck_read_vnets_fails_but_continues(
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
                 del os.environ["PROXMOX_CONFIG_FILE"]
-            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -387,7 +368,6 @@ async def test_sample_init_dirty_instance_not_returned_when_cleanup_fails(
     - This prevents cascading failures across samples
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
     infra = _make_infra_mock(
         create_sdn_and_vms=AsyncMock(
@@ -427,4 +407,3 @@ async def test_sample_init_dirty_instance_not_returned_when_cleanup_fails(
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
                 del os.environ["PROXMOX_CONFIG_FILE"]
-            ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
