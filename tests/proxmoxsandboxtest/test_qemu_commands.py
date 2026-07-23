@@ -234,6 +234,73 @@ async def test_empty_nic_from_built_in(
     await qemu_commands.destroy_vm(new_vm_id)
 
 
+async def test_disk_controller_match_from_built_in(
+    qemu_commands: QemuCommands,
+    auto_sdn_vnet_aliases: VnetAliases,
+    built_in_vm: BuiltInVM,
+):
+    built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
+
+    await built_in_vm.ensure_exists("ubuntu24.04")
+
+    # Built-ins are created on scsi, so requesting "scsi" must be accepted and
+    # the clone must still come out on scsi.
+    new_vm_id = await qemu_commands.create_and_start_vm(
+        sdn_vnet_aliases=auto_sdn_vnet_aliases,
+        vm_config=VmConfig(
+            vm_source_config=built_in_ubuntu,
+            disk_controller="scsi",
+            is_sandbox=False,
+        ),
+        built_in_vm_ids=await built_in_vm.known_builtins(),
+    )
+
+    new_vm = await qemu_commands.read_vm(new_vm_id)
+    assert "scsi0" in new_vm
+
+    await qemu_commands.destroy_vm(new_vm_id)
+
+
+async def test_disk_controller_mismatch_from_built_in_raises(
+    qemu_commands: QemuCommands,
+    built_in_vm: BuiltInVM,
+):
+    built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
+
+    await built_in_vm.ensure_exists("ubuntu24.04")
+
+    # Built-ins are scsi, so requesting "ide" is unsatisfiable and must raise
+    # before any VM is created (hence no cleanup needed).
+    with pytest.raises(ValueError, match="disk_controller"):
+        await qemu_commands.create_and_start_vm(
+            sdn_vnet_aliases=[],
+            vm_config=VmConfig(
+                vm_source_config=built_in_ubuntu,
+                disk_controller="ide",
+            ),
+            built_in_vm_ids=await built_in_vm.known_builtins(),
+        )
+
+
+async def test_disk_controller_mismatch_from_template_tag_raises(
+    qemu_commands: QemuCommands,
+    built_in_vm: BuiltInVM,
+):
+    await built_in_vm.ensure_exists("ubuntu24.04")
+
+    with pytest.raises(ValueError, match="disk_controller"):
+        await qemu_commands.create_and_start_vm(
+            sdn_vnet_aliases=[],
+            vm_config=VmConfig(
+                vm_source_config=VmSourceConfig(
+                    existing_vm_template_tag="builtin-ubuntu24.04"
+                ),
+                disk_controller="ide",
+            ),
+            built_in_vm_ids=await built_in_vm.known_builtins(),
+        )
+
+
 async def test_from_ova_local(qemu_commands: QemuCommands):
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=[],

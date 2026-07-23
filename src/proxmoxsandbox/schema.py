@@ -183,7 +183,11 @@ class VmConfig(BaseModel, frozen=True):
             It must have the qemu-guest-agent installed
         uefi_boot: if True, the VM will boot in UEFI mode. In theory, this is already
             specified by OVA, but Proxmox doesn't seem to respect it.
-        disk_controller: The disk controller type. If unset, defaults to "scsi"
+        disk_controller: The disk controller type. If unset, defaults to "scsi".
+            For an OVA this selects the controller the imported disks are attached
+            to. For an existing_vm_template_tag or built_in source it cannot be
+            changed, so it is instead verified against the source VM and raises if
+            they disagree.
         nic_controller: The NIC controller type. If unset, defaults to "virtio".
             This is applied to all virtual network interfaces.
         firewall: if True, enables the Proxmox firewall on all network interfaces.
