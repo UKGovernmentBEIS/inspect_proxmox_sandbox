@@ -96,6 +96,10 @@ These work under either firewall backend (`pve-firewall` or the nftables
 `proxmox-firewall`); the latter won't touch these chains. On `iptables-legacy`
 hosts they won't show in `nft list ruleset` — use `iptables -t raw -S` / `-S FORWARD`.
 
+The provisioners also install two host-level controls that keep the host *available* if
+a sandbox guest floods the network (conntrack control-plane immunity + a per-tap rate
+policer) — see [docs/host-network-protection.md](docs/host-network-protection.md).
+
 ### Single Proxmox Instance
 
 Set the following environment variables (e.g. in a [`.env`](https://dotenvx.com/docs/env-file) file):
