@@ -23,6 +23,8 @@ poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
 
 This plugin assumes you already have one or more Proxmox instances set up, and that you have admin access to them.
 
+Proxmox 9 or later is required; 9.2 or later is recommended for improvements in read_file.
+
 Your Proxmox instance(s) must allow additional storage types in `local` from the default.
 You can run this on your Proxmox node to configure them:
 
