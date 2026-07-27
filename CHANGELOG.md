@@ -10,6 +10,7 @@
 - Fix: reading a large or binary guest file / command output no longer crashes with HTTP 597 "Broken pipe" (on Proxmox >= 9.2).
 - Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
+- Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
 
 ## 0.11.0 - 2026-06-01
 
