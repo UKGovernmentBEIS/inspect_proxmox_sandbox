@@ -414,6 +414,50 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 BLOCK_METADATA_UNIT
 
+# NOTE: keep in sync with the on-first-boot heredoc in
+# scripts/virtualized_proxmox/build_proxmox_auto.sh.
+cat > /usr/local/bin/inspect-proxmox-egress-lockdown.sh << 'EGRESS_LOCKDOWN'
+#!/bin/bash
+set -euo pipefail
+
+MARKER=/etc/inspect-proxmox-egress-lockdown
+COMMENT=inspect-proxmox-egress-lockdown
+MGMT_NIC=$(ip route show default | awk '{print $5}' | head -1)
+
+if [ -f "$MARKER" ]; then
+    [ -z "$MGMT_NIC" ] && { echo "ERROR: could not determine management NIC from default route" >&2; exit 1; }
+    iptables -w -t mangle -C FORWARD -o "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP 2>/dev/null \
+        || iptables -w -t mangle -I FORWARD 1 -o "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP
+    iptables -w -t mangle -C FORWARD -i "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP 2>/dev/null \
+        || iptables -w -t mangle -I FORWARD 1 -i "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP
+fi
+
+iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
+    if [ -f "$MARKER" ]; then
+        case "$rule" in
+            *" -i $MGMT_NIC "*|*" -o $MGMT_NIC "*) continue ;;
+        esac
+    fi
+    echo "${rule#-A }" | xargs iptables -w -t mangle -D
+done
+EGRESS_LOCKDOWN
+chmod +x /usr/local/bin/inspect-proxmox-egress-lockdown.sh
+
+cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.service << 'EGRESS_LOCKDOWN_UNIT'
+[Unit]
+Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-proxmox-egress-lockdown)
+After=network-online.target pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EGRESS_LOCKDOWN_UNIT
+
 # Host isolation. See root README.
 # Re-applied every boot (no marker): the node name changes per launch, so any
 # node-scoped rules baked into the AMI are orphaned under the old node name, and
@@ -468,6 +512,7 @@ systemctl enable proxmox-ami-fixup-nat.service
 systemctl enable proxmox-ami-fixup-password.service
 systemctl enable proxmox-ami-fixup-firewall.service
 systemctl enable inspect-proxmox-block-cloud-metadata.service
+systemctl enable inspect-proxmox-egress-lockdown.service
 
 # ===== CloudWatch OTLP metrics collector =====
 # Ship pvestatd's metrics to the CloudWatch OTLP endpoint via a localhost CloudWatch

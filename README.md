@@ -98,6 +98,47 @@ These work under either firewall backend (`pve-firewall` or the nftables
 `proxmox-firewall`); the latter won't touch these chains. On `iptables-legacy`
 hosts they won't show in `nft list ruleset` — use `iptables -t raw -S` / `-S FORWARD`.
 
+### Optional egress lockdown
+
+The provisioning scripts also install — but never activate — an egress lockdown
+for sandbox guests. When active, all traffic forwarded between guests and the
+host's default-route interface is dropped: total north–south isolation, not an
+internet-only filter. Unaffected: guest↔guest traffic across vnets (it never
+crosses the management NIC), DHCP and DNS service from the host (names still
+*resolve*, because the host forwards DNS queries upstream itself — connections
+to the resolved addresses then fail), and the host's own egress (package
+installs, cloud agents, SSH).
+
+The lockdown is gated on a marker file that provisioning never creates, so
+hosts are unrestricted by default. To restrict a running host:
+
+```bash
+touch /etc/inspect-proxmox-egress-lockdown
+systemctl restart inspect-proxmox-egress-lockdown.service
+```
+
+To open it up again:
+
+```bash
+rm /etc/inspect-proxmox-egress-lockdown
+systemctl restart inspect-proxmox-egress-lockdown.service
+```
+
+The drop rules live in the mangle table's `FORWARD` chain, which is evaluated
+before every filter-table rule, so activating the lockdown also cuts off guest
+connections that are already established (e.g. a download started beforehand)
+without a conntrack flush. Rules are comment-tagged
+`inspect-proxmox-egress-lockdown`, and each service run converges the rule set:
+rules that shouldn't exist (marker removed, or a stale interface name after
+moving to different hardware) are deleted. Neither firewall backend touches the
+mangle table, so there are no coexistence conflicts.
+
+The lockdown is IPv4-only — forwarded guest IPv6 is already dropped wholesale
+by the isolation rules above. It also only affects *routed* traffic: a guest
+NIC hand-bridged directly onto the management bridge travels at layer 2 and
+never traverses `FORWARD`. Everything this library provisions is routed, and
+therefore covered.
+
 ### Single Proxmox Instance
 
 Set the following environment variables (e.g. in a [`.env`](https://dotenvx.com/docs/env-file) file):
