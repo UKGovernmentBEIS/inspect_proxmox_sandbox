@@ -102,10 +102,12 @@ hosts they won't show in `nft list ruleset` — use `iptables -t raw -S` / `-S F
 
 The provisioning scripts also install but don't activate an egress lockdown
 for sandbox guests. When active, all traffic forwarded between guests and the
-host's default-route interface is dropped. This serves to lock down most common
-attempts at network access from guest VMs. Some outbound network connections
-are still possible via `dnsmasq`, where the host proxies requests
-for DNS resolution.
+host's default-route interface is dropped, and the per-zone SDN `dnsmasq`
+instances are stopped from recursing to any upstream resolver. Together these
+close both direct egress and the DNS-resolution channel a guest could otherwise
+tunnel through (names no longer resolve beyond the internal vnets). Unaffected:
+guest↔guest traffic across vnets (it never crosses the management NIC) and the
+host's own egress and DNS (package installs, cloud agents, SSH).
 
 The lockdown is gated on a marker file that provisioning doesn't create, so
 hosts are unrestricted by default. To restrict a running host:
@@ -125,8 +127,14 @@ systemctl restart inspect-proxmox-egress-lockdown.service
 The drop rules live in the mangle table's `FORWARD` chain, which is evaluated
 before every filter-table rule, so activating the lockdown also cuts off guest
 connections that are already established (e.g. a download started beforehand).
-Neither firewall backend touches the
-mangle table, so there are no coexistence conflicts.
+Neither firewall backend touches the mangle table, so there are no coexistence
+conflicts.
+
+The DNS side works by blanking the upstream resolver file (`/run/dnsmasq/resolv.conf`)
+the SDN `dnsmasq` instances forward through and reloading them, so they keep
+answering internal names but refuse everything else. The previous upstream is
+backed up and restored when the marker is removed, so opening the host back up
+also restores guest DNS.
 
 ### Single Proxmox Instance
 

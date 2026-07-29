@@ -424,12 +424,26 @@ MARKER=/etc/inspect-proxmox-egress-lockdown
 COMMENT=inspect-proxmox-egress-lockdown
 MGMT_NIC=$(ip route show default | awk '{print $5}' | head -1)
 
+RESOLV=/run/dnsmasq/resolv.conf
+RESOLV_BACKUP=/run/dnsmasq/resolv.conf.inspect-egress-backup
+
+reload_dnsmasq() {
+    pkill -HUP dnsmasq 2>/dev/null || true
+}
+
 if [ -f "$MARKER" ]; then
     [ -z "$MGMT_NIC" ] && { echo "ERROR: could not determine management NIC from default route" >&2; exit 1; }
     iptables -w -t mangle -C FORWARD -o "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP 2>/dev/null \
         || iptables -w -t mangle -I FORWARD 1 -o "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP
     iptables -w -t mangle -C FORWARD -i "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP 2>/dev/null \
         || iptables -w -t mangle -I FORWARD 1 -i "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP
+
+    mkdir -p /run/dnsmasq
+    if [ -f "$RESOLV" ] && [ ! -f "$RESOLV_BACKUP" ] && ! grep -q "$COMMENT" "$RESOLV"; then
+        cp -a "$RESOLV" "$RESOLV_BACKUP"
+    fi
+    printf '# %s: upstream DNS recursion disabled while marker present\n' "$COMMENT" > "$RESOLV"
+    reload_dnsmasq
 fi
 
 iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
@@ -440,6 +454,16 @@ iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rul
     fi
     echo "${rule#-A }" | xargs iptables -w -t mangle -D
 done
+
+if [ ! -f "$MARKER" ]; then
+    if [ -f "$RESOLV_BACKUP" ]; then
+        mv -f "$RESOLV_BACKUP" "$RESOLV"
+        reload_dnsmasq
+    elif [ -f "$RESOLV" ] && grep -q "$COMMENT" "$RESOLV"; then
+        rm -f "$RESOLV"
+        reload_dnsmasq
+    fi
+fi
 EGRESS_LOCKDOWN
 chmod +x /usr/local/bin/inspect-proxmox-egress-lockdown.sh
 
