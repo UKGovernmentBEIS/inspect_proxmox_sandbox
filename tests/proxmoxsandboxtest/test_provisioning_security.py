@@ -45,9 +45,60 @@ def test_provisioners_contain_expected_iptables_rules(provisioner: Path) -> None
     # IPv6 unsupported: disabled on guest interfaces + forwarded v6 dropped.
     assert "net.ipv6.conf.default.disable_ipv6 = 1" in script
     assert "ip6tables -w -A FORWARD -j DROP" in script
+    # Control-plane conntrack immunity: pveproxy (8006) and ssh (22) are exempt from
+    # conntrack (raw NOTRACK, both directions), so a guest that fills the host
+    # conntrack table can't get Inspect's connection dropped by "table full".
+    assert "for _port in 8006 22; do" in script
+    assert (
+        'iptables -w -t raw -I PREROUTING 1 -p tcp --dport "$_port" -j CT --notrack'
+        in script
+    )
+    assert (
+        'iptables -w -t raw -I OUTPUT 1 -p tcp --sport "$_port" -j CT --notrack'
+        in script
+    )
     # Boot service installed and enabled.
     assert "ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh" in script
     assert "systemctl enable inspect-proxmox-block-cloud-metadata.service" in script
+    # Anti-DoS: a udev-triggered ingress policer caps each sandbox tap's guest->host
+    # packet rate, so a flooding guest can't exhaust host conntrack/softirq. The
+    # policer drops before conntrack (tc ingress), which NOTRACK/connlimit can't do.
+    assert 'KERNEL=="tap*i*"' in script
+    assert "inspect-proxmox-tap-policer@$name.service" in script
+    assert "action police pkts_rate" in script
+    assert "handle ffff: ingress" in script
     # The single-cloud denylist is gone.
     assert "169.254.169.254/32" not in script
     assert "fd00:ec2::254" not in script
+
+
+def _extract_block_metadata(script: str) -> str:
+    """Body of the `<< 'BLOCK_METADATA'` heredoc that both provisioners emit."""
+    marker_open = "<< 'BLOCK_METADATA'\n"
+    start = script.index(marker_open) + len(marker_open)
+    end = script.index("\nBLOCK_METADATA\n", start)
+    return script[start:end]
+
+
+def _extract_heredoc(script: str, marker: str) -> str:
+    open_m = f"<< '{marker}'\n"
+    start = script.index(open_m) + len(open_m)
+    end = script.index(f"\n{marker}\n", start)
+    return script[start:end]
+
+
+def test_block_metadata_script_identical_across_provisioners() -> None:
+    # The confine-guests script (link-local block, IPv6 drop, control-plane NOTRACK)
+    # is duplicated into both provisioners and must stay byte-identical; drift means
+    # one host family silently loses an isolation or availability control.
+    ec2 = (EC2_SCRIPTS / "userdata.sh").read_text()
+    virt = VIRTUALIZED_SCRIPT.read_text()
+    assert _extract_block_metadata(ec2) == _extract_block_metadata(virt)
+
+
+def test_tap_policer_identical_across_provisioners() -> None:
+    # The tap ingress policer (guest->host flood / DoS protection) is likewise
+    # duplicated and must not drift between host families.
+    ec2 = (EC2_SCRIPTS / "userdata.sh").read_text()
+    virt = VIRTUALIZED_SCRIPT.read_text()
+    assert _extract_heredoc(ec2, "TAP_POLICER") == _extract_heredoc(virt, "TAP_POLICER")

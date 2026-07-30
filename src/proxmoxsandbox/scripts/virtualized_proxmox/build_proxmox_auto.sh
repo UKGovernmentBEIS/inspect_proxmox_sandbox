@@ -288,6 +288,15 @@ if command -v ip6tables >/dev/null; then
     ip6tables -w -C FORWARD -j DROP 2>/dev/null \
         || ip6tables -w -A FORWARD -j DROP
 fi
+
+# Keep pveproxy (8006) and ssh (22) reachable when a guest fills the host conntrack
+# table (e.g. an in-range nmap): NOTRACK'd packets need no table slot. See root README.
+for _port in 8006 22; do
+    iptables -w -t raw -C PREROUTING -p tcp --dport "$_port" -j CT --notrack 2>/dev/null \
+        || iptables -w -t raw -I PREROUTING 1 -p tcp --dport "$_port" -j CT --notrack
+    iptables -w -t raw -C OUTPUT -p tcp --sport "$_port" -j CT --notrack 2>/dev/null \
+        || iptables -w -t raw -I OUTPUT 1 -p tcp --sport "$_port" -j CT --notrack
+done
 BLOCK_METADATA
 chmod +x /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
 
@@ -308,6 +317,44 @@ BLOCK_METADATA_UNIT
 
 systemctl daemon-reload
 systemctl enable inspect-proxmox-block-cloud-metadata.service
+
+# Bound each sandbox VM's guest->host packet rate at its tap. A flooding guest (a
+# high-rate nmap/masscan) otherwise drives host conntrack + softirq hard enough to
+# starve the control plane -- a DoS the NOTRACK rules above do not stop. An ingress
+# policer drops the excess BEFORE conntrack; a udev rule applies it to every tap as
+# it appears (tap names are per-VM and dynamic, so this can't be a static rule). See
+# root README.
+cat > /usr/local/bin/inspect-proxmox-tap-policer.sh << 'TAP_POLICER'
+#!/bin/bash
+set -euo pipefail
+IFACE="$1"
+PPS=20000
+# Proxmox's NIC bring-up wipes an ingress qdisc applied at the udev 'add' event, so
+# re-assert for a few seconds until it sticks (verified: single-shot gets cleared).
+for _ in $(seq 1 8); do
+    tc qdisc add dev "$IFACE" handle ffff: ingress 2>/dev/null || true
+    tc filter replace dev "$IFACE" parent ffff: matchall \
+        action police pkts_rate "$PPS" pkts_burst "$PPS" drop 2>/dev/null || true
+    sleep 1
+done
+TAP_POLICER
+chmod +x /usr/local/bin/inspect-proxmox-tap-policer.sh
+
+cat > /etc/systemd/system/inspect-proxmox-tap-policer@.service << 'TAP_POLICER_UNIT'
+[Unit]
+Description=Rate-limit sandbox VM tap %i (guest->host flood protection)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/inspect-proxmox-tap-policer.sh %i
+TAP_POLICER_UNIT
+
+cat > /etc/udev/rules.d/99-inspect-proxmox-tap-policer.rules << 'TAP_POLICER_UDEV'
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="tap*i*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="inspect-proxmox-tap-policer@$name.service"
+TAP_POLICER_UDEV
+
+systemctl daemon-reload
+udevadm control --reload 2>/dev/null || true
 
 touch /var/local/inspect-proxmox-on-first-boot.done
 
