@@ -313,7 +313,7 @@ set -euo pipefail
 
 MARKER=/etc/inspect-proxmox-egress-lockdown
 COMMENT=inspect-proxmox-egress-lockdown
-MGMT_NIC=$(ip route show default | awk '{print $5}' | head -1)
+RUN_ID="$$.$(date +%s)"
 
 RESOLV=/run/dnsmasq/resolv.conf
 RESOLV_BACKUP=/run/dnsmasq/resolv.conf.inspect-egress-backup
@@ -322,31 +322,42 @@ reload_dnsmasq() {
     pkill -HUP dnsmasq 2>/dev/null || true
 }
 
-if [ -f "$MARKER" ]; then
-    [ -z "$MGMT_NIC" ] && { echo "ERROR: could not determine management NIC from default route" >&2; exit 1; }
-    iptables -w -t mangle -C FORWARD -o "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP 2>/dev/null \
-        || iptables -w -t mangle -I FORWARD 1 -o "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP
-    iptables -w -t mangle -C FORWARD -i "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP 2>/dev/null \
-        || iptables -w -t mangle -I FORWARD 1 -i "$MGMT_NIC" -m comment --comment "$COMMENT" -j DROP
+gc_stale_rules() {
+    iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
+        case "$rule" in
+            *"$COMMENT $RUN_ID"*) continue ;;
+        esac
+        echo "${rule#-A }" | xargs iptables -w -t mangle -D || true
+    done
+}
 
+blank_resolv() {
     mkdir -p /run/dnsmasq
     if [ -f "$RESOLV" ] && [ ! -f "$RESOLV_BACKUP" ] && ! grep -q "$COMMENT" "$RESOLV"; then
         cp -a "$RESOLV" "$RESOLV_BACKUP"
     fi
     printf '# %s: upstream DNS recursion disabled while marker present\n' "$COMMENT" > "$RESOLV"
     reload_dnsmasq
-fi
+}
 
-iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
-    if [ -f "$MARKER" ]; then
-        case "$rule" in
-            *" -i $MGMT_NIC "*|*" -o $MGMT_NIC "*) continue ;;
-        esac
+if [ -f "$MARKER" ]; then
+    MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
+    if [ -z "$MGMT_NICS" ]; then
+        iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
+        gc_stale_rules
+        blank_resolv
+        echo "ERROR: no default-route NIC found; blanket FORWARD drop applied, failing unit" >&2
+        exit 1
     fi
-    echo "${rule#-A }" | xargs iptables -w -t mangle -D
-done
-
-if [ ! -f "$MARKER" ]; then
+    for NIC in $MGMT_NICS; do
+        iptables -w -t mangle -I FORWARD 1 -o "$NIC" -m comment --comment "$COMMENT $RUN_ID" -j DROP
+        iptables -w -t mangle -I FORWARD 1 -i "$NIC" -m comment --comment "$COMMENT $RUN_ID" -j DROP
+        iptables -w -t mangle -I OUTPUT 1 -o "$NIC" -m owner --uid-owner dnsmasq -m comment --comment "$COMMENT $RUN_ID" -j DROP
+    done
+    gc_stale_rules
+    blank_resolv
+else
+    gc_stale_rules
     if [ -f "$RESOLV_BACKUP" ]; then
         mv -f "$RESOLV_BACKUP" "$RESOLV"
         reload_dnsmasq
@@ -363,19 +374,42 @@ cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.service << 'EGRESS_LOC
 Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-proxmox-egress-lockdown)
 After=network-online.target pve-firewall.service proxmox-firewall.service
 Wants=network-online.target
+OnFailure=inspect-proxmox-egress-lockdown-halt.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
-RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EGRESS_LOCKDOWN_UNIT
 
+cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.timer << 'EGRESS_LOCKDOWN_TIMER'
+[Unit]
+Description=Reassert egress lockdown every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+EGRESS_LOCKDOWN_TIMER
+
+cat > /etc/systemd/system/inspect-proxmox-egress-lockdown-halt.service << 'EGRESS_LOCKDOWN_HALT_UNIT'
+[Unit]
+Description=Stop the Proxmox API because egress lockdown failed (fail deadly)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo "egress lockdown failed: stopping and masking pveproxy/pvedaemon; see journalctl -u inspect-proxmox-egress-lockdown.service" >&2; systemctl mask --runtime pveproxy.service pvedaemon.service; systemctl stop pveproxy.service pvedaemon.service'
+EGRESS_LOCKDOWN_HALT_UNIT
+
 systemctl daemon-reload
 systemctl enable inspect-proxmox-block-cloud-metadata.service
 systemctl enable inspect-proxmox-egress-lockdown.service
+systemctl enable inspect-proxmox-egress-lockdown.timer
 
 touch /var/local/inspect-proxmox-on-first-boot.done
 

@@ -77,6 +77,21 @@ export PROXMOX_WINDOWS_TEMPLATE_TAG=<your-tag>
 
 With this set, tests in `test_proxmox_sandbox_agent_commands.py` will run for both Linux and Windows.
 
+### Egress lockdown test
+
+`test_egress_lockdown_e2e.py` is skipped unless `PROXMOX_EGRESS_LOCKDOWN_ENABLED`
+is set, because it needs the host's egress lockdown active — and a locked-down
+host fails other integration tests that expect guests to have egress. To run it:
+
+```bash
+ssh root@<proxmox-host> 'touch /etc/inspect-proxmox-egress-lockdown && systemctl start inspect-proxmox-egress-lockdown.service'
+PROXMOX_EGRESS_LOCKDOWN_ENABLED=1 uv run pytest tests/proxmoxsandboxtest/test_egress_lockdown_e2e.py
+ssh root@<proxmox-host> 'rm /etc/inspect-proxmox-egress-lockdown && systemctl start inspect-proxmox-egress-lockdown.service'
+```
+
+Remember the last step: leaving the marker in place breaks the rest of the
+integration suite.
+
 ### Debug logging
 
 To see debug-level log output while running tests:
