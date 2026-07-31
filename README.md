@@ -110,6 +110,11 @@ vnets). Unaffected: guest↔guest traffic across vnets (it never crosses the
 management NIC) and the host's own egress and DNS (package installs, cloud
 agents, SSH).
 
+Guests must not need egress to boot: the built-in VM template bake (first use
+of a `built_in` image on a host) installs packages from inside the guest, so
+it must happen before the lockdown is applied. Sandbox VMs cloned from an
+already-baked template boot fine.
+
 The lockdown is gated on a marker file that provisioning doesn't create, so
 hosts are unrestricted by default. To restrict a running host:
 

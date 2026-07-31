@@ -81,7 +81,13 @@ With this set, tests in `test_proxmox_sandbox_agent_commands.py` will run for bo
 
 `test_egress_lockdown_e2e.py` is skipped unless `PROXMOX_EGRESS_LOCKDOWN_ENABLED`
 is set, because it needs the host's egress lockdown active — and a locked-down
-host fails other integration tests that expect guests to have egress. To run it:
+host fails other integration tests that expect guests to have egress.
+
+The built-in VM template must already exist on the host before locking down:
+baking it boots the source image and installs packages (including
+`qemu-guest-agent`) from inside the guest, which needs guest egress. Any test
+that creates a default sandbox (e.g. `test_host_isolation_e2e.py`) bakes it on
+first use. Then:
 
 ```bash
 ssh root@<proxmox-host> 'touch /etc/inspect-proxmox-egress-lockdown && systemctl start inspect-proxmox-egress-lockdown.service'
