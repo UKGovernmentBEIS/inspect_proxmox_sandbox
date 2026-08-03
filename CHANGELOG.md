@@ -6,7 +6,7 @@
 - Log the acquired pool instance (`host`/`port`/`node`) at `INFO`
 - Opt logger into `INFO` level for consistency with Inspect core
 - Prevent VMs from accessing cloud instance metadata credentials, disable IPv6 for sandbox guests (when using the bundled provisioning scripts)
-- Optional marker-file-gated egress lockdown for sandbox guests, installed inert by the bundled provisioning scripts (no behaviour change unless `/etc/inspect-proxmox-egress-lockdown` is created); when active it drops guest traffic forwarded via all default-route interfaces, reasserts the rules every minute via a systemd timer, fails closed (blanket forward drop + Proxmox API halt on failure), and stops the SDN `dnsmasq` instances from recursing upstream — backstopped by a firewall rule dropping upstream `dnsmasq` traffic — closing the DNS-tunnel channel
+- Optional egress lockdown for sandbox guests (when using the bundled provisioning scripts): drops forwarded guest traffic and stops the SDN `dnsmasq` instances recursing upstream. Installed inert, so nothing changes until `/etc/inspect-proxmox-egress-lockdown` is created; see the README
 - Fix: guest file / command-output reads work again on Proxmox < 9.2.
 - Fix: reading a large or binary guest file / command output no longer crashes with HTTP 597 "Broken pipe" (on Proxmox >= 9.2).
 - Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs

@@ -1,16 +1,12 @@
 """End-to-end check that the optional egress lockdown holds from inside a guest.
 
-Skipped unless `PROXMOX_EGRESS_LOCKDOWN_ENABLED` is set: it needs the host's
-lockdown marker in place and the service started, and a locked-down host fails
-the rest of the integration suite (which expects guests to have egress). See
-CONTRIBUTING.md for the setup and teardown sequence, including why the built-in
-VM template has to be baked before locking the host down.
+Skipped unless `PROXMOX_EGRESS_LOCKDOWN_ENABLED` is set: it needs a host with
+the lockdown active, which fails the rest of the integration suite. See
+CONTRIBUTING.md for the setup and teardown sequence.
 
-What lockdown does and does not take away, from the guest's point of view: the
-mangle FORWARD drops only see packets crossing a default-route NIC, so anything
-host-bound still works — the guest keeps its DHCP lease and can still query the
-SDN resolver. Blanking dnsmasq's resolv.conf plus the uid-owner OUTPUT drop
-removes that resolver's upstream, so it answers but cannot recurse.
+Only forwarded traffic is dropped, so host-bound traffic — the guest's DHCP
+lease, queries to the SDN resolver — keeps working. That resolver loses its
+upstream, so it answers but cannot recurse.
 """
 
 import os
@@ -38,10 +34,7 @@ pytestmark = [
 EXTERNAL_IP = "1.1.1.1"
 EXTERNAL_NAME = "example.com"
 
-NOT_LOCKED_DOWN_HINT = (
-    "Is /etc/inspect-proxmox-egress-lockdown present, and was "
-    "inspect-proxmox-egress-lockdown.service started after creating it?"
-)
+NOT_LOCKED_DOWN_HINT = "Is the host actually locked down? See CONTRIBUTING.md."
 
 DNS_PROBE_SCRIPT = """
 import socket
@@ -73,7 +66,7 @@ print(f"rcode={flags & 0xF} answers={answer_count}")
 async def _dns_probe(
     env: ProxmoxSandboxEnvironment, server: str, name: str
 ) -> tuple[int, int] | None:
-    """Query `server` for `name` from inside the guest; None if nothing replied."""
+    """Query `server` for `name` from the guest; None if nothing replied."""
     result = await env.exec(
         ["python3", "-c", DNS_PROBE_SCRIPT, server, name],
         timeout=30,
@@ -106,10 +99,7 @@ async def test_locked_down_host_denies_guest_egress_but_keeps_sdn_services() -> 
             timeout=10,
         )
         assert address_res.returncode == 0
-        assert address_res.stdout.split(), (
-            "sandbox VM has no global IPv4 address, so DHCP from the SDN "
-            "dnsmasq stopped working under lockdown"
-        )
+        assert address_res.stdout.split(), "no global IPv4 address, so DHCP broke"
 
         gateway_res = await env.exec(
             ["sh", "-c", "ip route show default | awk '{print $3}'"],
@@ -117,10 +107,7 @@ async def test_locked_down_host_denies_guest_egress_but_keeps_sdn_services() -> 
         )
         assert gateway_res.returncode == 0
         gateway = gateway_res.stdout.strip()
-        assert gateway, (
-            "no default gateway inside the sandbox VM, so its DHCP lease "
-            "carried no route under lockdown"
-        )
+        assert gateway, "no default gateway, so the DHCP lease carried no route"
 
         http_res = await env.exec(
             [
@@ -137,9 +124,8 @@ async def test_locked_down_host_denies_guest_egress_but_keeps_sdn_services() -> 
             timeout=15,
         )
         assert http_res.stdout.strip() == "000", (
-            f"external address {EXTERNAL_IP}:80 reachable from sandbox VM "
-            f"(curl returned http_code={http_res.stdout.strip()!r}). "
-            f"{NOT_LOCKED_DOWN_HINT}"
+            f"{EXTERNAL_IP}:80 reachable "
+            f"(http_code={http_res.stdout.strip()!r}). {NOT_LOCKED_DOWN_HINT}"
         )
 
         tcp_res = await env.exec(
@@ -152,27 +138,22 @@ async def test_locked_down_host_denies_guest_egress_but_keeps_sdn_services() -> 
             timeout=15,
         )
         assert tcp_res.stdout.strip() == "blocked", (
-            f"external address {EXTERNAL_IP}:443 reachable from sandbox VM: "
-            f"{tcp_res.stdout!r}. {NOT_LOCKED_DOWN_HINT}"
+            f"{EXTERNAL_IP}:443 reachable. {NOT_LOCKED_DOWN_HINT}"
         )
 
         getent_res = await env.exec(["getent", "hosts", EXTERNAL_NAME], timeout=30)
         assert getent_res.returncode != 0, (
-            f"{EXTERNAL_NAME} resolved from sandbox VM via the guest's normal "
-            f"resolver path: {getent_res.stdout!r}. {NOT_LOCKED_DOWN_HINT}"
+            f"{EXTERNAL_NAME} resolved: {getent_res.stdout!r}. {NOT_LOCKED_DOWN_HINT}"
         )
 
         external_probe = await _dns_probe(env, gateway, EXTERNAL_NAME)
         assert external_probe is not None, (
-            f"SDN resolver on {gateway} stopped answering under lockdown; "
-            "guests should keep internal DNS because their queries are "
-            "host-bound rather than forwarded"
+            f"SDN resolver on {gateway} stopped answering guests entirely"
         )
         rcode, answer_count = external_probe
         assert not (rcode == 0 and answer_count > 0), (
-            f"SDN resolver on {gateway} still recursed upstream for "
-            f"{EXTERNAL_NAME} (rcode={rcode}, answers={answer_count}). "
-            f"{NOT_LOCKED_DOWN_HINT}"
+            f"SDN resolver on {gateway} recursed upstream for {EXTERNAL_NAME} "
+            f"(rcode={rcode}, answers={answer_count}). {NOT_LOCKED_DOWN_HINT}"
         )
 
     finally:

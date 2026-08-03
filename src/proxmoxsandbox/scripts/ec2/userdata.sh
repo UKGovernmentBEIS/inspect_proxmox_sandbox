@@ -414,8 +414,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 BLOCK_METADATA_UNIT
 
-# NOTE: keep in sync with the on-first-boot heredoc in
-# scripts/virtualized_proxmox/build_proxmox_auto.sh.
+# NOTE: keep in sync with scripts/virtualized_proxmox/build_proxmox_auto.sh.
 cat > /usr/local/bin/inspect-proxmox-egress-lockdown.sh << 'EGRESS_LOCKDOWN'
 #!/bin/bash
 set -euo pipefail
