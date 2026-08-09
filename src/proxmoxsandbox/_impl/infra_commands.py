@@ -166,6 +166,7 @@ class InfraCommands(abc.ABC):
                     sdn_vnet_aliases=vnet_aliases,
                     vm_config=vm_config,
                     built_in_vm_ids=known_builtins,
+                    wait_until_ready=False,
                 )
                 self.qemu_commands.register_vm(vm_id)
                 vm_configs_with_ids.append((vm_id, vm_config))
