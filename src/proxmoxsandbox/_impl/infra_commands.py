@@ -176,7 +176,7 @@ class InfraCommands(abc.ABC):
         for vm_id, vm_config in vm_configs_with_ids:
             self.logger.info(f"Waiting for VM {vm_config.name} (ID={vm_id})")
             await self.qemu_commands.await_vm(vm_id, vm_config.is_sandbox)
-            self.logger.info(f"VM {vm_config.name} is ready")
+            self.logger.info(f"VM {vm_config.name} (ID={vm_id}) is ready")
 
         return tuple(vm_configs_with_ids), sdn_zone_id, tuple(ipam_mappings)
 
