@@ -224,6 +224,12 @@ export PROXMOX_CONFIG_FILE=/path/to/instances.json
 
 Instances with the same `pool_id` form a pool. Each eval sample acquires one instance from its pool, uses it exclusively, and releases it back when done. Concurrency is automatically limited to the total number of instances.
 
+### Extra HTTP Headers
+
+`extra_headers` on an instance adds HTTP headers to every request sent to that instance's Proxmox API, including file uploads. See [`schema.py`](./src/proxmoxsandbox/schema.py) for details.
+
+Header values are treated as secrets and redacted from logs. The Proxmox authentication headers (`Cookie`, `CSRFPreventionToken`) cannot be overridden.
+
 ## Configuring
 
 Here is a full example sandbox configuration. 
