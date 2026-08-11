@@ -84,10 +84,12 @@ async def test_exec_large_binary_output_surfaces_cleanly(
 async def test_read_file_large_binary_surfaces_cleanly(
     proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
 ) -> None:
-    """read_file round-trips a multi-MiB binary and rejects oversized files.
+    """read_file round-trips a multi-MiB binary and handles oversized files.
 
-    14 MiB round-trips byte-exact (also exercises the decode=0 segment-decode);
-    20 MiB (over the 16 MiB cap) raises OutputLimitExceededError, not a 597.
+    14 MiB round-trips byte-exact (also exercises the decode=0 segment-decode).
+    20 MiB spans multiple ranged reads on PVE >= 9.2 and must round-trip; on
+    older PVE it exceeds the 16 MiB cap and must raise OutputLimitExceededError,
+    not a 597.
     """
     if proxmox_sandbox_environment._is_windows():
         pytest.skip("binary repro is Linux-only")
@@ -102,12 +104,19 @@ async def test_read_file_large_binary_surfaces_cleanly(
     assert isinstance(data, bytes) and len(data) == 14680064
     assert hashlib.md5(data).hexdigest() == md5_guest
 
-    # 20 MiB (over the 16 MiB cap) must fail cleanly, not crash with a 597.
     await env.exec(
         ["sh", "-c", "head -c 20971520 /dev/urandom > /tmp/rf20"], timeout=60
     )
-    with pytest.raises(OutputLimitExceededError):
-        await env.read_file("/tmp/rf20", text=False)
+    if env.agent_commands.async_proxmox.release_at_least(9, 2):
+        # 20 MiB spans the 16 MiB first read plus a ranged tail; byte-exact.
+        md5_guest_20 = (await env.exec(["md5sum", "/tmp/rf20"])).stdout.split()[0]
+        data_20 = await env.read_file("/tmp/rf20", text=False)
+        assert isinstance(data_20, bytes) and len(data_20) == 20971520
+        assert hashlib.md5(data_20).hexdigest() == md5_guest_20
+    else:
+        # Over the legacy 16 MiB cap: must fail cleanly, not crash with a 597.
+        with pytest.raises(OutputLimitExceededError):
+            await env.read_file("/tmp/rf20", text=False)
 
 
 async def test_read_file_under_cap_but_wire_expanding_round_trips(
@@ -255,24 +264,29 @@ async def test_self_check(
         "test_read_file_not_allowed",  # user is root, so this doesn't work
         "test_write_text_file_without_permissions",  # ditto
         "test_write_binary_file_without_permissions",  # ditto
-        # Proxmox's QGA file-read API is hard-limited to 16 MiB; this self_check
-        # writes 50 MiB. read_file() caps at 16 MiB (a documented deviation from
-        # Inspect's 100 MiB spec, see read_file in _proxmox_sandbox_environment).
-        "test_read_and_write_large_file_binary",
     ]
+
+    modern = proxmox_sandbox_environment.agent_commands.async_proxmox.release_at_least(
+        9, 2
+    )
+    if not modern:
+        # Pre-9.2 PVE has no ranged file-read, so read_file caps at the agent
+        # API's 16 MiB and this self_check's 50 MiB can't round-trip.
+        known_failures.append("test_read_and_write_large_file_binary")
 
     results = await check_results_of_self_check(
         proxmox_sandbox_environment, known_failures
     )
 
-    # 50 MiB can't round-trip (16 MiB cap) so it stays a known failure - but it
-    # must fail *gracefully* (OutputLimitExceededError), not a raw 597. The old
-    # outcome-blind exclusion is how the crash slipped through.
-    large_file_result = results["test_read_and_write_large_file_binary"]
-    assert "OutputLimitExceededError" in str(large_file_result), (
-        "Oversized read_file must fail with OutputLimitExceededError, got: "
-        f"{large_file_result!r}"
-    )
+    if not modern:
+        # The 50 MiB read must still fail *gracefully* (OutputLimitExceededError),
+        # not a raw 597. The old outcome-blind exclusion is how the crash slipped
+        # through.
+        large_file_result = results["test_read_and_write_large_file_binary"]
+        assert "OutputLimitExceededError" in str(large_file_result), (
+            "Oversized read_file must fail with OutputLimitExceededError, got: "
+            f"{large_file_result!r}"
+        )
 
 
 async def test_exec_self_kill_degrades_gracefully(

@@ -193,27 +193,35 @@ class AsyncProxmoxAPI:
     _warned_legacy_file_read: bool = False
 
     async def read_file_capped(
-        self, node: str, vm_id: int, filepath: str, count: int
+        self, node: str, vm_id: int, filepath: str, count: int, offset: int = 0
     ) -> Tuple[bytes, bool]:
-        """Read up to `count` bytes of a guest file; return (data, truncated).
+        """Read up to `count` bytes of a guest file from `offset`.
+
+        Returns (data, truncated).
 
         On PVE >= 9.2, uses agent file-read decode=0 (base64) with a bounded
         `count`, not the default decode=1: decode=1 returns Latin-1-mangled UTF-8
         that inflates binary ~2-6x, and large responses then fail with an upstream
         "597 Broken pipe". The count/offset/decode options were added in
         qemu-server 9.1.5 (shipped in PVE 9.2); older versions reject them, so we
-        fall back to a plain decode=1 read there (see _decode_legacy_file_read). API:
+        fall back to a plain decode=1 read there (see _decode_legacy_file_read) and
+        reject a nonzero `offset`. API:
         https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vmid}/agent/file-read
         """
         path = f"/nodes/{node}/qemu/{vm_id}/agent/file-read"
+        # ping first: it logs in if needed, so the version is discovered
+        # before we decide which file-read variant to use.
+        await self._ping_qemu_agent(node, vm_id)
+        modern = self.release_at_least(9, 2)
+        if offset and not modern:
+            raise ValueError(
+                "file-read offset requires PVE >= 9.2; discovered "
+                f"{self.get_discovered_proxmox_version().release}"
+            )
         async with httpx.AsyncClient(
             verify=self.verify_tls,
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
-            # ping first: it logs in if needed, so the version is discovered
-            # before we decide which file-read variant to use.
-            await self._ping_qemu_agent(node, vm_id)
-            modern = self.release_at_least(9, 2)
             response = await client.get(
                 f"{self.api_base_url}{path}",
                 headers={
@@ -224,7 +232,7 @@ class AsyncProxmoxAPI:
                     "Accept-Encoding": "identity",
                 },
                 params=(
-                    {"file": filepath, "count": count, "decode": 0}
+                    {"file": filepath, "count": count, "offset": offset, "decode": 0}
                     if modern
                     else {"file": filepath}
                 ),

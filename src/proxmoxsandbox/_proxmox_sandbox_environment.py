@@ -59,6 +59,14 @@ _WRITE_CHUNK_SIZE = 40 * 1024
 
 _IN_GUEST_KILL_GRACE = 5
 
+# PVE hard-caps a single agent file-read response at 16 MiB regardless of the
+# requested count; larger files need ranged reads (PVE >= 9.2 only).
+_PVE_SINGLE_FILE_READ_CAP = 16 * 1024 * 1024
+
+# Window size for the ranged reads beyond the first 16 MiB. Kept below the PVE
+# cap so a transient 596/597 mid-stream only costs one window's retry.
+_RANGED_READ_WINDOW = 8 * 1024 * 1024
+
 
 def _split_chunks(
     data: bytes, size: int = _WRITE_CHUNK_SIZE
@@ -1157,20 +1165,44 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     async def read_file(self, file: str, text: bool = True) -> Union[str | bytes]:  # type: ignore
         """Read a file from the sandbox environment.
 
-        File size is limited to 16 MiB - this is a limitation of proxmox.
-        This is a deviation from the Inspect spec which states 100 MiB.
+        On PVE >= 9.2 files larger than a single agent file-read response
+        (16 MiB) are assembled from ranged reads, up to the Inspect limit.
+        On older PVE the size is capped at 16 MiB - a limitation of the
+        proxmox agent file-read API, and a deviation from the Inspect spec.
         """
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
-        # PVE caps agent file-read at 16 MiB; cap at the (test-overridable)
-        # Inspect limit, never above that.
-        cap = min(SandboxEnvironmentLimits.MAX_READ_FILE_SIZE, 16777216)
+        limit = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
         try:
-            data_bytes, truncated = await self.agent_commands.read_file_capped(
+            first_window, truncated = await self.agent_commands.read_file_capped(
                 vm_id=self.vm_id,
                 filepath=file,
-                count=cap,
+                count=min(limit, _PVE_SINGLE_FILE_READ_CAP),
             )
+            windows = [first_window]
+            size = len(first_window)
+            while truncated:
+                if size >= limit:
+                    raise OutputLimitExceededError(
+                        SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR, None
+                    )
+                if not self.agent_commands.async_proxmox.release_at_least(9, 2):
+                    # Legacy PVE cannot read past the first 16 MiB (no ranged
+                    # reads); report the binding 16 MiB cap.
+                    raise OutputLimitExceededError("16 MiB", None)
+                window, truncated = await self.agent_commands.read_file_capped(
+                    vm_id=self.vm_id,
+                    filepath=file,
+                    count=min(_RANGED_READ_WINDOW, limit - size),
+                    offset=size,
+                )
+                if not window and truncated:
+                    raise RuntimeError(
+                        f"guest file-read of {file} at offset {size} returned no "
+                        "data but reported more remaining"
+                    )
+                windows.append(window)
+                size += len(window)
         except Exception as ex:
             if "Agent error" in str(ex):
                 ex_str = str(ex)
@@ -1185,14 +1217,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     raise ex
             else:
                 raise ex
-        if truncated:
-            # File exceeds the cap; report the active limit (16 MiB or a test override).
-            limit_str = (
-                SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR
-                if SandboxEnvironmentLimits.MAX_READ_FILE_SIZE <= 16777216
-                else "16 MiB"
-            )
-            raise OutputLimitExceededError(limit_str, None)
+        data_bytes = windows[0] if len(windows) == 1 else b"".join(windows)
         if text:
             return data_bytes.decode("utf-8")
         else:

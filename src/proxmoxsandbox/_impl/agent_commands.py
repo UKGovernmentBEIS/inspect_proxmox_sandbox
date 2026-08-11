@@ -168,18 +168,18 @@ class AgentCommands:
             )
 
     async def read_file_capped(
-        self, vm_id: int, filepath: str, count: int
+        self, vm_id: int, filepath: str, count: int, offset: int = 0
     ) -> Tuple[bytes, bool]:
         """Retried decode=0 read of up to `count` bytes; returns (data, truncated)."""
         with trace_action(
             self.logger,
             self.TRACE_NAME,
-            f"read_file_capped {vm_id=} {filepath=} {count=}",
+            f"read_file_capped {vm_id=} {filepath=} {count=} {offset=}",
         ):
             return await self._retry_on_qga_error(
                 f"read_file_capped vm={vm_id} {filepath}",
                 lambda: self.async_proxmox.read_file_capped(
-                    self.node, vm_id, filepath, count
+                    self.node, vm_id, filepath, count, offset
                 ),
             )
 
