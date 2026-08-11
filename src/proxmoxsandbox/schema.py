@@ -228,8 +228,8 @@ class HttpHeader(BaseModel):
 
     Attributes:
         name: The header name, e.g. "Authorization"
-        value: The header value. Modelled as a secret because extra headers
-            typically carry credentials (e.g. a bearer token for a reverse proxy).
+        value: The header value. Modelled as a secret because header values
+            often carry credentials (bearer tokens, API keys).
     """
 
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
@@ -253,10 +253,11 @@ class ProxmoxInstanceConfig(BaseModel):
         password: The password for Proxmox authentication
         node: The name of the Proxmox node
         verify_tls: Whether to verify the Proxmox server's TLS certificate
-        extra_headers: Additional HTTP headers to send with every request to this
-            instance, e.g. for authenticating to a reverse proxy in front of the
-            Proxmox API. The Proxmox authentication headers (Cookie,
-            CSRFPreventionToken) cannot be overridden.
+        extra_headers: Additional HTTP headers to send with every request to
+            this instance (e.g. credentials for a proxy or gateway in front of
+            the Proxmox API, an API key, or tracing headers). The Proxmox
+            authentication headers (Cookie, CSRFPreventionToken) cannot be
+            overridden.
     """
 
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)

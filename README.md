@@ -224,9 +224,9 @@ export PROXMOX_CONFIG_FILE=/path/to/instances.json
 
 Instances with the same `pool_id` form a pool. Each eval sample acquires one instance from its pool, uses it exclusively, and releases it back when done. Concurrency is automatically limited to the total number of instances.
 
-### Proxmox Behind an Authenticating Reverse Proxy
+### Extra HTTP Headers
 
-If a Proxmox instance sits behind a reverse proxy that requires its own authentication (for example a bearer token), configure `extra_headers` on that instance. The headers are sent with every request to the Proxmox API, including file uploads:
+`extra_headers` on an instance adds HTTP headers to every request sent to that instance's Proxmox API, including file uploads. Typical uses: credentials for a proxy or access gateway in front of the API (a bearer token, Cloudflare Access service token, or similar), an API key for a gateway that routes or rate-limits on one, or tracing headers for request attribution:
 
 ```json
 {
