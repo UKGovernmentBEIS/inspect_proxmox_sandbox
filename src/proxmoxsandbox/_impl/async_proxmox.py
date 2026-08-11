@@ -37,6 +37,7 @@ class AsyncProxmoxAPI:
     username: str
     password: str
     verify_tls: bool
+    extra_headers: Dict[str, str]
     ticket: Optional[str] = None
     ticket_date: Optional[float] = None
     csrf_token: Optional[str] = None
@@ -46,13 +47,32 @@ class AsyncProxmoxAPI:
     TICKET_LIFETIME_SECONDS = 7200
     TICKET_REFRESH_THRESHOLD = TICKET_LIFETIME_SECONDS - 600
 
+    # The Proxmox authentication headers; extra_headers may not shadow them.
+    RESERVED_HEADERS = frozenset({"cookie", "csrfpreventiontoken"})
+
     # note: host *includes* :port
-    def __init__(self, host: str, user: str, password: str, verify_tls: bool = True):
+    def __init__(
+        self,
+        host: str,
+        user: str,
+        password: str,
+        verify_tls: bool = True,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ):
         self.base_url = f"https://{host}"
         self.api_base_url = f"{self.base_url}/api2/json"
         self.username = user
         self.password = password
         self.verify_tls = verify_tls
+        self.extra_headers = dict(extra_headers or {})
+        reserved = [
+            name for name in self.extra_headers if name.lower() in self.RESERVED_HEADERS
+        ]
+        if reserved:
+            raise ValueError(
+                f"extra_headers may not include the Proxmox authentication "
+                f"headers: {', '.join(sorted(reserved))}"
+            )
 
     @classmethod
     def from_instance_config(cls, instance: ProxmoxInstanceConfig):
@@ -61,16 +81,29 @@ class AsyncProxmoxAPI:
             user=f"{instance.user}@{instance.user_realm}",
             password=instance.password.get_secret_value(),
             verify_tls=instance.verify_tls,
+            extra_headers={
+                header.name: header.value.get_secret_value()
+                for header in instance.extra_headers
+            },
         )
 
     def __hash__(self):
-        return hash((self.api_base_url, self.username, self.password, self.verify_tls))
+        return hash(
+            (
+                self.api_base_url,
+                self.username,
+                self.password,
+                self.verify_tls,
+                tuple(sorted(self.extra_headers.items())),
+            )
+        )
 
     async def _login(self, client: httpx.AsyncClient):
         """Get new authentication ticket and CSRF token."""
         with trace_action(self.logger, self.TRACE_NAME, "login"):
             response = await client.post(
                 f"{self.api_base_url}/access/ticket",
+                headers=self.extra_headers,
                 data={"username": self.username, "password": self.password},
             )
             response.raise_for_status()
@@ -160,7 +193,9 @@ class AsyncProxmoxAPI:
             return response.json()["data"]
 
     def _prepare_headers(self, method: str, content_type: str | None):
+        # Extra headers first, so the Proxmox auth headers below always win.
         headers = {
+            **self.extra_headers,
             "Cookie": f"PVEAuthCookie={self.ticket}",
         }
 
@@ -217,6 +252,7 @@ class AsyncProxmoxAPI:
             response = await client.get(
                 f"{self.api_base_url}{path}",
                 headers={
+                    **self.extra_headers,
                     "Cookie": f"PVEAuthCookie={self.ticket}",
                     # Opt out of pveproxy response compression: it truncates
                     # large incompressible bodies mid-transfer, surfacing as an
@@ -274,6 +310,14 @@ class AsyncProxmoxAPI:
         truncated = bool(data.get("truncated")) or len(raw) > count
         return raw[:count], truncated
 
+    def _curl_headers(self) -> List[str]:
+        """Request headers for the pycurl upload path."""
+        return [
+            *(f"{name}: {value}" for name, value in self.extra_headers.items()),
+            f"Cookie: PVEAuthCookie={self.ticket}",
+            f"CSRFPreventionToken: {self.csrf_token}",
+        ]
+
     async def upload_file_with_curl(
         self,
         node: str,
@@ -316,12 +360,7 @@ class AsyncProxmoxAPI:
                 curl.setopt(pycurl.SSL_VERIFYPEER, 0)
                 curl.setopt(pycurl.SSL_VERIFYHOST, 0)
 
-            # Set auth headers
-            headers = [
-                f"Cookie: PVEAuthCookie={self.ticket}",
-                f"CSRFPreventionToken: {self.csrf_token}",
-            ]
-            curl.setopt(pycurl.HTTPHEADER, headers)
+            curl.setopt(pycurl.HTTPHEADER, self._curl_headers())
 
             curl.setopt(
                 pycurl.HTTPPOST,
