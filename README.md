@@ -226,28 +226,7 @@ Instances with the same `pool_id` form a pool. Each eval sample acquires one ins
 
 ### Extra HTTP Headers
 
-`extra_headers` on an instance adds HTTP headers to every request sent to that instance's Proxmox API, including file uploads. Typical uses: credentials for a proxy or access gateway in front of the API (a bearer token, Cloudflare Access service token, or similar), an API key for a gateway that routes or rate-limits on one, or tracing headers for request attribution:
-
-```json
-{
-  "instances": [
-    {
-      "instance_id": "proxmox-1",
-      "pool_id": "ubuntu-ami-123",
-      "host": "proxmox.example.com",
-      "port": 443,
-      "user": "root",
-      "user_realm": "pam",
-      "password": "secret",
-      "node": "pve1",
-      "verify_tls": true,
-      "extra_headers": [
-        {"name": "Authorization", "value": "Bearer example-token"}
-      ]
-    }
-  ]
-}
-```
+`extra_headers` on an instance adds HTTP headers to every request sent to that instance's Proxmox API, including file uploads. See [`schema.py`](./src/proxmoxsandbox/schema.py) for details.
 
 Header values are treated as secrets and redacted from logs. The Proxmox authentication headers (`Cookie`, `CSRFPreventionToken`) cannot be overridden.
 
