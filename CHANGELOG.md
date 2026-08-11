@@ -13,7 +13,7 @@
 - Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 - Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
-- Don't wait for a VM to reach "running" before starting the next one (just wait for all of them together at the end)
+- Don't wait for a VM to reach "running" before starting the next one (just wait for all of them together at the end). Set `await_before_next_vm=True` on a `VmConfig` if later VMs depend on it having booted first
 
 ## 0.11.0 - 2026-06-01
 
