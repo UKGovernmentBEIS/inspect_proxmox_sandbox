@@ -224,6 +224,33 @@ export PROXMOX_CONFIG_FILE=/path/to/instances.json
 
 Instances with the same `pool_id` form a pool. Each eval sample acquires one instance from its pool, uses it exclusively, and releases it back when done. Concurrency is automatically limited to the total number of instances.
 
+### Proxmox Behind an Authenticating Reverse Proxy
+
+If a Proxmox instance sits behind a reverse proxy that requires its own authentication (for example a bearer token), configure `extra_headers` on that instance. The headers are sent with every request to the Proxmox API, including file uploads:
+
+```json
+{
+  "instances": [
+    {
+      "instance_id": "proxmox-1",
+      "pool_id": "ubuntu-ami-123",
+      "host": "proxmox.example.com",
+      "port": 443,
+      "user": "root",
+      "user_realm": "pam",
+      "password": "secret",
+      "node": "pve1",
+      "verify_tls": true,
+      "extra_headers": [
+        {"name": "Authorization", "value": "Bearer example-token"}
+      ]
+    }
+  ]
+}
+```
+
+Header values are treated as secrets and redacted from logs. The Proxmox authentication headers (`Cookie`, `CSRFPreventionToken`) cannot be overridden.
+
 ## Configuring
 
 Here is a full example sandbox configuration. 

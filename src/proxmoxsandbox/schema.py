@@ -222,6 +222,22 @@ class VmConfig(BaseModel, frozen=True):
     cpu: Optional[str] = None
 
 
+class HttpHeader(BaseModel):
+    """
+    A single HTTP header.
+
+    Attributes:
+        name: The header name, e.g. "Authorization"
+        value: The header value. Modelled as a secret because extra headers
+            typically carry credentials (e.g. a bearer token for a reverse proxy).
+    """
+
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
+
+    name: str
+    value: SecretStr
+
+
 class ProxmoxInstanceConfig(BaseModel):
     """
     Configuration for a single Proxmox instance.
@@ -237,6 +253,10 @@ class ProxmoxInstanceConfig(BaseModel):
         password: The password for Proxmox authentication
         node: The name of the Proxmox node
         verify_tls: Whether to verify the Proxmox server's TLS certificate
+        extra_headers: Additional HTTP headers to send with every request to this
+            instance, e.g. for authenticating to a reverse proxy in front of the
+            Proxmox API. The Proxmox authentication headers (Cookie,
+            CSRFPreventionToken) cannot be overridden.
     """
 
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
@@ -250,6 +270,7 @@ class ProxmoxInstanceConfig(BaseModel):
     password: SecretStr
     node: str
     verify_tls: bool
+    extra_headers: Tuple[HttpHeader, ...] = ()
 
 
 def _load_single_instance_from_env() -> ProxmoxInstanceConfig:
