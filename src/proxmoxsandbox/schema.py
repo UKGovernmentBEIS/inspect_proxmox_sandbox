@@ -197,6 +197,10 @@ class VmConfig(BaseModel, frozen=True):
         cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
             defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
             panic on nested virtualization with "host"; use "qemu64" for those.
+        await_before_next_vm: if True, wait for this VM to finish booting (and, when
+            is_sandbox, to answer a guest-agent ping) before creating the next VM in
+            vms_config. Defaults to False, so VMs boot concurrently. Set this on a VM
+            that later ones depend on at boot time, e.g. a router or DHCP server.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -220,6 +224,7 @@ class VmConfig(BaseModel, frozen=True):
     firewall: bool = False
     os_type: Optional[OsType] = "l26"
     cpu: Optional[str] = None
+    await_before_next_vm: bool = False
 
 
 class HttpHeader(BaseModel):

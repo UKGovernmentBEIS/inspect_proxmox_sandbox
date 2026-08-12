@@ -37,6 +37,7 @@ async def test_simple_vm_non_sandbox(
             uefi_boot=False,
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -66,6 +67,7 @@ async def test_none_nic_from_template_tag(
             nics=None,
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -93,6 +95,7 @@ async def test_empty_nic_from_template_tag(
             nics=(),
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -117,6 +120,7 @@ async def test_none_nic_from_built_in(
             nics=None,
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -156,6 +160,7 @@ async def test_existing_alias_from_built_in(
             ),
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -196,6 +201,7 @@ async def test_multiple_nic(
             nics=(VmNicConfig(vnet_alias="vnetB"), VmNicConfig(vnet_alias="vnetA")),
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -226,6 +232,7 @@ async def test_empty_nic_from_built_in(
             nics=(),
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -253,6 +260,7 @@ async def test_disk_controller_match_from_built_in(
             is_sandbox=False,
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -279,6 +287,7 @@ async def test_disk_controller_mismatch_from_built_in_raises(
                 disk_controller="ide",
             ),
             built_in_vm_ids=await built_in_vm.known_builtins(),
+            wait_until_ready=False,
         )
 
 
@@ -298,6 +307,7 @@ async def test_disk_controller_mismatch_from_template_tag_raises(
                 disk_controller="ide",
             ),
             built_in_vm_ids=await built_in_vm.known_builtins(),
+            wait_until_ready=False,
         )
 
 
@@ -316,6 +326,9 @@ async def test_from_ova_local(qemu_commands: QemuCommands):
             is_sandbox=True,
         ),
         built_in_vm_ids={},
+        # ping_qemu_agent below is a single call with no retry, so the guest
+        # agent must already be up by the time this returns
+        wait_until_ready=True,
     )
 
     await qemu_commands.ping_qemu_agent(new_vm_id)
@@ -342,6 +355,9 @@ async def test_from_ova_uefi_sandbox(qemu_commands: QemuCommands):
             is_sandbox=True,
         ),
         built_in_vm_ids={},
+        # ping_qemu_agent below is a single call with no retry, so the guest
+        # agent must already be up by the time this returns
+        wait_until_ready=True,
     )
 
     await qemu_commands.ping_qemu_agent(new_vm_id)
@@ -366,6 +382,9 @@ async def test_uefi(
             uefi_boot=True,
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        # ping_qemu_agent below is a single call with no retry, so the guest
+        # agent must already be up by the time this returns
+        wait_until_ready=True,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)

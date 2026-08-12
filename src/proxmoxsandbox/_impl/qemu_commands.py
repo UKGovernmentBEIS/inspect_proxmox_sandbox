@@ -179,18 +179,24 @@ class QemuCommands(abc.ABC):
     async def find_next_available_vm_id(self) -> int:
         return await self.async_proxmox.request("GET", "/cluster/nextid")
 
-    async def start_and_await(
+    async def start(
         self,
         vm_id: int,
-        is_sandbox: bool,
     ) -> None:
-        async def start() -> None:
+        async def do_start() -> None:
             await self.async_proxmox.request(
                 "POST",
                 f"/nodes/{self.node}/qemu/{vm_id}/status/start",
             )
 
-        await self.task_wrapper.do_action_and_wait_for_tasks(start)
+        await self.task_wrapper.do_action_and_wait_for_tasks(do_start)
+
+    async def start_and_await(
+        self,
+        vm_id: int,
+        is_sandbox: bool,
+    ) -> None:
+        await self.start(vm_id=vm_id)
 
         await self.await_vm(
             vm_id=vm_id,
@@ -289,6 +295,7 @@ class QemuCommands(abc.ABC):
         sdn_vnet_aliases: VnetAliases,
         vm_config: VmConfig,
         built_in_vm_ids: Dict[str, int],
+        wait_until_ready: bool,
     ) -> int:
         if (
             vm_config.os_type != "l26"
@@ -421,6 +428,7 @@ class QemuCommands(abc.ABC):
             vm_id_to_clone=vm_id_to_clone,
             sdn_vnet_aliases=sdn_vnet_aliases,
             preserve_tags=preserve_tags,
+            wait_until_ready=wait_until_ready,
         )
 
         if new_vm_id is None:
@@ -545,6 +553,7 @@ class QemuCommands(abc.ABC):
         vm_id_to_clone: int,
         sdn_vnet_aliases: VnetAliases,
         preserve_tags: bool,
+        wait_until_ready: bool,
     ) -> int:
         new_vm_id = await self.find_next_available_vm_id()
 
@@ -579,7 +588,12 @@ class QemuCommands(abc.ABC):
 
         await self.task_wrapper.do_action_and_wait_for_tasks(other_updates)
 
-        await self.start_and_await(vm_id=new_vm_id, is_sandbox=vm_config.is_sandbox)
+        await self.start(vm_id=new_vm_id)
+        if wait_until_ready:
+            await self.await_vm(
+                vm_id=new_vm_id,
+                is_sandbox=vm_config.is_sandbox,
+            )
         return new_vm_id
 
     def other_config_json(

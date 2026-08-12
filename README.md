@@ -270,6 +270,7 @@ sandbox=SandboxEnvironmentSpec(
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
                 cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
                 firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
+                await_before_next_vm=False, # optional, default is False, i.e. all VMs boot concurrently. Set to True if the VMs listed after this one need it to have booted first.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
                 # You can assign more than one, to give the VM more than one network interface.
                 # If you leave this blank, your VM will be assigned to the first VNet.
