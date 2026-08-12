@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Security fix: anchor the ephemeral SDN zone regex so automatic cleanup cannot delete unrelated pre-existing zones whose names share a 7-character prefix with provider zones
+- Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones whose names share a 7-character prefix with provider zones
 - Enable extra custom headers in requests to Proxmox API.
 - Remove the unused single-instance fields (`host` etc.) from `ProxmoxSandboxEnvironmentConfig`; infrastructure is configured via `PROXMOX_CONFIG_FILE` or `PROXMOX_*` environment variables only. Passing these fields is now silently ignored (pydantic drops extra kwargs), and old `.eval` logs still deserialize.
 - Log the acquired pool instance (`host`/`port`/`node`) at `INFO`

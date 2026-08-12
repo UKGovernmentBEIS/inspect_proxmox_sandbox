@@ -34,7 +34,7 @@ VnetAliases: TypeAlias = List[Tuple[str, str | None]]
 # anchored at both ends — a prefix match would let a pre-existing zone such
 # as `abc123za` be swept and deleted as if the provider owned it. Use
 # `is_ephemeral_zone()` rather than matching this directly.
-ZONE_REGEX = r"^[a-z0-9]{3}[0-9]{3}z$"
+ZONE_REGEX = r"^[a-z0-9]{1,3}[0-9]{3}z$"
 
 
 def is_ephemeral_zone(zone_id: str) -> bool:
