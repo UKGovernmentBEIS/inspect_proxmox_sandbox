@@ -116,9 +116,33 @@ class AsyncProxmoxAPI:
             self._client = httpx.AsyncClient(
                 verify=self.verify_tls,
                 timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
+                # pveproxy closes idle keep-alive connections after ~5s; expire
+                # them client-side first or a request written just as the server
+                # closes surfaces as RemoteProtocolError. max_connections=None
+                # keeps the old one-client-per-request concurrency semantics
+                # (no PoolTimeout under heavy QGA polling).
+                limits=httpx.Limits(
+                    max_connections=None,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=4.0,
+                ),
             )
             self._client_loop = loop
         return self._client
+
+    async def aclose(self) -> None:
+        """Close the pooled client; the next request lazily creates a new one.
+
+        If the client was created on a different event loop, its connections
+        belong to that loop and can't be closed from here — drop the reference
+        and let GC reap the sockets.
+        """
+        client, client_loop = self._client, self._client_loop
+        self._client = None
+        self._client_loop = None
+        if client is not None and not client.is_closed:
+            if client_loop is asyncio.get_running_loop():
+                await client.aclose()
 
     async def _login(self, client: httpx.AsyncClient):
         """Get new authentication ticket and CSRF token."""
