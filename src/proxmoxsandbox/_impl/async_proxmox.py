@@ -42,6 +42,8 @@ class AsyncProxmoxAPI:
     ticket_date: Optional[float] = None
     csrf_token: Optional[str] = None
     discovered_proxmox_version: Optional[ProxmoxVersionInfo] = None
+    _client: Optional[httpx.AsyncClient] = None
+    _client_loop: Optional[asyncio.AbstractEventLoop] = None
 
     # PVE tickets expire after 2 hours; refresh proactively with 10 min buffer
     TICKET_LIFETIME_SECONDS = 7200
@@ -98,6 +100,26 @@ class AsyncProxmoxAPI:
             )
         )
 
+    def _get_client(self) -> httpx.AsyncClient:
+        """One AsyncClient (and hence one connection pool) per event loop.
+
+        A pooled connection is bound to the loop that created it, so if the
+        loop changed (e.g. cli_cleanup's separate asyncio.run) we abandon the
+        old client rather than await its aclose from the wrong loop.
+        """
+        loop = asyncio.get_running_loop()
+        if (
+            self._client is None
+            or self._client.is_closed
+            or self._client_loop is not loop
+        ):
+            self._client = httpx.AsyncClient(
+                verify=self.verify_tls,
+                timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
+            )
+            self._client_loop = loop
+        return self._client
+
     async def _login(self, client: httpx.AsyncClient):
         """Get new authentication ticket and CSRF token."""
         with trace_action(self.logger, self.TRACE_NAME, "login"):
@@ -141,17 +163,27 @@ class AsyncProxmoxAPI:
     ):
         if json is not None:
             content_type = "application/json"
-        async with httpx.AsyncClient(
-            verify=self.verify_tls,
-            timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
-        ) as client:
-            # Get a fresh ticket if we don't have one or it's approaching expiry
-            if not self.ticket or self._ticket_near_expiry():
-                await self._login(client)
+        client = self._get_client()
+        # Get a fresh ticket if we don't have one or it's approaching expiry
+        if not self.ticket or self._ticket_near_expiry():
+            await self._login(client)
 
-            if self.csrf_token is None:
-                raise ValueError("CSRF token was not set by login")
+        if self.csrf_token is None:
+            raise ValueError("CSRF token was not set by login")
 
+        headers = self._prepare_headers(method, content_type)
+
+        response = await client.request(
+            method,
+            f"{self.api_base_url}{path}",
+            headers=headers,
+            json=json,
+            content=body_content,
+        )
+        # If we get a 401, our ticket might have expired (2 hour lifetime)
+        # Try to login once and retry the request
+        if response.status_code == 401:
+            await self._login(client)
             headers = self._prepare_headers(method, content_type)
 
             response = await client.request(
@@ -161,36 +193,23 @@ class AsyncProxmoxAPI:
                 json=json,
                 content=body_content,
             )
-            # If we get a 401, our ticket might have expired (2 hour lifetime)
-            # Try to login once and retry the request
-            if response.status_code == 401:
-                await self._login(client)
-                headers = self._prepare_headers(method, content_type)
 
-                response = await client.request(
-                    method,
-                    f"{self.api_base_url}{path}",
-                    headers=headers,
-                    json=json,
-                    content=body_content,
-                )
-
-            if response.is_error and raise_errors:
-                # We are deliberately not using response.raise_for_status here as it
-                # does not include response.text in the raised error
-                message = (
-                    f"HTTP response error: {response.status_code} "
-                    + f"{response.reason_phrase}"
-                )
-                if response.text:
-                    message += f": {response.text}"
-                raise httpx.HTTPStatusError(
-                    message, request=response.request, response=response
-                )
-            else:
-                if response.is_error:
-                    return response.json()
-            return response.json()["data"]
+        if response.is_error and raise_errors:
+            # We are deliberately not using response.raise_for_status here as it
+            # does not include response.text in the raised error
+            message = (
+                f"HTTP response error: {response.status_code} "
+                + f"{response.reason_phrase}"
+            )
+            if response.text:
+                message += f": {response.text}"
+            raise httpx.HTTPStatusError(
+                message, request=response.request, response=response
+            )
+        else:
+            if response.is_error:
+                return response.json()
+        return response.json()["data"]
 
     def _prepare_headers(self, method: str, content_type: str | None):
         # Extra headers first, so the Proxmox auth headers below always win.
@@ -241,43 +260,39 @@ class AsyncProxmoxAPI:
         https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vmid}/agent/file-read
         """
         path = f"/nodes/{node}/qemu/{vm_id}/agent/file-read"
-        async with httpx.AsyncClient(
-            verify=self.verify_tls,
-            timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
-        ) as client:
-            # ping first: it logs in if needed, so the version is discovered
-            # before we decide which file-read variant to use.
-            await self._ping_qemu_agent(node, vm_id)
-            modern = self.release_at_least(9, 2)
-            response = await client.get(
-                f"{self.api_base_url}{path}",
-                headers={
-                    **self.extra_headers,
-                    "Cookie": f"PVEAuthCookie={self.ticket}",
-                    # Opt out of pveproxy response compression: it truncates
-                    # large incompressible bodies mid-transfer, surfacing as an
-                    # upstream "597 Broken pipe".
-                    "Accept-Encoding": "identity",
-                },
-                params=(
-                    {"file": filepath, "count": count, "decode": 0}
-                    if modern
-                    else {"file": filepath}
-                ),
+        client = self._get_client()
+        # ping first: it logs in if needed, so the version is discovered
+        # before we decide which file-read variant to use.
+        await self._ping_qemu_agent(node, vm_id)
+        modern = self.release_at_least(9, 2)
+        response = await client.get(
+            f"{self.api_base_url}{path}",
+            headers={
+                **self.extra_headers,
+                "Cookie": f"PVEAuthCookie={self.ticket}",
+                # Opt out of pveproxy response compression: it truncates
+                # large incompressible bodies mid-transfer, surfacing as an
+                # upstream "597 Broken pipe".
+                "Accept-Encoding": "identity",
+            },
+            params=(
+                {"file": filepath, "count": count, "decode": 0}
+                if modern
+                else {"file": filepath}
+            ),
+        )
+        if response.is_error:
+            # Mirror request()'s error so callers can still match the agent's
+            # message text (e.g. "No such file", "Is a directory").
+            message = (
+                f"HTTP response error: {response.status_code} {response.reason_phrase}"
             )
-            if response.is_error:
-                # Mirror request()'s error so callers can still match the agent's
-                # message text (e.g. "No such file", "Is a directory").
-                message = (
-                    f"HTTP response error: {response.status_code} "
-                    f"{response.reason_phrase}"
-                )
-                if response.text:
-                    message += f": {response.text}"
-                raise httpx.HTTPStatusError(
-                    message, request=response.request, response=response
-                )
-            data = response.json()["data"]
+            if response.text:
+                message += f": {response.text}"
+            raise httpx.HTTPStatusError(
+                message, request=response.request, response=response
+            )
+        data = response.json()["data"]
         content: str = data.get("content") or ""
         if not modern:
             return self._decode_legacy_file_read(content, data, count)
