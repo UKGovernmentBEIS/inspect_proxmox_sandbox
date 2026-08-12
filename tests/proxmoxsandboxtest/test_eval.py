@@ -17,6 +17,8 @@ from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironmen
 
 CURRENT_DIR = Path(__file__).parent
 
+pytestmark = pytest.mark.req_proxmox
+
 
 @task
 def task_for_test() -> Task:

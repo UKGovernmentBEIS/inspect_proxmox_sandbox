@@ -1,33 +1,24 @@
 import asyncio
+import base64
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import pycurl
 from inspect_ai.util import (
-    OutputLimitExceededError,
     trace_action,
 )
 from pydantic import BaseModel
-from pydantic_core import from_json
+
+from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
-
-
-def _parse_truncated_file_read(raw: bytes) -> str:
-    r"""Extract data.content from a QGA file-read body cut off at the size limit.
-
-    The cut can land inside a JSON `\\uXXXX` escape, so we let pydantic_core's
-    'trailing-strings' mode drop the incomplete trailing token. Hand-closing the
-    string with a `"` instead produced things like `\\u00"` -> invalid escape (#77).
-    """
-    parsed = from_json(raw, allow_partial="trailing-strings")
-    return parsed.get("data", {}).get("content", "") or ""
 
 
 class ProxmoxVersionInfo(BaseModel):
@@ -46,6 +37,7 @@ class AsyncProxmoxAPI:
     username: str
     password: str
     verify_tls: bool
+    extra_headers: Dict[str, str]
     ticket: Optional[str] = None
     ticket_date: Optional[float] = None
     csrf_token: Optional[str] = None
@@ -55,22 +47,63 @@ class AsyncProxmoxAPI:
     TICKET_LIFETIME_SECONDS = 7200
     TICKET_REFRESH_THRESHOLD = TICKET_LIFETIME_SECONDS - 600
 
+    # The Proxmox authentication headers; extra_headers may not shadow them.
+    RESERVED_HEADERS = frozenset({"cookie", "csrfpreventiontoken"})
+
     # note: host *includes* :port
-    def __init__(self, host: str, user: str, password: str, verify_tls: bool = True):
+    def __init__(
+        self,
+        host: str,
+        user: str,
+        password: str,
+        verify_tls: bool = True,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ):
         self.base_url = f"https://{host}"
         self.api_base_url = f"{self.base_url}/api2/json"
         self.username = user
         self.password = password
         self.verify_tls = verify_tls
+        self.extra_headers = dict(extra_headers or {})
+        reserved = [
+            name for name in self.extra_headers if name.lower() in self.RESERVED_HEADERS
+        ]
+        if reserved:
+            raise ValueError(
+                f"extra_headers may not include the Proxmox authentication "
+                f"headers: {', '.join(sorted(reserved))}"
+            )
+
+    @classmethod
+    def from_instance_config(cls, instance: ProxmoxInstanceConfig):
+        return cls(
+            host=f"{instance.host}:{instance.port}",
+            user=f"{instance.user}@{instance.user_realm}",
+            password=instance.password.get_secret_value(),
+            verify_tls=instance.verify_tls,
+            extra_headers={
+                header.name: header.value.get_secret_value()
+                for header in instance.extra_headers
+            },
+        )
 
     def __hash__(self):
-        return hash((self.api_base_url, self.username, self.password, self.verify_tls))
+        return hash(
+            (
+                self.api_base_url,
+                self.username,
+                self.password,
+                self.verify_tls,
+                tuple(sorted(self.extra_headers.items())),
+            )
+        )
 
     async def _login(self, client: httpx.AsyncClient):
         """Get new authentication ticket and CSRF token."""
         with trace_action(self.logger, self.TRACE_NAME, "login"):
             response = await client.post(
                 f"{self.api_base_url}/access/ticket",
+                headers=self.extra_headers,
                 data={"username": self.username, "password": self.password},
             )
             response.raise_for_status()
@@ -86,6 +119,16 @@ class AsyncProxmoxAPI:
         if self.discovered_proxmox_version is None:
             raise ValueError("Need to be logged in")
         return self.discovered_proxmox_version
+
+    def release_at_least(self, required_major: int, required_minor: int = 0) -> bool:
+        """True if the pve-manager release is >= the given major.minor."""
+        release_string = self.get_discovered_proxmox_version().release
+        # Parse version string (e.g., "9.2.1" or "9.0")
+        match = re.match(r"(\d+)\.(\d+)", release_string)
+        if not match:
+            raise ValueError(f"Could not parse Proxmox version: {release_string}")
+        major, minor = int(match.group(1)), int(match.group(2))
+        return (major, minor) >= (required_major, required_minor)
 
     async def request(
         self,
@@ -150,7 +193,9 @@ class AsyncProxmoxAPI:
             return response.json()["data"]
 
     def _prepare_headers(self, method: str, content_type: str | None):
+        # Extra headers first, so the Proxmox auth headers below always win.
         headers = {
+            **self.extra_headers,
             "Cookie": f"PVEAuthCookie={self.ticket}",
         }
 
@@ -175,68 +220,103 @@ class AsyncProxmoxAPI:
     async def _ping_qemu_agent(self, node: str, vm_id: int):
         await self.request("POST", f"/nodes/{node}/qemu/{vm_id}/agent/ping")
 
-    async def read_file(
-        self, node: str, vm_id: int, filepath: str, max_size: int, max_size_str: str
-    ):
-        """Read a file from the VM using QEMU agent with optional size limit.
+    # decode=0 concatenates each ~1 MiB chunk's own base64 (chunks aren't
+    # 3-aligned, so each keeps its padding) - decode segment by segment, not in
+    # one pass.
+    _B64_SEGMENT = re.compile(rb"[A-Za-z0-9+/]+={0,2}")
 
-        Args:
-            node (str): The node name
-            vm_id (int): The VM ID
-            filepath (str): Path to the file to read
-            max_size (int, optional): Maximum number of bytes to read.
-                None means no limit.
-            max_size_str (str): Human-readable string of the max_size
+    _warned_legacy_file_read: bool = False
 
-        Returns:
-            dict: The file contents and metadata
+    async def read_file_capped(
+        self, node: str, vm_id: int, filepath: str, count: int
+    ) -> Tuple[bytes, bool]:
+        """Read up to `count` bytes of a guest file; return (data, truncated).
 
-        Raises:
-            FileTooLargeError: If the file size exceeds max_size
+        On PVE >= 9.2, uses agent file-read decode=0 (base64) with a bounded
+        `count`, not the default decode=1: decode=1 returns Latin-1-mangled UTF-8
+        that inflates binary ~2-6x, and large responses then fail with an upstream
+        "597 Broken pipe". The count/offset/decode options were added in
+        qemu-server 9.1.5 (shipped in PVE 9.2); older versions reject them, so we
+        fall back to a plain decode=1 read there (see _decode_legacy_file_read). API:
+        https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/qemu/{vmid}/agent/file-read
         """
         path = f"/nodes/{node}/qemu/{vm_id}/agent/file-read"
-
         async with httpx.AsyncClient(
             verify=self.verify_tls,
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
-            # ping to refresh token if needed, so we don't have to do it in the stream
+            # ping first: it logs in if needed, so the version is discovered
+            # before we decide which file-read variant to use.
             await self._ping_qemu_agent(node, vm_id)
-
-            async with client.stream(
-                "GET",
+            modern = self.release_at_least(9, 2)
+            response = await client.get(
                 f"{self.api_base_url}{path}",
                 headers={
+                    **self.extra_headers,
                     "Cookie": f"PVEAuthCookie={self.ticket}",
+                    # Opt out of pveproxy response compression: it truncates
+                    # large incompressible bodies mid-transfer, surfacing as an
+                    # upstream "597 Broken pipe".
+                    "Accept-Encoding": "identity",
                 },
-                params={"file": filepath},
-            ) as response:
-                response.raise_for_status()
+                params=(
+                    {"file": filepath, "count": count, "decode": 0}
+                    if modern
+                    else {"file": filepath}
+                ),
+            )
+            if response.is_error:
+                # Mirror request()'s error so callers can still match the agent's
+                # message text (e.g. "No such file", "Is a directory").
+                message = (
+                    f"HTTP response error: {response.status_code} "
+                    f"{response.reason_phrase}"
+                )
+                if response.text:
+                    message += f": {response.text}"
+                raise httpx.HTTPStatusError(
+                    message, request=response.request, response=response
+                )
+            data = response.json()["data"]
+        content: str = data.get("content") or ""
+        if not modern:
+            return self._decode_legacy_file_read(content, data, count)
+        raw = b"".join(
+            base64.b64decode(seg)
+            for seg in self._B64_SEGMENT.findall(content.encode("ascii"))
+        )
+        return raw, bool(data.get("truncated"))
 
-                # Check Content-Length if available
-                content_length = response.headers.get("content-length")
-                if content_length and max_size:
-                    if int(content_length) > max_size:
-                        await response.aclose()
-                        raise OutputLimitExceededError(max_size_str, None)
+    def _decode_legacy_file_read(
+        self, content: str, data: dict, count: int
+    ) -> Tuple[bytes, bool]:
+        """decode=1 fallback for PVE < 9.2 (no count/decode params).
 
-                # Read the response in chunks
-                chunks = []
-                total_size = 0
+        Under decode=1 each raw file byte arrives as a Latin-1 codepoint serialised
+        into UTF-8 JSON, so encoding back to iso-8859-1 recovers the bytes. PVE caps
+        the read at 16 MiB itself; we additionally honour `count` client-side.
+        """
+        if not self._warned_legacy_file_read:
+            self._warned_legacy_file_read = True
+            self.logger.warning(
+                "Proxmox %s is < 9.2: using the legacy guest file-read path. "
+                "Large or binary read_file/exec-output reads are less efficient "
+                "and may fail on very large files; the decode fix from "
+                "qemu-server 9.1.5 is unavailable. Upgrade to PVE >= 9.2 for the "
+                "full fix.",
+                self.get_discovered_proxmox_version().release,
+            )
+        raw = content.encode("iso-8859-1")
+        truncated = bool(data.get("truncated")) or len(raw) > count
+        return raw[:count], truncated
 
-                async for chunk in response.aiter_bytes(chunk_size=8192):
-                    chunks.append(chunk)
-                    total_size += len(chunk)
-
-                    if max_size and total_size > max_size:
-                        await response.aclose()
-
-                        truncated_content = _parse_truncated_file_read(b"".join(chunks))
-                        raise OutputLimitExceededError(max_size_str, truncated_content)
-
-                # Combine chunks and parse JSON
-                full_response = b"".join(chunks)
-                return httpx.Response(200, content=full_response).json()["data"]
+    def _curl_headers(self) -> List[str]:
+        """Request headers for the pycurl upload path."""
+        return [
+            *(f"{name}: {value}" for name, value in self.extra_headers.items()),
+            f"Cookie: PVEAuthCookie={self.ticket}",
+            f"CSRFPreventionToken: {self.csrf_token}",
+        ]
 
     async def upload_file_with_curl(
         self,
@@ -280,12 +360,7 @@ class AsyncProxmoxAPI:
                 curl.setopt(pycurl.SSL_VERIFYPEER, 0)
                 curl.setopt(pycurl.SSL_VERIFYHOST, 0)
 
-            # Set auth headers
-            headers = [
-                f"Cookie: PVEAuthCookie={self.ticket}",
-                f"CSRFPreventionToken: {self.csrf_token}",
-            ]
-            curl.setopt(pycurl.HTTPHEADER, headers)
+            curl.setopt(pycurl.HTTPHEADER, self._curl_headers())
 
             curl.setopt(
                 pycurl.HTTPPOST,

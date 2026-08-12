@@ -255,6 +255,162 @@ pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp
 pvesh set /nodes/proxmox/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
 
+# IPv6 is not supported for sandbox guests on this provider. SDN vnet bridges are
+# created per sample with generated names, so we can't pin a rule to them; instead
+# default.disable_ipv6 makes every interface created after boot (i.e. the vnets)
+# come up with no IPv6. The already-up management NIC keeps its own setting.
+cat > /etc/sysctl.d/99-inspect-proxmox-disable-ipv6.conf << 'SYSCTL_V6'
+net.ipv6.conf.default.disable_ipv6 = 1
+SYSCTL_V6
+
+# Confine sandbox guests at the host's forwarding layer. Re-applied every boot
+# because the template is powered off below and later cloned into fresh instances;
+# iptables rules live in kernel state and don't survive the clone/reboot.
+cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
+#!/bin/bash
+set -euo pipefail
+
+# Enforce RFC 3927: a router must not forward IPv4 link-local (169.254.0.0/16).
+#
+# Destination drop in raw PREROUTING (interface-agnostic, ahead of any FORWARD
+# ACCEPT; host requests are OUTPUT so unaffected) -- this blocks the metadata vector.
+iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
+# Source drop in FORWARD, not raw PREROUTING: belt-and-braces for full RFC
+# conformance. FORWARD leaves the host's own on-link replies (IMDS/DNS, at INPUT)
+# intact; a raw PREROUTING -s rule would drop them and break the host.
+iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
+
+# Belt-and-braces for the unsupported IPv6 case: drop forwarded guest v6 outright.
+# FORWARD only sees transit traffic, so the host's own v6 (INPUT/OUTPUT) is intact.
+if command -v ip6tables >/dev/null; then
+    ip6tables -w -C FORWARD -j DROP 2>/dev/null \
+        || ip6tables -w -A FORWARD -j DROP
+fi
+BLOCK_METADATA
+chmod +x /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
+
+cat > /etc/systemd/system/inspect-proxmox-block-cloud-metadata.service << 'BLOCK_METADATA_UNIT'
+[Unit]
+Description=Confine sandbox guests (link-local forwarding block, IPv6 drop)
+After=network-online.target pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BLOCK_METADATA_UNIT
+
+# NOTE: keep in sync with scripts/ec2/userdata.sh.
+cat > /usr/local/bin/inspect-proxmox-egress-lockdown.sh << 'EGRESS_LOCKDOWN'
+#!/bin/bash
+set -euo pipefail
+
+MARKER=/etc/inspect-proxmox-egress-lockdown
+COMMENT=inspect-proxmox-egress-lockdown
+RUN_ID="$$.$(date +%s)"
+
+RESOLV=/run/dnsmasq/resolv.conf
+RESOLV_BACKUP=/run/dnsmasq/resolv.conf.inspect-egress-backup
+
+reload_dnsmasq() {
+    pkill -HUP dnsmasq 2>/dev/null || true
+}
+
+gc_stale_rules() {
+    iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
+        case "$rule" in
+            *"$COMMENT $RUN_ID"*) continue ;;
+        esac
+        echo "${rule#-A }" | xargs iptables -w -t mangle -D || true
+    done
+}
+
+blank_resolv() {
+    mkdir -p /run/dnsmasq
+    if [ -f "$RESOLV" ] && [ ! -f "$RESOLV_BACKUP" ] && ! grep -q "$COMMENT" "$RESOLV"; then
+        cp -a "$RESOLV" "$RESOLV_BACKUP"
+    fi
+    printf '# %s: upstream DNS recursion disabled while marker present\n' "$COMMENT" > "$RESOLV"
+    reload_dnsmasq
+}
+
+if [ -f "$MARKER" ]; then
+    MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
+    if [ -z "$MGMT_NICS" ]; then
+        iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
+        gc_stale_rules
+        blank_resolv
+        echo "ERROR: no default-route NIC found; blanket FORWARD drop applied, failing unit" >&2
+        exit 1
+    fi
+    for NIC in $MGMT_NICS; do
+        iptables -w -t mangle -I FORWARD 1 -o "$NIC" -m comment --comment "$COMMENT $RUN_ID" -j DROP
+        iptables -w -t mangle -I FORWARD 1 -i "$NIC" -m comment --comment "$COMMENT $RUN_ID" -j DROP
+        iptables -w -t mangle -I OUTPUT 1 -o "$NIC" -m owner --uid-owner dnsmasq -m comment --comment "$COMMENT $RUN_ID" -j DROP
+    done
+    gc_stale_rules
+    blank_resolv
+else
+    gc_stale_rules
+    if [ -f "$RESOLV_BACKUP" ]; then
+        mv -f "$RESOLV_BACKUP" "$RESOLV"
+        reload_dnsmasq
+    elif [ -f "$RESOLV" ] && grep -q "$COMMENT" "$RESOLV"; then
+        rm -f "$RESOLV"
+        reload_dnsmasq
+    fi
+fi
+EGRESS_LOCKDOWN
+chmod +x /usr/local/bin/inspect-proxmox-egress-lockdown.sh
+
+cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.service << 'EGRESS_LOCKDOWN_UNIT'
+[Unit]
+Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-proxmox-egress-lockdown)
+After=network-online.target pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
+OnFailure=inspect-proxmox-egress-lockdown-halt.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
+
+[Install]
+WantedBy=multi-user.target
+EGRESS_LOCKDOWN_UNIT
+
+cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.timer << 'EGRESS_LOCKDOWN_TIMER'
+[Unit]
+Description=Reassert egress lockdown every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+EGRESS_LOCKDOWN_TIMER
+
+cat > /etc/systemd/system/inspect-proxmox-egress-lockdown-halt.service << 'EGRESS_LOCKDOWN_HALT_UNIT'
+[Unit]
+Description=Stop the Proxmox API because egress lockdown failed (fail deadly)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo "egress lockdown failed: stopping and masking pveproxy/pvedaemon; see journalctl -u inspect-proxmox-egress-lockdown.service" >&2; systemctl mask --runtime pveproxy.service pvedaemon.service; systemctl stop pveproxy.service pvedaemon.service'
+EGRESS_LOCKDOWN_HALT_UNIT
+
+systemctl daemon-reload
+systemctl enable inspect-proxmox-block-cloud-metadata.service
+systemctl enable inspect-proxmox-egress-lockdown.service
+systemctl enable inspect-proxmox-egress-lockdown.timer
+
 touch /var/local/inspect-proxmox-on-first-boot.done
 
 # shut down to signal to virt-install that installation is complete

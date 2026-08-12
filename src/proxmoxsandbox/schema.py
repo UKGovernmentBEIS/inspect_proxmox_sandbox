@@ -6,7 +6,7 @@ from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
 
@@ -183,7 +183,11 @@ class VmConfig(BaseModel, frozen=True):
             It must have the qemu-guest-agent installed
         uefi_boot: if True, the VM will boot in UEFI mode. In theory, this is already
             specified by OVA, but Proxmox doesn't seem to respect it.
-        disk_controller: The disk controller type. If unset, defaults to "scsi"
+        disk_controller: The disk controller type. If unset, defaults to "scsi".
+            For an OVA this selects the controller the imported disks are attached
+            to. For an existing_vm_template_tag or built_in source it cannot be
+            changed, so it is instead verified against the source VM and raises if
+            they disagree.
         nic_controller: The NIC controller type. If unset, defaults to "virtio".
             This is applied to all virtual network interfaces.
         firewall: if True, enables the Proxmox firewall on all network interfaces.
@@ -193,6 +197,10 @@ class VmConfig(BaseModel, frozen=True):
         cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
             defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
             panic on nested virtualization with "host"; use "qemu64" for those.
+        await_before_next_vm: if True, wait for this VM to finish booting (and, when
+            is_sandbox, to answer a guest-agent ping) before creating the next VM in
+            vms_config. Defaults to False, so VMs boot concurrently. Set this on a VM
+            that later ones depend on at boot time, e.g. a router or DHCP server.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -216,9 +224,26 @@ class VmConfig(BaseModel, frozen=True):
     firewall: bool = False
     os_type: Optional[OsType] = "l26"
     cpu: Optional[str] = None
+    await_before_next_vm: bool = False
 
 
-class ProxmoxInstanceConfig(BaseModel, frozen=True):
+class HttpHeader(BaseModel):
+    """
+    A single HTTP header.
+
+    Attributes:
+        name: The header name, e.g. "Authorization"
+        value: The header value. Modelled as a secret because header values
+            often carry credentials (bearer tokens, API keys).
+    """
+
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
+
+    name: str
+    value: SecretStr
+
+
+class ProxmoxInstanceConfig(BaseModel):
     """
     Configuration for a single Proxmox instance.
 
@@ -233,7 +258,14 @@ class ProxmoxInstanceConfig(BaseModel, frozen=True):
         password: The password for Proxmox authentication
         node: The name of the Proxmox node
         verify_tls: Whether to verify the Proxmox server's TLS certificate
+        extra_headers: Additional HTTP headers to send with every request to
+            this instance (e.g. credentials for a proxy or gateway in front of
+            the Proxmox API, an API key, or tracing headers). The Proxmox
+            authentication headers (Cookie, CSRFPreventionToken) cannot be
+            overridden.
     """
+
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     instance_id: str
     pool_id: str
@@ -241,9 +273,30 @@ class ProxmoxInstanceConfig(BaseModel, frozen=True):
     port: int
     user: str
     user_realm: str
-    password: str
+    password: SecretStr
     node: str
     verify_tls: bool
+    extra_headers: Tuple[HttpHeader, ...] = ()
+
+
+def _load_single_instance_from_env() -> ProxmoxInstanceConfig:
+    """
+    Load a single Proxmox instance configuration from environment variables.
+
+    Returns:
+        ProxmoxInstanceConfig object
+    """
+    return ProxmoxInstanceConfig(
+        instance_id="default",
+        pool_id="default",
+        host=getenv("PROXMOX_HOST", "localhost"),
+        port=int(getenv("PROXMOX_PORT", "8006")),
+        user=getenv("PROXMOX_USER", "root"),
+        user_realm=getenv("PROXMOX_REALM", "pam"),
+        password=getenv("PROXMOX_PASSWORD", "password"),
+        node=getenv("PROXMOX_NODE", "proxmox"),
+        verify_tls=getenv("PROXMOX_VERIFY_TLS", "1") == "1",
+    )
 
 
 def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
@@ -266,27 +319,14 @@ def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
             return tuple(ProxmoxInstanceConfig(**inst) for inst in instances_data)
 
     # Priority 2: Single instance from env vars
-    host = getenv("PROXMOX_HOST")
-    if host:
-        return (
-            ProxmoxInstanceConfig(
-                instance_id="default",
-                pool_id="default",
-                host=host,
-                port=int(getenv("PROXMOX_PORT", "8006")),
-                user=getenv("PROXMOX_USER", "root"),
-                user_realm=getenv("PROXMOX_REALM", "pam"),
-                password=getenv("PROXMOX_PASSWORD", "password"),
-                node=getenv("PROXMOX_NODE", "proxmox"),
-                verify_tls=getenv("PROXMOX_VERIFY_TLS", "1") == "1",
-            ),
-        )
+    if getenv("PROXMOX_HOST"):
+        return (_load_single_instance_from_env(),)
 
     # No configuration found - return empty tuple
     return ()
 
 
-class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
+class ProxmoxSandboxEnvironmentConfig(BaseModel):
     """
     Configuration for a Proxmox sandbox environment.
 
@@ -299,14 +339,9 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
             normally.
         sdn_config: Software-defined networking configuration
         vms_config: Configurations for virtual machines
-        host: The hostname or IP address of the Proxmox server
-        port: The port number for the Proxmox API, usually 8006
-        user: The username for Proxmox authentication
-        user_realm: The authentication realm for the Proxmox user
-        password: The password for Proxmox authentication
-        node: The name of the Proxmox node
-        verify_tls: Whether to verify the Proxmox server's TLS certificate
     """
+
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     # Which pool to use (references pool_id in PROXMOX_CONFIG_FILE)
     instance_pool_id: str = "default"
@@ -315,19 +350,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel, frozen=True):
     sdn_config: SdnConfigType = "auto"
     vms_config: Tuple[VmConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
-    )
-
-    # Single-instance fields (used when configuring via environment variables)
-    host: str = Field(default_factory=lambda: getenv("PROXMOX_HOST", "localhost"))
-    port: int = Field(default_factory=lambda: int(getenv("PROXMOX_PORT", "8006")))
-    user: str = Field(default_factory=lambda: getenv("PROXMOX_USER", "root"))
-    user_realm: str = Field(default_factory=lambda: getenv("PROXMOX_REALM", "pam"))
-    password: str = Field(
-        default_factory=lambda: getenv("PROXMOX_PASSWORD", "password")
-    )
-    node: str = Field(default_factory=lambda: getenv("PROXMOX_NODE", "proxmox"))
-    verify_tls: bool = Field(
-        default_factory=lambda: getenv("PROXMOX_VERIFY_TLS", "1") == "1"
     )
 
     image_storage: str = Field(

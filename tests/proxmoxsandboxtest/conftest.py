@@ -22,7 +22,12 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
-from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+from proxmoxsandbox.schema import (
+    ProxmoxInstanceConfig,
+    VmConfig,
+    VmSourceConfig,
+    _load_single_instance_from_env,
+)
 
 # Set PROXMOX_WINDOWS_TEMPLATE_TAG to run tests against a Windows VM.
 # The value should match the tag on an existing Proxmox VM template.
@@ -31,35 +36,55 @@ from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 WINDOWS_TEMPLATE_TAG = os.getenv("PROXMOX_WINDOWS_TEMPLATE_TAG")
 
 
+@pytest.fixture(autouse=True)
+def reset_global_pool_state():
+    """Reset process-global pool and instance registries around every test.
+
+    QueueBasedProxmoxPool._instance_pools and InfraCommands._instances are
+    class-level, so they persist for the whole session. initialize() is a no-op
+    for a pool_id that already exists, so a 'default' pool left behind by an
+    earlier test (e.g. an e2e test built from PROXMOX_HOST) would otherwise be
+    reused by a later test that meant to build its own config. Every pool
+    consumer is function-scoped and re-runs task_init, so resetting around each
+    test is safe and removes the need for per-test bookkeeping.
+    """
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
+    yield
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
+
+
 @pytest.fixture
 async def sandbox_env_config() -> ProxmoxSandboxEnvironmentConfig:
     return ProxmoxSandboxEnvironmentConfig()
 
 
 @pytest.fixture
+async def instance_config() -> ProxmoxInstanceConfig:
+    return _load_single_instance_from_env()
+
+
+@pytest.fixture
 async def async_proxmox_api(
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
+    instance_config: ProxmoxInstanceConfig,
 ) -> AsyncGenerator[AsyncProxmoxAPI, None]:
-    yield AsyncProxmoxAPI(
-        host=f"{sandbox_env_config.host}:{sandbox_env_config.port}",
-        user=f"{sandbox_env_config.user}@{sandbox_env_config.user_realm}",
-        password=sandbox_env_config.password,
-        verify_tls=sandbox_env_config.verify_tls,
-    )
+    yield AsyncProxmoxAPI.from_instance_config(instance_config)
 
 
 @pytest.fixture
 async def infra_commands(
     async_proxmox_api: AsyncProxmoxAPI,
     sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
+    instance_config: ProxmoxInstanceConfig,
 ) -> InfraCommands:
     target = ProxmoxTarget(
-        host=sandbox_env_config.host,
-        port=sandbox_env_config.port,
-        node=sandbox_env_config.node,
+        host=instance_config.host,
+        port=instance_config.port,
+        node=instance_config.node,
     )
     instance = InfraCommands.build(
-        async_proxmox_api, sandbox_env_config.node, sandbox_env_config.image_storage
+        async_proxmox_api, instance_config.node, sandbox_env_config.image_storage
     )
     InfraCommands.set_instance(target, instance)
     return instance
@@ -73,12 +98,10 @@ async def sdn_commands(infra_commands: InfraCommands) -> SdnCommands:
 @pytest.fixture
 async def storage_commands(
     async_proxmox_api: AsyncProxmoxAPI,
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
+    instance_config: ProxmoxInstanceConfig,
 ) -> LocalStorageCommands:
     task_wrapper = TaskWrapper(async_proxmox_api)
-    return LocalStorageCommands(
-        async_proxmox_api, sandbox_env_config.node, task_wrapper
-    )
+    return LocalStorageCommands(async_proxmox_api, instance_config.node, task_wrapper)
 
 
 @pytest.fixture

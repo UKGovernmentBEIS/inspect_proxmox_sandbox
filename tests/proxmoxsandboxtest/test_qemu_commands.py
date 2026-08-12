@@ -15,6 +15,8 @@ from proxmoxsandbox.schema import (
 
 CURRENT_DIR = Path(__file__).parent  # noqa: F821
 
+pytestmark = pytest.mark.req_proxmox
+
 
 async def test_simple_vm_non_sandbox(
     qemu_commands: QemuCommands,
@@ -35,6 +37,7 @@ async def test_simple_vm_non_sandbox(
             uefi_boot=False,
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -64,6 +67,7 @@ async def test_none_nic_from_template_tag(
             nics=None,
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -91,6 +95,7 @@ async def test_empty_nic_from_template_tag(
             nics=(),
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -115,6 +120,7 @@ async def test_none_nic_from_built_in(
             nics=None,
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -154,6 +160,7 @@ async def test_existing_alias_from_built_in(
             ),
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -194,6 +201,7 @@ async def test_multiple_nic(
             nics=(VmNicConfig(vnet_alias="vnetB"), VmNicConfig(vnet_alias="vnetA")),
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
@@ -224,12 +232,83 @@ async def test_empty_nic_from_built_in(
             nics=(),
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
     assert "net0" not in new_vm
 
     await qemu_commands.destroy_vm(new_vm_id)
+
+
+async def test_disk_controller_match_from_built_in(
+    qemu_commands: QemuCommands,
+    auto_sdn_vnet_aliases: VnetAliases,
+    built_in_vm: BuiltInVM,
+):
+    built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
+
+    await built_in_vm.ensure_exists("ubuntu24.04")
+
+    # Built-ins are created on scsi, so requesting "scsi" must be accepted and
+    # the clone must still come out on scsi.
+    new_vm_id = await qemu_commands.create_and_start_vm(
+        sdn_vnet_aliases=auto_sdn_vnet_aliases,
+        vm_config=VmConfig(
+            vm_source_config=built_in_ubuntu,
+            disk_controller="scsi",
+            is_sandbox=False,
+        ),
+        built_in_vm_ids=await built_in_vm.known_builtins(),
+        wait_until_ready=False,
+    )
+
+    new_vm = await qemu_commands.read_vm(new_vm_id)
+    assert "scsi0" in new_vm
+
+    await qemu_commands.destroy_vm(new_vm_id)
+
+
+async def test_disk_controller_mismatch_from_built_in_raises(
+    qemu_commands: QemuCommands,
+    built_in_vm: BuiltInVM,
+):
+    built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
+
+    await built_in_vm.ensure_exists("ubuntu24.04")
+
+    # Built-ins are scsi, so requesting "ide" is unsatisfiable and must raise
+    # before any VM is created (hence no cleanup needed).
+    with pytest.raises(ValueError, match="disk_controller"):
+        await qemu_commands.create_and_start_vm(
+            sdn_vnet_aliases=[],
+            vm_config=VmConfig(
+                vm_source_config=built_in_ubuntu,
+                disk_controller="ide",
+            ),
+            built_in_vm_ids=await built_in_vm.known_builtins(),
+            wait_until_ready=False,
+        )
+
+
+async def test_disk_controller_mismatch_from_template_tag_raises(
+    qemu_commands: QemuCommands,
+    built_in_vm: BuiltInVM,
+):
+    await built_in_vm.ensure_exists("ubuntu24.04")
+
+    with pytest.raises(ValueError, match="disk_controller"):
+        await qemu_commands.create_and_start_vm(
+            sdn_vnet_aliases=[],
+            vm_config=VmConfig(
+                vm_source_config=VmSourceConfig(
+                    existing_vm_template_tag="builtin-ubuntu24.04"
+                ),
+                disk_controller="ide",
+            ),
+            built_in_vm_ids=await built_in_vm.known_builtins(),
+            wait_until_ready=False,
+        )
 
 
 async def test_from_ova_local(qemu_commands: QemuCommands):
@@ -247,6 +326,9 @@ async def test_from_ova_local(qemu_commands: QemuCommands):
             is_sandbox=True,
         ),
         built_in_vm_ids={},
+        # ping_qemu_agent below is a single call with no retry, so the guest
+        # agent must already be up by the time this returns
+        wait_until_ready=True,
     )
 
     await qemu_commands.ping_qemu_agent(new_vm_id)
@@ -273,6 +355,9 @@ async def test_from_ova_uefi_sandbox(qemu_commands: QemuCommands):
             is_sandbox=True,
         ),
         built_in_vm_ids={},
+        # ping_qemu_agent below is a single call with no retry, so the guest
+        # agent must already be up by the time this returns
+        wait_until_ready=True,
     )
 
     await qemu_commands.ping_qemu_agent(new_vm_id)
@@ -297,6 +382,9 @@ async def test_uefi(
             uefi_boot=True,
         ),
         built_in_vm_ids=await built_in_vm.known_builtins(),
+        # ping_qemu_agent below is a single call with no retry, so the guest
+        # agent must already be up by the time this returns
+        wait_until_ready=True,
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)

@@ -3,19 +3,13 @@
 import json
 import os
 import tempfile
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
-
-
-@pytest.fixture(autouse=True)
-def cleanup_infra_instances():
-    """Clear InfraCommands._instances after each test."""
-    yield
-    InfraCommands._instances.clear()
+from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 
 @pytest.fixture
@@ -84,10 +78,57 @@ async def test_cli_cleanup_all_instances(multi_instance_config_file):
 
     try:
         with (
-            patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"),
+            patch(
+                "proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"
+            ) as mock_proxmox_api,
             patch.object(InfraCommands, "build", side_effect=create_mock_infra),
         ):
             await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
+
+            mock_proxmox_api.from_instance_config.assert_has_calls(
+                [
+                    call(
+                        ProxmoxInstanceConfig(
+                            instance_id="server-1",
+                            pool_id="pool-a",
+                            host="10.0.1.10",
+                            port=8006,
+                            user="root",
+                            user_realm="pam",
+                            password="test",
+                            node="pve1",
+                            verify_tls=False,
+                        )
+                    ),
+                    call(
+                        ProxmoxInstanceConfig(
+                            instance_id="server-2",
+                            pool_id="pool-a",
+                            host="10.0.1.11",
+                            port=8006,
+                            user="root",
+                            user_realm="pam",
+                            password="test",
+                            node="pve2",
+                            verify_tls=False,
+                        )
+                    ),
+                    call(
+                        ProxmoxInstanceConfig(
+                            instance_id="server-3",
+                            pool_id="pool-b",
+                            host="10.0.1.20",
+                            port=8006,
+                            user="root",
+                            user_realm="pam",
+                            password="test",
+                            node="pve3",
+                            verify_tls=False,
+                        )
+                    ),
+                ]
+            )
+            assert mock_proxmox_api.from_instance_config.call_count == 3
 
             # Verify InfraCommands.build was called for each instance
             assert len(mock_infra_instances) == 3
@@ -103,7 +144,6 @@ async def test_cli_cleanup_all_instances(multi_instance_config_file):
     finally:
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -143,7 +183,6 @@ async def test_cli_cleanup_empty_config():
         os.unlink(temp_path)
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -213,7 +252,6 @@ async def test_cli_cleanup_handles_cleanup_error():
         os.unlink(temp_path)
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
 
 
 @pytest.mark.asyncio
@@ -276,4 +314,3 @@ async def test_cli_cleanup_pools_created_correctly():
         os.unlink(temp_path)
         if "PROXMOX_CONFIG_FILE" in os.environ:
             del os.environ["PROXMOX_CONFIG_FILE"]
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()

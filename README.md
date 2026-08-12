@@ -23,6 +23,8 @@ poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
 
 This plugin assumes you already have one or more Proxmox instances set up, and that you have admin access to them.
 
+Proxmox 9 or later is required; 9.2 or later is recommended for improvements in read_file.
+
 Your Proxmox instance(s) must allow additional storage types in `local` from the default.
 You can run this on your Proxmox node to configure them:
 
@@ -38,8 +40,9 @@ If you don't already have a Proxmox instance, see [CONTRIBUTING.md](CONTRIBUTING
 
 By default a sandbox VM can reach the Proxmox host's own services — the API
 (`pveproxy`, port 8006), SSH, etc. — via the SDN gateway, the `vmbr0` IP, or the
-host's external NIC. For cyber evals especially, you want those blocked so agents
-can't attack the Proxmox control plane.
+host's external NIC. Forwarded traffic can also reach cloud instance metadata
+services. For cyber evals especially, you want those blocked so agents can't
+attack the Proxmox or cloud control planes.
 
 This is **configured on the host at provisioning time, not by this library** — it
 needs the host's live routing table to know which interface external API/SSH
@@ -48,10 +51,19 @@ provisioning scripts in this repo (`scripts/virtualized_proxmox/build_proxmox_au
 and `scripts/ec2/userdata.sh`) set it up automatically, so hosts you create with
 them are isolated out of the box.
 
-If you provision Proxmox some other way, run these once **on the node**. They
-accept the management ports only on the default-route interface (where external
-callers arrive) and leave SDN DNS/DHCP open; sandbox VMs sit on other bridges and
-hit the default-deny policy:
+If you provision Proxmox some other way, configure equivalent persistent rules
+**on the node**. The Proxmox rules accept management ports only on the
+default-route interface (where external callers arrive) and leave SDN DNS/DHCP
+open. The remaining rules enforce RFC 3927 section 7: a router must not forward IPv4 link-local (`169.254.0.0/16`) traffic.
+Dropping it stops a sandbox guest reaching the host's
+cloud metadata service — and any other link-local endpoint. The
+destination drop goes in `raw PREROUTING` (host requests are `OUTPUT`, never
+`PREROUTING`, so the host keeps its own access); the source drop goes in
+`FORWARD`, **not** `PREROUTING`, so the host's own replies (e.g. an IMDS or
+`169.254.169.253` DNS response, delivered to `INPUT`) are left intact — a
+`raw PREROUTING -s` rule would drop them and break the host. 
+
+We also recommend disabling forwarding of IPv6 for VMs, unless you really know what you are doing.
 
 ```bash
 NIC=$(ip route show default | awk '{print $5}' | head -1)
@@ -62,7 +74,100 @@ pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto
 pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1
 pvesh set /nodes/$(hostname)/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
+iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
+iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
+sysctl -w net.ipv6.conf.default.disable_ipv6=1   # new SDN bridges come up v6-off
+if command -v ip6tables >/dev/null; then
+    ip6tables -w -C FORWARD -j DROP 2>/dev/null || ip6tables -w -A FORWARD -j DROP
+fi
 ```
+
+Most clouds (AWS, GCP, Azure, Oracle, DigitalOcean) serve metadata from
+`169.254.169.254`, covered above. Two providers sit outside the link-local
+range: **Alibaba Cloud** uses `100.100.100.200`, and **Azure** exposes the
+WireServer at `168.63.129.16` (guest-agent goal state / extension settings). On
+those clouds, add a `-d <ip>/32 -j DROP` raw-table rule for each — the host
+keeps access since its own traffic doesn't traverse `PREROUTING`.
+
+You must persist these rules across reboots (the bundled provisioning scripts do
+this, if you need an example.)
+
+These work under either firewall backend (`pve-firewall` or the nftables
+`proxmox-firewall`); the latter won't touch these chains. On `iptables-legacy`
+hosts they won't show in `nft list ruleset` — use `iptables -t raw -S` / `-S FORWARD`.
+
+### Optional egress lockdown
+
+The provisioning scripts also install but don't activate an egress lockdown
+for sandbox guests. When active, all traffic forwarded between guests and
+every interface carrying a default route is dropped, and the per-zone SDN
+`dnsmasq` instances are stopped from recursing to any upstream resolver.
+Together these close both direct egress and the DNS-resolution channel a guest
+could otherwise tunnel through (names no longer resolve beyond the internal
+vnets). Unaffected: guest↔guest traffic across vnets (it never crosses the
+management NIC) and the host's own egress and DNS (package installs, cloud
+agents, SSH).
+
+Guests must not need egress to boot: the built-in VM template bake (first use
+of a `built_in` image on a host) installs packages from inside the guest, so
+it must happen before the lockdown is applied. Sandbox VMs cloned from an
+already-baked template boot fine.
+
+The lockdown is gated on a marker file that provisioning doesn't create, so
+hosts are unrestricted by default. To restrict a running host:
+
+```bash
+touch /etc/inspect-proxmox-egress-lockdown
+systemctl start inspect-proxmox-egress-lockdown.service
+```
+
+To open it up again:
+
+```bash
+rm /etc/inspect-proxmox-egress-lockdown
+systemctl start inspect-proxmox-egress-lockdown.service
+```
+
+A systemd timer re-runs the lockdown every minute. Each run re-inserts the
+drop rules at the top of their chains and garbage-collects rules from earlier
+runs, so rules that another process removed or reordered (e.g. a firewall
+reload) are repaired within a minute, and removing the marker converges to a
+fully clean state without waiting for a reboot.
+
+The lockdown fails closed. If no default-route interface can be found, the
+script applies a blanket drop on all forwarded traffic — which also cuts
+guest↔guest traffic — and fails the unit. Any unit failure triggers a
+fail-deadly halt: `pveproxy` and `pvedaemon` are stopped and runtime-masked,
+taking the Proxmox API (and this library's ability to run samples on the host)
+down rather than risking guests with open egress. SSH is unaffected, so an
+operator can investigate with
+`journalctl -u inspect-proxmox-egress-lockdown.service` and recover with
+`systemctl unmask --runtime pveproxy.service pvedaemon.service && systemctl
+start pveproxy.service pvedaemon.service`; a reboot also clears the runtime
+mask.
+
+The drop rules live in the mangle table's `FORWARD` chain, which is evaluated
+before every filter-table rule, so activating the lockdown also cuts off guest
+connections that are already established (e.g. a download started beforehand).
+Neither firewall backend touches the mangle table, so there are no coexistence
+conflicts.
+
+The DNS side works by blanking the upstream resolver file (`/run/dnsmasq/resolv.conf`)
+the SDN `dnsmasq` instances forward through and reloading them, so they keep
+answering internal names but refuse everything else. The previous upstream is
+backed up and restored when the marker is removed, so opening the host back up
+also restores guest DNS. As a firewall backstop, host-originated `dnsmasq`
+traffic out of the default-route interfaces is also dropped, so upstream
+recursion stays blocked even if something rewrites the resolver file (it lives
+on tmpfs and is recreated at boot) before the timer re-blanks it.
+
+The lockdown is only a strong control for the SDN topology this library
+generates: it covers traffic forwarded between guest vnets and the host's
+default-route interfaces. Pre-existing bridges wired straight to other NICs,
+template VMs with extra network devices left attached, interfaces without a
+default route, and tunnels originating on the host itself are out of scope.
 
 ### Single Proxmox Instance
 
@@ -119,6 +224,12 @@ export PROXMOX_CONFIG_FILE=/path/to/instances.json
 
 Instances with the same `pool_id` form a pool. Each eval sample acquires one instance from its pool, uses it exclusively, and releases it back when done. Concurrency is automatically limited to the total number of instances.
 
+### Extra HTTP Headers
+
+`extra_headers` on an instance adds HTTP headers to every request sent to that instance's Proxmox API, including file uploads. See [`schema.py`](./src/proxmoxsandbox/schema.py) for details.
+
+Header values are treated as secrets and redacted from logs. The Proxmox authentication headers (`Cookie`, `CSRFPreventionToken`) cannot be overridden.
+
 ## Configuring
 
 Here is a full example sandbox configuration. 
@@ -159,6 +270,7 @@ sandbox=SandboxEnvironmentSpec(
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
                 cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
                 firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
+                await_before_next_vm=False, # optional, default is False, i.e. all VMs boot concurrently. Set to True if the VMs listed after this one need it to have booted first.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
                 # You can assign more than one, to give the VM more than one network interface.
                 # If you leave this blank, your VM will be assigned to the first VNet.

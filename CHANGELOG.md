@@ -3,7 +3,18 @@
 ## Unreleased
 
 - Security fix: anchor the ephemeral SDN zone regex so automatic cleanup cannot delete unrelated pre-existing zones whose names share a 7-character prefix with provider zones
-- Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process (e.g. `pkill -f`); it returns a failed `ExecResult` (`128+signal`, or `137` when the signal is unavailable) instead of raising a misleading `TimeoutError`
+- Enable extra custom headers in requests to Proxmox API.
+- Remove the unused single-instance fields (`host` etc.) from `ProxmoxSandboxEnvironmentConfig`; infrastructure is configured via `PROXMOX_CONFIG_FILE` or `PROXMOX_*` environment variables only. Passing these fields is now silently ignored (pydantic drops extra kwargs), and old `.eval` logs still deserialize.
+- Log the acquired pool instance (`host`/`port`/`node`) at `INFO`
+- Opt logger into `INFO` level for consistency with Inspect core
+- Prevent VMs from accessing cloud instance metadata credentials, disable IPv6 for sandbox guests (when using the bundled provisioning scripts)
+- Optional egress lockdown for sandbox guests (when using the bundled provisioning scripts): drops forwarded guest traffic and stops the SDN `dnsmasq` instances recursing upstream. Installed inert, so nothing changes until `/etc/inspect-proxmox-egress-lockdown` is created; see the README
+- Fix: guest file / command-output reads work again on Proxmox < 9.2.
+- Fix: reading a large or binary guest file / command output no longer crashes with HTTP 597 "Broken pipe" (on Proxmox >= 9.2).
+- Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs
+- Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
+- Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
+- Don't wait for a VM to reach "running" before starting the next one (just wait for all of them together at the end). Set `await_before_next_vm=True` on a `VmConfig` if later VMs depend on it having booted first
 
 ## 0.11.0 - 2026-06-01
 

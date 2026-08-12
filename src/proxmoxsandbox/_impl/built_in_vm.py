@@ -1,6 +1,5 @@
 import abc
 import os
-import re
 import subprocess
 import tempfile
 from io import BytesIO
@@ -90,19 +89,8 @@ class BuiltInVM(abc.ABC):
         Raises:
             ValueError: If the Proxmox version is below the required version
         """
-        release_string = self.async_proxmox.get_discovered_proxmox_version().release
-
-        # Parse version string (e.g., "8.2.2" or "9.0")
-        match = re.match(r"(\d+)\.(\d+)", release_string)
-        if not match:
-            raise ValueError(f"Could not parse Proxmox version: {release_string}")
-
-        major = int(match.group(1))
-        minor = int(match.group(2))
-
-        if major < required_major or (
-            major == required_major and minor < required_minor
-        ):
+        if not self.async_proxmox.release_at_least(required_major, required_minor):
+            release_string = self.async_proxmox.get_discovered_proxmox_version().release
             raise ValueError(
                 f"Proxmox version {release_string} does not meet minimum requirement "
                 f"{required_major}.{required_minor}"
@@ -290,12 +278,8 @@ runcmd:
             get_args(get_args(VmSourceConfig.model_fields["built_in"].annotation)[0])
         ):
             for existing_vm in existing_vms:
-                if (
-                    "tags" in existing_vm
-                    and "template" in existing_vm
-                    and existing_vm["template"] == 1
-                    and "inspect" in existing_vm["tags"].split(";")
-                    and f"builtin-{existing_vm_name}" in existing_vm["tags"].split(";")
+                if self.qemu_commands.vm_is_inspect(
+                    existing_vm, template=True, with_tag=f"builtin-{existing_vm_name}"
                 ):
                     found_builtins[existing_vm_name] = existing_vm["vmid"]
                     break
