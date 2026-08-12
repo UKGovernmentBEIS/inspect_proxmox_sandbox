@@ -33,7 +33,7 @@ from proxmoxsandbox._impl.async_proxmox import (
 # Exception: a 500 for a missing file, an unreadable file (e.g. "Is a
 # directory"), or a gone PID is surfaced immediately (it will not change on
 # retry); callers turn those into empty content / a disk fallback / an error.
-_QGA_MAX_RETRIES = 5
+_QGA_MAX_RETRIES = 25
 _QGA_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt, capped below
 _QGA_RETRY_MAX_DELAY = 20.0  # seconds
 
