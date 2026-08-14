@@ -28,6 +28,7 @@ def test_load_instances_from_file():
                 "password": "secret",
                 "node": "pve1",
                 "verify_tls": False,
+                "image_storage": "fast-storage",
             },
             {
                 "instance_id": "test-2",
@@ -70,6 +71,7 @@ def test_load_instances_from_file():
         assert instances[0].password.get_secret_value() == "secret"
         assert instances[0].node == "pve1"
         assert instances[0].verify_tls is False
+        assert instances[0].image_storage == "fast-storage"
 
         assert instances[1].instance_id == "test-2"
         assert instances[1].pool_id == "kali-pool"
@@ -106,6 +108,7 @@ def test_load_instances_from_env_vars():
         os.environ["PROXMOX_PASSWORD"] = "test123"
         os.environ["PROXMOX_NODE"] = "node1"
         os.environ["PROXMOX_VERIFY_TLS"] = "0"
+        os.environ["PROXMOX_IMAGE_STORAGE"] = "env-storage"
 
         instances = _load_instances_from_env_or_file()
 
@@ -119,6 +122,7 @@ def test_load_instances_from_env_vars():
         assert instances[0].password.get_secret_value() == "test123"
         assert instances[0].node == "node1"
         assert instances[0].verify_tls is False
+        assert instances[0].image_storage == "env-storage"
 
     finally:
         # Restore original environment
@@ -257,6 +261,7 @@ def test_sandbox_config_defaults():
     assert config.sdn_config == "auto"
     assert len(config.vms_config) == 1
     assert config.vms_config[0].vm_source_config.built_in == "ubuntu24.04"
+    assert not hasattr(config, "image_storage")
 
 
 def test_sandbox_config_explicit_pool_id():
