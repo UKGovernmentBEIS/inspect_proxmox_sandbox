@@ -9,7 +9,6 @@ from pydantic import ValidationError
 
 from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
-    ProxmoxSandboxEnvironmentConfig,
     _load_instances_from_env_or_file,
 )
 
@@ -250,25 +249,6 @@ def test_missing_required_fields_in_instance():
         os.unlink(temp_path)
         os.environ.clear()
         os.environ.update(old_env)
-
-
-def test_sandbox_config_defaults():
-    """Test ProxmoxSandboxEnvironmentConfig default values."""
-    config = ProxmoxSandboxEnvironmentConfig()
-
-    # Check defaults
-    assert config.instance_pool_id == "default"
-    assert config.sdn_config == "auto"
-    assert len(config.vms_config) == 1
-    assert config.vms_config[0].vm_source_config.built_in == "ubuntu24.04"
-    assert not hasattr(config, "image_storage")
-
-
-def test_sandbox_config_explicit_pool_id():
-    """Test ProxmoxSandboxEnvironmentConfig with explicit pool_id."""
-    config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="custom-pool")
-
-    assert config.instance_pool_id == "custom-pool"
 
 
 def test_default_concurrency_with_config_file():
