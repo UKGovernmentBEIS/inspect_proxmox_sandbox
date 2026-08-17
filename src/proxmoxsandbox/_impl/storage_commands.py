@@ -1,8 +1,9 @@
 """Proxmox's built-in directory storage at /var/lib/vz, always available."""
 
 import abc
+import time
 from collections.abc import Awaitable, Callable
-from logging import getLogger
+from logging import Logger, getLogger
 from pathlib import Path, PurePosixPath
 from typing import Any, List, Literal, Optional
 from urllib.parse import quote
@@ -14,6 +15,35 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 
 LOCAL_STORAGE = "local"
+
+MIN_DOWNLOAD_TIMEOUT_SECONDS = 1200
+"""Floor for host download timeouts, generous enough for any small file."""
+
+ASSUMED_DOWNLOAD_BYTES_PER_SECOND = 5 * 1024 * 1024
+"""Pessimistic host download rate, used to derive a timeout from a file size.
+
+Deliberately well below what a healthy host achieves: the timeout is a backstop
+for a stuck download, and a download that has actually failed is detected from
+its task status rather than by waiting this out.
+"""
+
+
+def download_timeout_for_size(size_bytes: Optional[int]) -> int:
+    """A download timeout that a slow-but-working host can still meet.
+
+    A fixed timeout is a trap for large files: a multi-GB OVA can spend twenty
+    minutes downloading and be perfectly healthy.
+    """
+    if size_bytes is None:
+        return MIN_DOWNLOAD_TIMEOUT_SECONDS
+    return max(
+        MIN_DOWNLOAD_TIMEOUT_SECONDS,
+        int(size_bytes / ASSUMED_DOWNLOAD_BYTES_PER_SECOND),
+    )
+
+
+class DownloadIncompleteError(Exception):
+    """The host's download task is still running. Retryable."""
 
 
 class LocalStorageCommands(abc.ABC):
@@ -98,7 +128,8 @@ class LocalStorageCommands(abc.ABC):
         content_type: Literal["iso", "vztmpl", "import"],
         filename: str,
         size_check: int | None = None,
-        timeout_seconds: int = 1200,
+        timeout_seconds: Optional[int] = None,
+        progress_log_seconds: float = 60,
     ) -> None:
         """Have the Proxmox host download a file from a URL into local storage.
 
@@ -115,10 +146,19 @@ class LocalStorageCommands(abc.ABC):
             size_check: If provided, also check file size before deciding the file is
                 already present.
             timeout_seconds: How long to wait for the download to appear in storage.
+                Defaults to download_timeout_for_size(size_check).
+            progress_log_seconds: How often to log the host's download progress while
+                waiting.
 
-        Returns:
-            The Proxmox storage content metadata for the stored file.
+        Raises:
+            ValueError: if the host's download task failed, or the downloaded file
+                has the wrong size.
+            TimeoutError: if the download didn't finish in time. The message reports
+                how far the host got, which is otherwise lost when the host is torn
+                down after the failure.
         """
+        if timeout_seconds is None:
+            timeout_seconds = download_timeout_for_size(size_check)
 
         async def get_file() -> None:
             with trace_action(
@@ -126,7 +166,7 @@ class LocalStorageCommands(abc.ABC):
                 self.TRACE_NAME,
                 f"download-url {filename} to storage",
             ):
-                await self.async_proxmox.request(
+                upid = await self.async_proxmox.request(
                     "POST",
                     f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/download-url",
                     json={
@@ -136,14 +176,37 @@ class LocalStorageCommands(abc.ABC):
                     },
                 )
 
+                self.logger.info(
+                    f"Host is downloading {filename}"
+                    + (f" ({size_check} bytes)" if size_check is not None else "")
+                    + f"; waiting up to {timeout_seconds}s"
+                )
+
+                progress = _DownloadProgress(
+                    async_proxmox=self.async_proxmox,
+                    node=self.node,
+                    upid=upid,
+                    filename=filename,
+                    logger=self.logger,
+                    log_every_seconds=progress_log_seconds,
+                )
+
                 @tenacity.retry(
                     wait=tenacity.wait_exponential(exp_base=1.3, max=10),
                     stop=tenacity.stop_after_delay(timeout_seconds),
+                    retry=tenacity.retry_if_exception_type(DownloadIncompleteError),
                 )
                 async def download_complete():
                     downloaded_content = await self._content(content_type, filename)
                     if downloaded_content is None:
-                        raise ValueError("download not yet complete")
+                        # A part-downloaded file is invisible in the storage listing
+                        # (the host downloads to a temp file), so the task is our only
+                        # window on it -- both for progress, and to notice a download
+                        # that has already failed rather than waiting out the timeout.
+                        await progress.check_and_log()
+                        raise DownloadIncompleteError(
+                            f"download of {filename} not yet complete"
+                        )
                     file_size = downloaded_content.get("size")
                     # Don't pass size_check to self._content, which won't distinguish
                     # between "file is not present" and "file is present but size
@@ -154,7 +217,15 @@ class LocalStorageCommands(abc.ABC):
                             f"expected {size_check}, got {file_size}"
                         )
 
-                return await download_complete()
+                try:
+                    return await download_complete()
+                except tenacity.RetryError as retry_error:
+                    raise TimeoutError(
+                        f"Timed out after {timeout_seconds}s waiting for the host to"
+                        f" download {filename}"
+                        + (f" ({size_check} bytes)" if size_check is not None else "")
+                        + f". {await progress.describe()}"
+                    ) from retry_error
 
         await self.put_file_in_storage(
             get_file=get_file,
@@ -214,3 +285,106 @@ class LocalStorageCommands(abc.ABC):
         return await self.async_proxmox.request(
             "GET", f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content"
         )
+
+
+class _DownloadProgress:
+    """Watches the Proxmox worker task behind a download-url request.
+
+    Proxmox reports download progress only in that task's log, so we tail it:
+    periodically while waiting, and again when reporting a failure or timeout. A
+    timed-out download otherwise leaves no record of how far it got -- the host
+    may well be torn down before anyone can look.
+    """
+
+    def __init__(
+        self,
+        async_proxmox: AsyncProxmoxAPI,
+        node: str,
+        upid: Any,
+        filename: str,
+        logger: Logger,
+        log_every_seconds: float,
+    ) -> None:
+        self.async_proxmox = async_proxmox
+        self.node = node
+        # download-url returns the worker's UPID, but progress reporting isn't worth
+        # failing a download over, so tolerate not getting one.
+        self.upid: Optional[str] = upid if isinstance(upid, str) else None
+        self.filename = filename
+        self.logger = logger
+        self.log_every_seconds = log_every_seconds
+        self.last_logged_at: Optional[float] = None
+        self.last_log_line: Optional[str] = None
+        self.next_log_line = 0
+
+    async def check_and_log(self) -> None:
+        """Log progress periodically, and raise if the download has already failed.
+
+        Raises:
+            ValueError: if the host's download task stopped unsuccessfully.
+        """
+        if self.upid is None:
+            return
+
+        status = await self._status()
+        exit_status = status.get("exitstatus")
+        if exit_status is not None and exit_status != "OK":
+            raise ValueError(
+                f"Host download of {self.filename} failed: {exit_status}."
+                f" {await self.describe()}"
+            )
+
+        now = time.monotonic()
+        if (
+            self.last_logged_at is not None
+            and now - self.last_logged_at < self.log_every_seconds
+        ):
+            return
+        self.last_logged_at = now
+
+        await self._read_new_log_lines()
+        self.logger.info(f"Downloading {self.filename}: {self._last_progress()}")
+
+    async def describe(self) -> str:
+        """Best-effort summary of how far the host's download got."""
+        if self.upid is None:
+            return "No download task id was returned, so no progress is available."
+        try:
+            status = await self._status()
+            await self._read_new_log_lines()
+        except Exception as read_error:
+            return f"Couldn't read download task {self.upid}: {read_error!r}"
+        return (
+            f"Download task {self.upid} status={status.get('status')!r}"
+            f" exitstatus={status.get('exitstatus')!r};"
+            f" last progress: {self._last_progress()}"
+        )
+
+    def _last_progress(self) -> str:
+        return self.last_log_line or "(the task has logged no output yet)"
+
+    async def _status(self) -> dict[str, Any]:
+        if self.upid is None:
+            return {}
+        return (
+            await self.async_proxmox.request(
+                "GET", f"/nodes/{self.node}/tasks/{quote(self.upid, safe='')}/status"
+            )
+            or {}
+        )
+
+    async def _read_new_log_lines(self) -> None:
+        if self.upid is None:
+            return
+        entries = await self.async_proxmox.request(
+            "GET",
+            f"/nodes/{self.node}/tasks/{quote(self.upid, safe='')}/log"
+            f"?start={self.next_log_line}&limit=1000",
+        )
+        for entry in entries or []:
+            text = (entry.get("t") or "").strip()
+            if text:
+                self.last_log_line = text
+            # `n` is the line's 1-based index, so it's also the 0-based offset of
+            # the next line: use it as the start of the next read.
+            self.next_log_line = max(self.next_log_line, entry.get("n", 0))
