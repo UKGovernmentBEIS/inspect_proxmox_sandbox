@@ -75,7 +75,7 @@ async def sandbox_env(
     return proxmox_env
 
 
-async def test_read_and_write_large_file_binary(
+async def test_read_and_write_large_file_binary(  # type: ignore[no-redef]
     sandbox_env: SandboxEnvironment,
 ) -> None:
     # Shadows the portable check (same name wins at collection). Proxmox's QGA
