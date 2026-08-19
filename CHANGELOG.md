@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Host URL downloads (e.g. of an OVA) scale their timeout to the file size rather than always allowing 20 minutes, log the host's progress every minute, fail as soon as the host's download task fails, and report how far the download got if they do time out
+- Add `ova_url` variant to `VmSourceConfig`, allowing an OVA to be downloaded from somewhere other than the Inspect box
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
 - Move the `image_storage` field from `ProxmoxSandboxEnvironmentConfig` to `ProxmoxInstanceConfig`.
