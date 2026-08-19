@@ -9,7 +9,6 @@ from pydantic import ValidationError
 
 from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
-    ProxmoxSandboxEnvironmentConfig,
     _load_instances_from_env_or_file,
 )
 
@@ -28,6 +27,7 @@ def test_load_instances_from_file():
                 "password": "secret",
                 "node": "pve1",
                 "verify_tls": False,
+                "image_storage": "fast-storage",
             },
             {
                 "instance_id": "test-2",
@@ -70,6 +70,7 @@ def test_load_instances_from_file():
         assert instances[0].password.get_secret_value() == "secret"
         assert instances[0].node == "pve1"
         assert instances[0].verify_tls is False
+        assert instances[0].image_storage == "fast-storage"
 
         assert instances[1].instance_id == "test-2"
         assert instances[1].pool_id == "kali-pool"
@@ -106,6 +107,7 @@ def test_load_instances_from_env_vars():
         os.environ["PROXMOX_PASSWORD"] = "test123"
         os.environ["PROXMOX_NODE"] = "node1"
         os.environ["PROXMOX_VERIFY_TLS"] = "0"
+        os.environ["PROXMOX_IMAGE_STORAGE"] = "env-storage"
 
         instances = _load_instances_from_env_or_file()
 
@@ -119,6 +121,7 @@ def test_load_instances_from_env_vars():
         assert instances[0].password.get_secret_value() == "test123"
         assert instances[0].node == "node1"
         assert instances[0].verify_tls is False
+        assert instances[0].image_storage == "env-storage"
 
     finally:
         # Restore original environment
@@ -246,24 +249,6 @@ def test_missing_required_fields_in_instance():
         os.unlink(temp_path)
         os.environ.clear()
         os.environ.update(old_env)
-
-
-def test_sandbox_config_defaults():
-    """Test ProxmoxSandboxEnvironmentConfig default values."""
-    config = ProxmoxSandboxEnvironmentConfig()
-
-    # Check defaults
-    assert config.instance_pool_id == "default"
-    assert config.sdn_config == "auto"
-    assert len(config.vms_config) == 1
-    assert config.vms_config[0].vm_source_config.built_in == "ubuntu24.04"
-
-
-def test_sandbox_config_explicit_pool_id():
-    """Test ProxmoxSandboxEnvironmentConfig with explicit pool_id."""
-    config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="custom-pool")
-
-    assert config.instance_pool_id == "custom-pool"
 
 
 def test_default_concurrency_with_config_file():

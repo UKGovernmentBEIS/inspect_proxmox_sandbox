@@ -205,6 +205,7 @@ export PROXMOX_CONFIG_FILE=/path/to/instances.json
       "user_realm": "pam",
       "password": "secret",
       "node": "pve1",
+      "image_storage": "local-lvm",
       "verify_tls": false
     },
     {
@@ -216,6 +217,7 @@ export PROXMOX_CONFIG_FILE=/path/to/instances.json
       "user_realm": "pam",
       "password": "secret",
       "node": "pve2",
+      "image_storage": "local-lvm",
       "verify_tls": false
     }
   ]
@@ -246,10 +248,6 @@ At least one VM in the configuration must be a sandbox.
 sandbox=SandboxEnvironmentSpec(
     "proxmox",
     ProxmoxSandboxEnvironmentConfig(
-        # Storage pool for VM disk images. Defaults to PROXMOX_IMAGE_STORAGE env var
-        # or "local-lvm" if not set.
-        image_storage="local-lvm",
-
         # When using PROXMOX_CONFIG_FILE with multiple instances, set this to select
         # which pool to use (must match a pool_id in the config file).
         # Not needed for single-instance setups.
