@@ -4,6 +4,7 @@
 
 - Every VM now gets a serial port (`serial0: socket`)
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
+- Add `ova_url` variant to `VmSourceConfig`, allowing an OVA to be downloaded from somewhere other than the Inspect box
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
 - Move the `image_storage` field from `ProxmoxSandboxEnvironmentConfig` to `ProxmoxInstanceConfig`.
