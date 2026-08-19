@@ -16,7 +16,7 @@ from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 
 LOCAL_STORAGE = "local"
 
-MIN_DOWNLOAD_TIMEOUT_SECONDS = 1200
+MIN_DOWNLOAD_TIMEOUT_SECONDS = 120
 """Floor for host download timeouts, generous enough for any small file."""
 
 ASSUMED_DOWNLOAD_BYTES_PER_SECOND = 5 * 1024 * 1024
