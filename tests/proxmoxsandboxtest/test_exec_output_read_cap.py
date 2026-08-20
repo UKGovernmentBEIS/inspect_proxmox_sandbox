@@ -1,10 +1,10 @@
 """Exec-output reads stay under PVE's agent/file-read cap.
 
-Inspect's sandbox service wraps its request read in
+`sandbox_service()` wraps every request read in
 `override_max_exec_output_size(SERVICE_REQUEST_READ_OUTPUT_LIMIT)` — 150 MiB,
 nearly 10x PVE's 16 MiB cap on `count`. Passing that straight through makes PVE
-400 every poll, which stalls the service (and so `sandbox_agent_bridge`) with no
-useful error. These tests drive the read helpers with mocked QGA collaborators.
+400 on each poll, so no request is ever read, whatever its size. These tests
+drive the read helpers with mocked QGA collaborators.
 """
 
 from typing import cast
@@ -41,7 +41,7 @@ def _count(env: ProxmoxSandboxEnvironment) -> int:
     return int(read.await_args.kwargs["count"])
 
 
-# The service's override is the real trigger; the default limit is included so
+# The service's override is the trigger; the default limit is included so
 # the clamp can't be "fixed" by hardcoding 16 MiB and losing a lower limit.
 @pytest.mark.parametrize(
     "override",

@@ -62,8 +62,8 @@ _IN_GUEST_KILL_GRACE = 5
 # PVE rejects an agent/file-read with `count` above this ("value must have a
 # maximum value of 16777216"), so every read count must be clamped to it —
 # including ones derived from Inspect limits, which callers can raise above it.
-# override_max_exec_output_size() does exactly that when the sandbox service
-# reads a bridge request, which used to 400 every poll and stall the bridge.
+# sandbox_service() raises MAX_EXEC_OUTPUT_SIZE to 150 MiB for every request
+# read (override_max_exec_output_size), which used to 400 on each poll.
 _PVE_AGENT_FILE_READ_MAX = 16 * 1024**2
 _PVE_AGENT_FILE_READ_MAX_STR = "16 MiB"
 
