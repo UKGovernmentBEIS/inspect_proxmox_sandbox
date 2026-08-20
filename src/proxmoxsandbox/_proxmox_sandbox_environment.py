@@ -641,6 +641,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 "[blue]inspect sandbox cleanup proxmox[/blue]\n"
             )
 
+        # The InfraCommands registry outlives the task; drop the pooled HTTP
+        # connections (a later task lazily reconnects).
+        for target, infra_commands in InfraCommands._instances.items():
+            try:
+                await infra_commands.async_proxmox.aclose()
+            except Exception as e:
+                cls.logger.warning(f"closing API client failed for {target}: {e}")
+
     @classmethod
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
@@ -653,7 +661,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     instance.node,
                     instance.image_storage,
                 )
-                await infra_commands.cleanup_no_id()
+                try:
+                    await infra_commands.cleanup_no_id()
+                finally:
+                    await async_proxmox_api.aclose()
         else:
             print("\n[red]Cleanup by ID not implemented[/red]\n")
 
