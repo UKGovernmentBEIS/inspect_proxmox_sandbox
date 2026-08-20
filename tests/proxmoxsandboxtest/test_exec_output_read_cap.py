@@ -45,7 +45,7 @@ def _count(env: ProxmoxSandboxEnvironment) -> int:
 # the clamp can't be "fixed" by hardcoding 16 MiB and losing a lower limit.
 @pytest.mark.parametrize(
     "override",
-    [None, SERVICE_REQUEST_READ_OUTPUT_LIMIT, mod._PVE_AGENT_FILE_READ_MAX + 1],
+    [None, SERVICE_REQUEST_READ_OUTPUT_LIMIT, mod._PVE_FILE_READ_MAX + 1],
     ids=["default", "service-request-limit", "one-over-cap"],
 )
 async def test_exec_output_read_count_never_exceeds_pve_cap(
@@ -58,7 +58,7 @@ async def test_exec_output_read_count_never_exceeds_pve_cap(
         with override_max_exec_output_size(override):
             await env._read_exec_output("/tmp/out")
 
-    assert _count(env) <= mod._PVE_AGENT_FILE_READ_MAX
+    assert _count(env) <= mod._PVE_FILE_READ_MAX
 
 
 async def test_return_code_read_count_never_exceeds_pve_cap() -> None:
@@ -66,7 +66,7 @@ async def test_return_code_read_count_never_exceeds_pve_cap() -> None:
     with override_max_exec_output_size(SERVICE_REQUEST_READ_OUTPUT_LIMIT):
         await env._read_return_code("/tmp/")
 
-    assert _count(env) <= mod._PVE_AGENT_FILE_READ_MAX
+    assert _count(env) <= mod._PVE_FILE_READ_MAX
 
 
 async def test_low_limit_is_still_honoured() -> None:
@@ -84,7 +84,7 @@ async def test_truncation_reports_whichever_limit_bit() -> None:
     with override_max_exec_output_size(SERVICE_REQUEST_READ_OUTPUT_LIMIT):
         with pytest.raises(OutputLimitExceededError) as over_cap:
             await env._read_exec_output("/tmp/out")
-    assert mod._PVE_AGENT_FILE_READ_MAX_STR in str(over_cap.value)
+    assert mod._PVE_FILE_READ_MAX_STR in str(over_cap.value)
 
     with pytest.raises(OutputLimitExceededError) as under_cap:
         await env._read_exec_output("/tmp/out")

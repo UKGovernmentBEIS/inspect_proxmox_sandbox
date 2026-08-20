@@ -64,8 +64,8 @@ _IN_GUEST_KILL_GRACE = 5
 # including ones derived from Inspect limits, which callers can raise above it.
 # sandbox_service() raises MAX_EXEC_OUTPUT_SIZE to 150 MiB for every request
 # read (override_max_exec_output_size), which used to 400 on each poll.
-_PVE_AGENT_FILE_READ_MAX = 16 * 1024**2
-_PVE_AGENT_FILE_READ_MAX_STR = "16 MiB"
+_PVE_FILE_READ_MAX = 16 * 1024**2
+_PVE_FILE_READ_MAX_STR = "16 MiB"
 
 
 def _split_chunks(
@@ -892,7 +892,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             filepath=f"{tmp_start}script.returncode",
             count=min(
                 SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
-                _PVE_AGENT_FILE_READ_MAX,
+                _PVE_FILE_READ_MAX,
             ),
         )
         returncode_string_stripped = raw.decode("utf-8", errors="replace").strip()
@@ -904,7 +904,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # decode=0 gives raw bytes; decode UTF-8 errors="replace" (output is
         # arbitrary bytes). Oversized output is flagged via `truncated`.
         limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
-        cap = min(limit, _PVE_AGENT_FILE_READ_MAX)
+        cap = min(limit, _PVE_FILE_READ_MAX)
         raw, truncated = await self.agent_commands.read_file_capped_or_blank(
             vm_id=self.vm_id,
             filepath=filepath,
@@ -914,8 +914,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         if truncated:
             raise OutputLimitExceededError(
                 SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR
-                if limit <= _PVE_AGENT_FILE_READ_MAX
-                else _PVE_AGENT_FILE_READ_MAX_STR,
+                if limit <= _PVE_FILE_READ_MAX
+                else _PVE_FILE_READ_MAX_STR,
                 text,
             )
         return text
@@ -1180,7 +1180,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             raise ValueError("VM ID is not set")
         # PVE caps agent file-read at 16 MiB; cap at the (test-overridable)
         # Inspect limit, never above that.
-        cap = min(SandboxEnvironmentLimits.MAX_READ_FILE_SIZE, _PVE_AGENT_FILE_READ_MAX)
+        cap = min(SandboxEnvironmentLimits.MAX_READ_FILE_SIZE, _PVE_FILE_READ_MAX)
         try:
             data_bytes, truncated = await self.agent_commands.read_file_capped(
                 vm_id=self.vm_id,
@@ -1205,9 +1205,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             # File exceeds the cap; report the active limit (16 MiB or a test override).
             limit_str = (
                 SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR
-                if SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
-                <= _PVE_AGENT_FILE_READ_MAX
-                else _PVE_AGENT_FILE_READ_MAX_STR
+                if SandboxEnvironmentLimits.MAX_READ_FILE_SIZE <= _PVE_FILE_READ_MAX
+                else _PVE_FILE_READ_MAX_STR
             )
             raise OutputLimitExceededError(limit_str, None)
         if text:
