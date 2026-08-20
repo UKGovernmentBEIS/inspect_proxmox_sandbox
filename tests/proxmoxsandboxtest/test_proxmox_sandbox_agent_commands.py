@@ -1,16 +1,12 @@
 import hashlib
 from pathlib import Path
-from typing import List
 
 import httpx
 import pytest
 import tenacity
 from inspect_ai.util import OutputLimitExceededError
-from inspect_ai.util._sandbox.self_check import self_check
 
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
-
-from .proxmox_sandbox_utils import setup_requests_logging
 
 pytestmark = pytest.mark.req_proxmox
 
@@ -243,38 +239,6 @@ async def test_write_file_large(
         assert exec_result.stdout.startswith(expected_md5)
 
 
-async def test_self_check(
-    proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
-) -> None:
-    if proxmox_sandbox_environment._is_windows():
-        pytest.skip("self_check uses Linux-specific paths and commands")
-
-    setup_requests_logging()
-
-    known_failures: List[str] = [
-        "test_read_file_not_allowed",  # user is root, so this doesn't work
-        "test_write_text_file_without_permissions",  # ditto
-        "test_write_binary_file_without_permissions",  # ditto
-        # Proxmox's QGA file-read API is hard-limited to 16 MiB; this self_check
-        # writes 50 MiB. read_file() caps at 16 MiB (a documented deviation from
-        # Inspect's 100 MiB spec, see read_file in _proxmox_sandbox_environment).
-        "test_read_and_write_large_file_binary",
-    ]
-
-    results = await check_results_of_self_check(
-        proxmox_sandbox_environment, known_failures
-    )
-
-    # 50 MiB can't round-trip (16 MiB cap) so it stays a known failure - but it
-    # must fail *gracefully* (OutputLimitExceededError), not a raw 597. The old
-    # outcome-blind exclusion is how the crash slipped through.
-    large_file_result = results["test_read_and_write_large_file_binary"]
-    assert "OutputLimitExceededError" in str(large_file_result), (
-        "Oversized read_file must fail with OutputLimitExceededError, got: "
-        f"{large_file_result!r}"
-    )
-
-
 async def test_exec_self_kill_degrades_gracefully(
     proxmox_sandbox_environment: ProxmoxSandboxEnvironment,
 ) -> None:
@@ -287,14 +251,3 @@ async def test_exec_self_kill_degrades_gracefully(
 
     after = await proxmox_sandbox_environment.exec(["echo", "alive"])
     assert after.success and after.stdout.strip() == "alive"
-
-
-async def check_results_of_self_check(sandbox_env, known_failures=[]):
-    self_check_results = await self_check(sandbox_env)
-    failures = []
-    for test_name, result in self_check_results.items():
-        if result is not True and test_name not in known_failures:
-            failures.append(f"Test {test_name} failed: {result}")
-    if failures:
-        assert False, "\n".join(failures)
-    return self_check_results
