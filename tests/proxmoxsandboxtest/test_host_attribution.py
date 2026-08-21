@@ -45,11 +45,11 @@ async def test_provider_logger_opted_into_info(reset_log_levels):
 
 @pytest.mark.asyncio
 async def test_lower_root_level_is_not_overridden(reset_log_levels):
-    """With root set below INFO, task_init enables the logger for that level."""
+    """With root set below INFO, task_init sets the logger to that lower level."""
     os.environ["PROXMOX_HOST"] = ENV_SENTINEL_HOST
     logging.getLogger().setLevel(logging.DEBUG)
     await ProxmoxSandboxEnvironment.task_init("test_task", None)
-    assert logging.getLogger(LOGGER_NAME).isEnabledFor(logging.DEBUG)
+    assert logging.getLogger("proxmoxsandbox").level == logging.DEBUG
 
 
 def _make_mock_infra():
