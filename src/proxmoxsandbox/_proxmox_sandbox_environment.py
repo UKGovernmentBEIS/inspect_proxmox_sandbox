@@ -233,7 +233,17 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     ) -> str:
         def generate() -> Generator[str, None, None]:
             if user is not None:
+                # su -l starts a login shell, which changes to the user's home
+                # directory. Without this the working directory of an exec would
+                # depend on which user it ran as, so a relative path written by
+                # one user is not found by another. Record the directory outside
+                # the heredoc and restore it inside, unless an explicit cwd is
+                # about to override it anyway.
+                if cwd is None:
+                    yield f"pwd > {tmp_start}script.cwd\n"
                 yield f"su -l {shlex.quote(user)} << 'EOF{tmp_start}EOF'\n"
+                if cwd is None:
+                    yield f'cd "$(cat {tmp_start}script.cwd)" || exit $?\n'
             # The rest of the script gets quoted in a heredoc if we had to use su
             if cwd is not None:
                 yield f"cd {shlex.quote(cwd)} || exit $?\n"
