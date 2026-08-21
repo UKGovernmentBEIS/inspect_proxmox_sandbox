@@ -354,3 +354,20 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     vms_config: Tuple[VmConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
+
+
+class ExistingProxmoxSandboxEnvironmentConfig(BaseModel):
+    """Configuration for attaching Inspect to an existing Proxmox VM.
+
+    The existing-VM provider does not own the VM or any of its networking and
+    will never provision or clean up Proxmox resources.
+
+    Attributes:
+        instance_pool_id: Pool containing the Proxmox host for the existing VM.
+        vm_id: ID of the running VM that should be exposed as the default sandbox.
+    """
+
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
+
+    instance_pool_id: str = "default"
+    vm_id: int = Field(gt=0)

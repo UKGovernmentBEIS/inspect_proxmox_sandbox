@@ -21,6 +21,7 @@ dependencies = [
 
 [project.entry-points."inspect_ai"]
 "proxmox-sandbox" = "proxmoxsandbox._proxmox_sandbox_environment"
+"proxmox-existing-sandbox" = "proxmoxsandbox._existing_proxmox_sandbox_environment"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
