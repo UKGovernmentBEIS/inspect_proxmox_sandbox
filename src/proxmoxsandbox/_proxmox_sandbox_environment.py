@@ -289,18 +289,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
     @classmethod
     def _init_package_log_level(cls) -> None:
-        """Set the package logger to INFO, or to the root's level if that is lower.
+        """Set the package logger to INFO, or the root's level if lower.
 
-        Inspect configures only its own package loggers, so `proxmoxsandbox`
-        would otherwise inherit the root level and lose its INFO records from
-        the .eval transcript. INFO is the floor; `--log-level debug/trace`
-        lowers the root below it and wins.
-
-        Runs from the lifecycle entry points because it must happen after
-        Inspect's `init_logger`. Extensions are imported earlier, during
-        `platform_init()`, while the root logger is still at its default.
-        Skipped when a level is already set, so a host application's choice
-        stands.
+        Must run after Inspect's `init_logger`; extensions are imported
+        earlier, during `platform_init()`, when the root is still at its
+        default.
         """
         if getLogger("proxmoxsandbox").level == NOTSET:
             getLogger("proxmoxsandbox").setLevel(

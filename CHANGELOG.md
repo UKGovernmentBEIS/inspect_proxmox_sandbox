@@ -6,7 +6,7 @@
 - Enable extra custom headers in requests to Proxmox API.
 - Remove the unused single-instance fields (`host` etc.) from `ProxmoxSandboxEnvironmentConfig`; infrastructure is configured via `PROXMOX_CONFIG_FILE` or `PROXMOX_*` environment variables only. Passing these fields is now silently ignored (pydantic drops extra kwargs), and old `.eval` logs still deserialize.
 - Log the acquired pool instance (`host`/`port`/`node`) at `INFO`
-- Opt logger into `INFO` level for consistency with Inspect core, without suppressing `debug`/`trace` output when a lower `--log-level` is set
+- Opt logger into `INFO` level for consistency with Inspect core, also supporting `debug`/`trace` output when a lower `--log-level` is set
 - Prevent VMs from accessing cloud instance metadata credentials, disable IPv6 for sandbox guests (when using the bundled provisioning scripts)
 - Optional egress lockdown for sandbox guests (when using the bundled provisioning scripts): drops forwarded guest traffic and stops the SDN `dnsmasq` instances recursing upstream. Installed inert, so nothing changes until `/etc/inspect-proxmox-egress-lockdown` is created; see the README
 - Fix: guest file / command-output reads work again on Proxmox < 9.2.
