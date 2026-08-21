@@ -75,7 +75,6 @@ async def async_proxmox_api(
 @pytest.fixture
 async def infra_commands(
     async_proxmox_api: AsyncProxmoxAPI,
-    sandbox_env_config: ProxmoxSandboxEnvironmentConfig,
     instance_config: ProxmoxInstanceConfig,
 ) -> InfraCommands:
     target = ProxmoxTarget(
@@ -84,7 +83,7 @@ async def infra_commands(
         node=instance_config.node,
     )
     instance = InfraCommands.build(
-        async_proxmox_api, instance_config.node, sandbox_env_config.image_storage
+        async_proxmox_api, instance_config.node, instance_config.image_storage
     )
     InfraCommands.set_instance(target, instance)
     return instance

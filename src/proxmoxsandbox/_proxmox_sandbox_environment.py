@@ -357,7 +357,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 infra_commands = InfraCommands.get_instance(target)
             except LookupError:
                 infra_commands = InfraCommands.build(
-                    async_proxmox_api, instance.node, config.image_storage
+                    async_proxmox_api, instance.node, instance.image_storage
                 )
                 InfraCommands.set_instance(target, infra_commands)
 
@@ -657,7 +657,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 infra_commands = InfraCommands.build(
                     async_proxmox_api,
                     instance.node,
-                    ProxmoxSandboxEnvironmentConfig().image_storage,
+                    instance.image_storage,
                 )
                 await infra_commands.cleanup_no_id()
         else:
