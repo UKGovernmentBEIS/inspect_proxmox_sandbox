@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `ova_url` variant to `VmSourceConfig`, allowing an OVA to be downloaded from somewhere other than the Inspect box
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
 - Move the `image_storage` field from `ProxmoxSandboxEnvironmentConfig` to `ProxmoxInstanceConfig`.
