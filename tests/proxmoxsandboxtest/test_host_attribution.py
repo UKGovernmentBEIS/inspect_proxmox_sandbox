@@ -20,19 +20,36 @@ from proxmoxsandbox.schema import ProxmoxSandboxEnvironmentConfig
 LOGGER_NAME = "proxmoxsandbox._proxmox_sandbox_environment"
 
 
-def test_provider_logger_opted_into_info():
-    """The provider lowers its own logger to INFO so its lines reach the .eval.
+# Sentinel env default: TEST-NET-3, provably not a real pool instance.
+ENV_SENTINEL_HOST = "203.0.113.255"
 
-    Inspect leaves third-party package loggers at the root WARNING default, so
-    without this the attribution line would never be created under a default
-    `inspect eval`. Users can still suppress via --log-level-transcript warning.
-    """
-    assert logging.getLogger("proxmoxsandbox").level == logging.INFO
+
+@pytest.fixture
+def reset_log_levels():
+    """Isolate logger levels, so these tests don't leak into the rest of the file."""
+    pkg, root = logging.getLogger("proxmoxsandbox"), logging.getLogger()
+    saved_pkg, saved_root = pkg.level, root.level
+    pkg.setLevel(logging.NOTSET)
+    yield
+    pkg.setLevel(saved_pkg)
+    root.setLevel(saved_root)
+
+
+@pytest.mark.asyncio
+async def test_provider_logger_opted_into_info(reset_log_levels):
+    """With root at its WARNING default, task_init enables the logger for INFO."""
+    os.environ["PROXMOX_HOST"] = ENV_SENTINEL_HOST
+    await ProxmoxSandboxEnvironment.task_init("test_task", None)
     assert logging.getLogger(LOGGER_NAME).isEnabledFor(logging.INFO)
 
 
-# Sentinel env default: TEST-NET-3, provably not a real pool instance.
-ENV_SENTINEL_HOST = "203.0.113.255"
+@pytest.mark.asyncio
+async def test_lower_root_level_is_not_overridden(reset_log_levels):
+    """With root set below INFO, task_init sets the logger to that lower level."""
+    os.environ["PROXMOX_HOST"] = ENV_SENTINEL_HOST
+    logging.getLogger().setLevel(logging.DEBUG)
+    await ProxmoxSandboxEnvironment.task_init("test_task", None)
+    assert logging.getLogger("proxmoxsandbox").level == logging.DEBUG
 
 
 def _make_mock_infra():
