@@ -37,15 +37,6 @@ from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
 )
 
-# Inspect only lowers its own package loggers below the root WARNING default, so a
-# third-party provider's INFO never reaches the .eval transcript. As an Inspect
-# extension we opt our own logger in; a user can still silence it with
-# --log-level-transcript warning (that gate is downstream of this level).
-# Guarded on NOTSET so we never clobber a level a host application set before
-# this module was imported (e.g. someone who wants proxmoxsandbox at DEBUG).
-if getLogger("proxmoxsandbox").level == NOTSET:
-    getLogger("proxmoxsandbox").setLevel(INFO)
-
 # Above this many raw stdin bytes, exec() writes stdin to a file and redirects
 # from it instead of inlining base64 into the shell script — see exec() below.
 # Empirically ~34 KiB raw stdin saturates the script-write API limit (see exec
@@ -297,10 +288,31 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         return cls.proxmox_pool.default_concurrency()
 
     @classmethod
+    def _init_package_log_level(cls) -> None:
+        """Set the package logger to INFO, or to the root's level if that is lower.
+
+        Inspect configures only its own package loggers, so `proxmoxsandbox`
+        would otherwise inherit the root level and lose its INFO records from
+        the .eval transcript. INFO is the floor; `--log-level debug/trace`
+        lowers the root below it and wins.
+
+        Runs from the lifecycle entry points because it must happen after
+        Inspect's `init_logger`. Extensions are imported earlier, during
+        `platform_init()`, while the root logger is still at its default.
+        Skipped when a level is already set, so a host application's choice
+        stands.
+        """
+        if getLogger("proxmoxsandbox").level == NOTSET:
+            getLogger("proxmoxsandbox").setLevel(
+                min(INFO, getLogger().getEffectiveLevel())
+            )
+
+    @classmethod
     @override
     async def task_init(
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
+        cls._init_package_log_level()
         # Pool creation only depends on infrastructure config (PROXMOX_CONFIG_FILE),
         # not on eval-specific config. Config may be None when the task delegates
         # per-sample config to sample_init.
@@ -644,6 +656,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @classmethod
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
+        cls._init_package_log_level()
         if id is None:
             await cls.create_proxmox_instance_pools()
             for instance in cls.proxmox_pool.all_instances():
