@@ -258,6 +258,9 @@ class ProxmoxInstanceConfig(BaseModel):
         password: The password for Proxmox authentication
         node: The name of the Proxmox node
         verify_tls: Whether to verify the Proxmox server's TLS certificate
+        image_storage: The Proxmox storage pool for VM disk images (e.g.
+            "local-lvm"). Defaults to the PROXMOX_IMAGE_STORAGE environment variable,
+            or "local-lvm" if not set.
         extra_headers: Additional HTTP headers to send with every request to
             this instance (e.g. credentials for a proxy or gateway in front of
             the Proxmox API, an API key, or tracing headers). The Proxmox
@@ -276,6 +279,9 @@ class ProxmoxInstanceConfig(BaseModel):
     password: SecretStr
     node: str
     verify_tls: bool
+    image_storage: str = Field(
+        default_factory=lambda: getenv("PROXMOX_IMAGE_STORAGE", "local-lvm")
+    )
     extra_headers: Tuple[HttpHeader, ...] = ()
 
 
@@ -296,6 +302,7 @@ def _load_single_instance_from_env() -> ProxmoxInstanceConfig:
         password=getenv("PROXMOX_PASSWORD", "password"),
         node=getenv("PROXMOX_NODE", "proxmox"),
         verify_tls=getenv("PROXMOX_VERIFY_TLS", "1") == "1",
+        image_storage=getenv("PROXMOX_IMAGE_STORAGE", "local-lvm"),
     )
 
 
@@ -333,10 +340,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     Attributes:
         instance_pool_id: Which pool to use for this sample (must match a pool_id in
             PROXMOX_CONFIG_FILE or defaults to "default" for single-instance mode)
-        image_storage: The Proxmox storage pool for VM disk images (e.g.
-            "local-lvm"). Defaults to the PROXMOX_IMAGE_STORAGE environment variable,
-            or "local-lvm" if not set, which is the default if you installed Proxmox
-            normally.
         sdn_config: Software-defined networking configuration
         vms_config: Configurations for virtual machines
     """
@@ -350,8 +353,4 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     sdn_config: SdnConfigType = "auto"
     vms_config: Tuple[VmConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
-    )
-
-    image_storage: str = Field(
-        default_factory=lambda: getenv("PROXMOX_IMAGE_STORAGE", "local-lvm")
     )
