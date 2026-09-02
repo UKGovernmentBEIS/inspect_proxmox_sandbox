@@ -920,6 +920,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
     { name = "types-pycurl" },
+    { name = "types-pyyaml" },
 ]
 
 [package.metadata]
@@ -942,6 +943,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.25.3" },
     { name = "ruff", specifier = ">=0.9.3" },
     { name = "types-pycurl", specifier = ">=7.45.0" },
+    { name = "types-pyyaml", specifier = ">=6.0.12.20260815" },
 ]
 
 [[package]]
@@ -2861,6 +2863,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/fb/3e/9b7e3779b7baf42d650ccc9943f3fd620207446bbdd5103c6a2be3bf2fbb/types_pycurl-7.46.0.20260509.tar.gz", hash = "sha256:719d328744d0a0f1765c7a2eb3e3b081edc8ddec4ca668b61e82625a4519b359", size = 16277, upload-time = "2026-05-09T04:58:55.002Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/24/b9/9635032e42e92d466edbed314d1ddbaf0e0dedc81bed4083e09f44a71799/types_pycurl-7.46.0.20260509-py3-none-any.whl", hash = "sha256:9399a9e0c2682e8740a8027bbc76e4510380bc71165d27c9f6107e5042926334", size = 14351, upload-time = "2026-05-09T04:58:53.891Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260815"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/72/b56089aeee6c496d969bac42376bedb6e3eeab4682e1018fa3137122f94b/types_pyyaml-6.0.12.20260815.tar.gz", hash = "sha256:28764110c9cf35846e733da32d8d734df7473c5dde9ef67c3b7332ec0e819858", size = 18545, upload-time = "2026-08-15T02:41:51.532Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/52/eefeba09be4ef2a1eb989eb92934561e8e502a6ee3c32654996e4be7e399/types_pyyaml-6.0.12.20260815-py3-none-any.whl", hash = "sha256:6f332212b7e191f3afd5016a713c510b6340593b7ebec573c7d5d20aa5386d3b", size = 21148, upload-time = "2026-08-15T02:41:50.555Z" },
 ]
 
 [[package]]
