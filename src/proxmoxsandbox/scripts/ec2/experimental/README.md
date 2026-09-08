@@ -10,7 +10,7 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 | `run-on-host.sh`        | Run a single shell command on the host via SSM `send-command`. 60s default timeout.                       |
 | `run-script-on-host.sh` | Upload + run a local script on the host via SSM. 10 min timeout.                                          |
 | `create-test-vm.sh`     | Run *on the host* (via `run-script-on-host.sh`) to bring up an Ubuntu 24.04 cloud VM in an SDN zone and verify DNS + HTTPS. |
-| `check-host-isolation.sh` | Run *on the host* to check the guest-isolation systemd units from `userdata.sh` are installed and enabled (guards against stale AMIs). Non-zero exit on any FAIL. |
+| `check-host-isolation.sh` | Run *on the host* to check the guest-isolation systemd units from `userdata.sh` are installed and enabled (guards against stale AMIs). Non-zero exit on any FAIL. `--expect-egress-lockdown` also requires the opt-in marker (for `--no-internet` hosts). |
 
 All scripts honour `REGION` (default `eu-west-2`). `connect.sh` also honours
 `SSH_KEY` (default `~/.ssh/id_ed25519`).

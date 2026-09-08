@@ -7,19 +7,32 @@ integration suite — if it fails, the host you're testing against wasn't
 provisioned correctly (e.g. a hand-rolled Proxmox missing the firewall config).
 """
 
+import os
+from pathlib import Path
+
 import pytest
 
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
+from proxmoxsandbox.experimental.host_shell import run_script_on_host
+from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 from .proxmox_sandbox_utils import setup_sandbox
 
 pytestmark = pytest.mark.req_proxmox
 
+CHECK_SCRIPT = (
+    Path(__file__).parents[2]
+    / "src/proxmoxsandbox/scripts/ec2/experimental/check-host-isolation.sh"
+)
 
-async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata() -> None:
+
+async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
+    async_proxmox_api: AsyncProxmoxAPI, instance_config: ProxmoxInstanceConfig
+) -> None:
     """A sandbox VM can't reach host services or cloud instance metadata.
 
     The VM reaches the host over its SDN bridge, so its packets never ingress
@@ -27,7 +40,20 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata() -> None:
     when aimed at the SDN gateway IP where pveproxy also listens. Metadata
     traffic is forwarded rather than host-bound, so provisioning also installs
     an explicit forwarding block for the fixed metadata endpoints.
+
+    The guest-side probes prove the effect; check-host-isolation.sh run on the
+    host checks the mechanism, so a host that passes by accident (e.g. a unit
+    that fired once and is now disabled) still gets caught.
     """
+    args = []
+    if os.getenv("PROXMOX_EGRESS_LOCKDOWN_ENABLED") is not None:
+        args.append("--expect-egress-lockdown")
+    rc, output = await run_script_on_host(
+        async_proxmox_api, instance_config.node, CHECK_SCRIPT.read_text(), args
+    )
+    assert rc == 0, f"check-host-isolation.sh failed (rc={rc}):\n{output}"
+    assert "PASS" in output and "FAIL" not in output, output
+
     task_name = "test_host_isolation_e2e"
     config = ProxmoxSandboxEnvironmentConfig()
 
