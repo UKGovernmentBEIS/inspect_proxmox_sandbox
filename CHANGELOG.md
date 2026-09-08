@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
 - Move the `image_storage` field from `ProxmoxSandboxEnvironmentConfig` to `ProxmoxInstanceConfig`.
