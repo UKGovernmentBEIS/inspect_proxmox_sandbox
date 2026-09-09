@@ -15,9 +15,17 @@ usage() { echo "usage: $0" >&2; exit 2; }
 [ $# -eq 0 ] || usage
 
 chk() {
-    local name=$1
+    local name=$1 out
     shift
-    if "$@" >/dev/null 2>&1; then echo "PASS  $name"; else echo "FAIL  $name"; exit 1; fi
+    if out=$("$@" 2>&1); then
+        echo "PASS  $name"
+    else
+        echo "FAIL  $name"
+        # Most helpers are quiet; the ones reading a value print what they saw, since
+        # fail-fast means this line is all the operator gets.
+        [ -n "$out" ] && echo "      ${out//$'\n'/$'\n'      }"
+        exit 1
+    fi
 }
 
 unit_ok() { systemctl is-enabled -q "$1" && [ "$(systemctl show -p Result --value "$1")" = success ]; }
@@ -83,7 +91,16 @@ echo
 echo "# Proxmox firewall (host services reachable only on the mgmt NIC)"
 node_rules=$(pvesh get "/nodes/$node/firewall/rules" --output-format json 2>/dev/null || echo '[]')
 cluster_rules=$(pvesh get /cluster/firewall/rules --output-format json 2>/dev/null || echo '[]')
-fw_enabled() { [ "$(pvesh get "$1/firewall/options" --output-format json 2>/dev/null | jq -r '.enable')" = 1 ]; }
+fw_enabled() {
+    local opts enable
+    opts=$(pvesh get "$1/firewall/options" --output-format json 2>&1) ||
+        { echo "pvesh get $1/firewall/options failed: $opts"; return 1; }
+    enable=$(jq -r '.enable // empty' <<<"$opts")
+    # pvesh renders schema booleans as 1 or true depending on version.
+    case "$enable" in 1 | true) return 0 ;; esac
+    echo "enable=${enable:-<absent>}; $1/firewall/options = $opts"
+    return 1
+}
 have_accept() {
     jq -e --arg p "$1" --arg d "$2" --arg i "$3" \
         'any(.[]; .type == "in" and .action == "ACCEPT" and ((.enable // 1) | tonumber) == 1
