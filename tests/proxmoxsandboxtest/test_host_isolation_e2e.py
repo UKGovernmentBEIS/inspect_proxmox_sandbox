@@ -46,16 +46,18 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
     gets caught. Both scripts are also what a human runs by hand from a console,
     so the probes live there rather than inline here.
     """
-    locked_down = os.getenv("PROXMOX_EGRESS_LOCKDOWN_ENABLED") is not None
+    # Not "isolated": that mode also asserts the AWS-level controls of a
+    # --no-internet VPC, and the marker can be armed by hand on a connected host.
+    mode = (
+        "lockdown"
+        if os.getenv("PROXMOX_EGRESS_LOCKDOWN_ENABLED") is not None
+        else "connected"
+    )
 
     rc, output = await run_script_on_host(
-        async_proxmox_api,
-        instance_config.node,
-        HOST_SCRIPT.read_text(),
-        ["--expect-egress-lockdown"] if locked_down else [],
+        async_proxmox_api, instance_config.node, HOST_SCRIPT.read_text(), [mode]
     )
     assert rc == 0, f"check-host-isolation.sh failed (rc={rc}):\n{output}"
-    assert "PASS" in output and "FAIL" not in output, output
 
     task_name = "test_host_isolation_e2e"
     config = ProxmoxSandboxEnvironmentConfig()
@@ -65,19 +67,17 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
         env = envs_dict["default"]
         assert isinstance(env, ProxmoxSandboxEnvironment)
 
-        # No --strict: CI has no interface endpoint or peering targets to pass,
+        # No addresses to pass: CI has no interface endpoint or peering targets,
         # so those probes SKIP.
         guest_res = await env.exec(
-            ["bash", "-s", "--"] + (["--expect-no-egress"] if locked_down else []),
+            ["bash", "-s", "--", mode],
             input=GUEST_SCRIPT.read_text(),
             timeout=600,
         )
-        guest_output = guest_res.stdout + guest_res.stderr
         assert guest_res.returncode == 0, (
             f"check-guest-isolation.sh failed (rc={guest_res.returncode}):\n"
-            f"{guest_output}"
+            f"{guest_res.stdout}{guest_res.stderr}"
         )
-        assert "PASS" in guest_output and "FAIL" not in guest_output, guest_output
 
     finally:
         await ProxmoxSandboxEnvironment.sample_cleanup(

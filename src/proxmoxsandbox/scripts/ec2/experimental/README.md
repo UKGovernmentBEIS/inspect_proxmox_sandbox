@@ -15,39 +15,39 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 
 ## Isolation checks
 
-Run the host script first, then the guest one — the host script ends with a
-ready-to-paste `--aws-endpoint` argument line, so per-VPC addresses are never
-hand-typed or committed.
+Run the host script first, then the guest one — on an isolated host the host
+script ends with a ready-to-paste guest command line, so per-VPC addresses are
+never hand-typed or committed.
 
 ```bash
 export REGION=eu-west-2
-./run-script-on-host.sh <instance-id> check-host-isolation.sh --expect-egress-lockdown --expect-isolated-vpc --inventory
+./run-script-on-host.sh <instance-id> check-host-isolation.sh isolated
 # then, in a guest console / via the guest agent:
-bash check-guest-isolation.sh --expect-no-egress --aws-endpoint <ip> ...
+bash check-guest-isolation.sh isolated <endpoint-ip> ...
 ```
 
-Both print one `PASS`/`FAIL`/`SKIP` line per probe and exit non-zero on any FAIL.
-Shared flags:
+Both print one `PASS`/`SKIP` line per probe and exit at the first failure. Both
+take the same mode word, which is all the configuration they have:
 
-- `--expect-egress-lockdown` (host) / `--expect-no-egress` (guest) — the guest
-  egress lockdown is armed. On the guest this *inverts* the egress probes rather
-  than skipping them: without it, the internet, package-registry and
-  DNS-tunnelling targets must be reachable, which is the negative control proving
-  the blocked results elsewhere in the run mean something.
-- `--strict` — a SKIP counts as a failure. Use it for a red-team pass, where an
-  unsupplied target is a gap rather than a non-issue.
+| Mode | Meaning |
+|---|---|
+| `connected` (default) | An ordinary host. The guest's internet, package-registry and DNS-tunnelling targets must be **reachable** — that is the negative control proving the blocked results elsewhere in the run mean something. |
+| `lockdown` | The egress lockdown marker is armed, by hand on a connected host (see CONTRIBUTING.md). Those targets must now be blocked. |
+| `isolated` | Launched `--no-internet`: `lockdown`, plus the isolated VPC's AWS-level controls. |
 
-Host-only `--expect-isolated-vpc` is separate from `--expect-egress-lockdown`
-because the marker can be set by hand on an ordinary host (see CONTRIBUTING.md);
-only a `--no-internet` launch also gets the VPC-level controls.
+The guest script also takes any number of `IP[:PORT]` addresses that must be
+unreachable — VPC interface endpoints, a host across a peering link. Port
+defaults to 443. They're site-specific, so nothing is hardcoded and the probes
+`SKIP` when none are given.
 
-Guest-only: `--aws-endpoint IP`, `--peer-target IP[:PORT]`, `--egress-target
-HOST:PORT`, `--dns-name NAME`, `--internal-name NAME`, `--peer-guest IP|NAME` —
-all repeatable except the last two, all site-specific, all SKIP when not given.
-Host-only: `--inventory` prints PVE/QEMU/kernel/package versions for a CVE scan. It comes
-after the summary because SSM `send-command` truncates output at 24k and the package list
-alone exceeds that — for the whole list, run it over SSH rather than through
-`run-script-on-host.sh`.
+For a CVE scan of the baked AMI, get the inventory separately:
+
+```bash
+./run-on-host.sh <instance-id> "pveversion -v; uname -r; dpkg-query -W -f='\${Package}\t\${Version}\n'"
+```
+
+Do that over SSH rather than SSM if you want the whole list: SSM
+`send-command` truncates output at 24k and the package list alone exceeds it.
 
 `tests/proxmoxsandboxtest/test_host_isolation_e2e.py` runs both scripts, so they
 stay the single source of truth for what "isolated" means here.
