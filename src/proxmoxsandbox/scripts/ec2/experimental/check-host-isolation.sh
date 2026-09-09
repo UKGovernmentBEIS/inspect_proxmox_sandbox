@@ -96,7 +96,7 @@ fw_enabled() {
     opts=$(pvesh get "$1/firewall/options" --output-format json 2>&1) ||
         { echo "pvesh get $1/firewall/options failed: $opts"; return 1; }
     enable=$(jq -r '.enable // empty' <<<"$opts")
-    # pvesh renders schema booleans as 1 or true depending on version.
+    # Defensive: observed as 1, but accept a JSON boolean too rather than fail opaquely.
     case "$enable" in 1 | true) return 0 ;; esac
     echo "enable=${enable:-<absent>}; $1/firewall/options = $opts"
     return 1
