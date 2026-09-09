@@ -15,27 +15,25 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 
 ## Isolation checks
 
-Run the host script first, then the guest one — on an isolated host the host
-script ends with a ready-to-paste guest command line, so per-VPC addresses are
-never hand-typed or committed.
+Both scripts check one configuration: a host launched `--no-internet`, with the
+guest egress lockdown armed and the isolated VPC's AWS-level controls in place.
+They have no options. On an ordinary connected host they fail by design — that
+host is not isolated.
+
+Run the host script first, then the guest one; the host script ends with a
+ready-to-paste guest command line, so per-VPC addresses are never hand-typed or
+committed.
 
 ```bash
 export REGION=eu-west-2
-./run-script-on-host.sh <instance-id> check-host-isolation.sh isolated
+./run-script-on-host.sh <instance-id> check-host-isolation.sh
 # then, in a guest console / via the guest agent:
-bash check-guest-isolation.sh isolated <endpoint-ip> ...
+bash check-guest-isolation.sh <endpoint-ip> ...
 ```
 
-Both print one `PASS`/`SKIP` line per probe and exit at the first failure. Both
-take the same mode word, which is all the configuration they have:
+Both print one `PASS`/`SKIP` line per probe and exit at the first failure.
 
-| Mode | Meaning |
-|---|---|
-| `connected` (default) | An ordinary host. The guest's internet, package-registry and DNS-tunnelling targets must be **reachable** — that is the negative control proving the blocked results elsewhere in the run mean something. |
-| `lockdown` | The egress lockdown marker is armed, by hand on a connected host (see CONTRIBUTING.md). Those targets must now be blocked. |
-| `isolated` | Launched `--no-internet`: `lockdown`, plus the isolated VPC's AWS-level controls. |
-
-The guest script also takes any number of `IP[:PORT]` addresses that must be
+The guest script takes any number of `IP[:PORT]` addresses that must be
 unreachable — VPC interface endpoints, a host across a peering link. Port
 defaults to 443. They're site-specific, so nothing is hardcoded and the probes
 `SKIP` when none are given.
@@ -49,8 +47,9 @@ For a CVE scan of the baked AMI, get the inventory separately:
 Do that over SSH rather than SSM if you want the whole list: SSM
 `send-command` truncates output at 24k and the package list alone exceeds it.
 
-`tests/proxmoxsandboxtest/test_host_isolation_e2e.py` runs both scripts, so they
-stay the single source of truth for what "isolated" means here.
+These are operator tools, not run by CI: the integration suite's host is a
+connected one, so `test_host_isolation_e2e.py` asserts only the subset that
+holds on any host.
 
 All scripts honour `REGION` (default `eu-west-2`). `connect.sh` also honours
 `SSH_KEY` (default `~/.ssh/id_ed25519`).

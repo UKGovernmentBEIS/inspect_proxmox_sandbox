@@ -5,24 +5,20 @@
 # both — this one ends by printing the guest command line to paste.
 # One PASS/SKIP line per check; exits at the first failure.
 #
-# Usage: check-host-isolation.sh [connected|lockdown|isolated]
-#   connected  (default) an ordinary host: guests get NAT and upstream DNS
-#   lockdown   the guest egress lockdown marker is armed by hand (see CONTRIBUTING.md)
-#   isolated   launched --no-internet: lockdown, plus the isolated VPC's AWS controls
+# Assumes a host launched --no-internet: the egress lockdown is armed and the VPC's own
+# AWS-level controls are in place. That is the configuration worth checking; an ordinary
+# connected host fails these by design.
 # shellcheck disable=SC2329  # the check helpers are invoked indirectly, via chk
 set -uo pipefail
 
-usage() { echo "usage: $0 [connected|lockdown|isolated]" >&2; exit 2; }
-mode=${1:-connected}
-[ $# -le 1 ] || usage
-case "$mode" in connected|lockdown|isolated) ;; *) usage ;; esac
+usage() { echo "usage: $0" >&2; exit 2; }
+[ $# -eq 0 ] || usage
 
 chk() {
     local name=$1
     shift
     if "$@" >/dev/null 2>&1; then echo "PASS  $name"; else echo "FAIL  $name"; exit 1; fi
 }
-skip() { echo "SKIP  $1 ($2)"; }
 
 unit_ok() { systemctl is-enabled -q "$1" && [ "$(systemctl show -p Result --value "$1")" = success ]; }
 pvefw_running() { pve-firewall status | grep -q enabled/running; }
@@ -53,7 +49,7 @@ unresolvable() { [ -z "$(resolves_to "$1")" ]; }
 
 nic=$(ip route show default | awk '{print $5; exit}')
 node=$(hostname)
-echo "host $node, mode $mode, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev/null | head -1)"
+echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev/null | head -1)"
 
 echo
 echo "# units (stale-AMI guard)"
@@ -111,45 +107,34 @@ chk "no unbound inbound ACCEPT beyond SDN DNS/DHCP on the cluster" no_unexpected
 echo
 echo "# guest egress lockdown"
 no_upstream_resolver() { ! grep -q "^nameserver" /run/dnsmasq/resolv.conf; }
-if [ "$mode" = connected ]; then
-    # The connected case is the negative control for the guest script's DNS probes: if
-    # dnsmasq has no upstream here either, "DNS tunnelling fails" means nothing.
-    chk "SDN dnsmasq points at the VPC resolver: /run/dnsmasq/resolv.conf" \
-        grep -q "^nameserver 169.254.169.253" /run/dnsmasq/resolv.conf
-else
-    chk "opt-in marker present: /etc/inspect-proxmox-egress-lockdown" test -f /etc/inspect-proxmox-egress-lockdown
-    chk "guest egress dropped: mangle FORWARD -o $nic" has_rule mangle FORWARD "-o $nic .*-j DROP"
-    chk "guest ingress dropped: mangle FORWARD -i $nic" has_rule mangle FORWARD "-i $nic .*-j DROP"
-    chk "dnsmasq upstream queries dropped: mangle OUTPUT --uid-owner dnsmasq" \
-        has_rule mangle OUTPUT "-o $nic .*--uid-owner .*-j DROP"
-    chk "no upstream resolver for SDN dnsmasq: /run/dnsmasq/resolv.conf" no_upstream_resolver
-fi
+chk "opt-in marker present: /etc/inspect-proxmox-egress-lockdown" test -f /etc/inspect-proxmox-egress-lockdown
+chk "guest egress dropped: mangle FORWARD -o $nic" has_rule mangle FORWARD "-o $nic .*-j DROP"
+chk "guest ingress dropped: mangle FORWARD -i $nic" has_rule mangle FORWARD "-i $nic .*-j DROP"
+chk "dnsmasq upstream queries dropped: mangle OUTPUT --uid-owner dnsmasq" \
+    has_rule mangle OUTPUT "-o $nic .*--uid-owner .*-j DROP"
+chk "no upstream resolver for SDN dnsmasq: /run/dnsmasq/resolv.conf" no_upstream_resolver
 
 echo
 echo "# AWS-level controls, as seen from the host"
 endpoint_ok() { is_private "$1" && connects "https://$2/"; }
-if [ "$mode" != isolated ]; then
-    skip "interface endpoints and DNS firewall" "mode is $mode, not isolated"
-    chk "host has internet (negative control for the guest egress probes)" connects https://deb.debian.org/
-else
-    region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
-    chk "region from IMDS" test -n "$region"
-    endpoints=""
-    # The host keeps these four (SSM is the operator's way in); a guest must not be able
-    # to reach them at all, which is what the guest script's address arguments probe.
-    for svc in ssm ssmmessages ec2messages monitoring; do
-        name="$svc.$region.amazonaws.com"
-        ip=$(resolves_to "$name")
-        chk "interface endpoint $svc: $name resolves" test -n "$ip"
-        chk "interface endpoint $svc: $ip private and answering on 443" endpoint_ok "$ip" "$name"
-        endpoints="$endpoints $ip"
-    done
-    chk "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" unresolvable deb.debian.org
-    chk "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
-    echo
-    echo "# paste into the guest run (endpoint IPs are per-VPC; do not commit them):"
-    echo "  check-guest-isolation.sh $mode$endpoints"
-fi
+region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
+chk "region from IMDS" test -n "$region"
+endpoints=""
+# The host keeps these four (SSM is the operator's way in); a guest must not be able to
+# reach them at all, which is what the guest script's address arguments probe.
+for svc in ssm ssmmessages ec2messages monitoring; do
+    name="$svc.$region.amazonaws.com"
+    ip=$(resolves_to "$name")
+    chk "interface endpoint $svc: $name resolves" test -n "$ip"
+    chk "interface endpoint $svc: $ip private and answering on 443" endpoint_ok "$ip" "$name"
+    endpoints="$endpoints $ip"
+done
+chk "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" unresolvable deb.debian.org
+chk "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
 
 echo
-echo "all checks passed ($mode)"
+echo "# paste into the guest run (endpoint IPs are per-VPC; do not commit them):"
+echo "  check-guest-isolation.sh$endpoints"
+
+echo
+echo "all checks passed"

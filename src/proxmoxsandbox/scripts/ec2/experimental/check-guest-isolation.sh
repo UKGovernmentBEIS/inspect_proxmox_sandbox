@@ -5,26 +5,17 @@
 # script's arguments from the line that one prints.
 # One PASS/SKIP line per probe; exits at the first failure.
 #
-# Usage: check-guest-isolation.sh [connected|lockdown|isolated] [IP[:PORT] ...]
-#   connected  (default) the host has upstream network, so the internet, package-registry
-#              and DNS-tunnelling targets must all be *reachable*. That is the negative
-#              control which proves the blocked results elsewhere in the run mean something.
-#   lockdown, isolated   the egress lockdown is armed: those same targets must be blocked.
+# Assumes a guest on a host launched --no-internet: everything below must be blocked. On
+# an ordinary connected host the egress probes fail by design, because there the guest can
+# reach the internet.
+#
+# Usage: check-guest-isolation.sh [IP[:PORT] ...]
 #   IP[:PORT]  addresses that must be unreachable — VPC interface endpoints, a host across
-#              a peering link. Port defaults to 443. Site-specific, so never hardcoded here.
+#              a peering link. Port defaults to 443. Site-specific, so never hardcoded
+#              here; check-host-isolation.sh prints the line to paste.
 set -uo pipefail
 
-usage() { echo "usage: $0 [connected|lockdown|isolated] [IP[:PORT] ...]" >&2; exit 2; }
-mode=connected
-case "${1:-}" in
-    connected|lockdown|isolated) mode=$1; shift ;;
-    "") ;;
-    *) usage ;;
-esac
 unreachable=("$@")
-
-egress_want=blocked
-[ "$mode" = connected ] && egress_want=reachable
 
 want() { # want EXPECTED NAME ACTUAL
     case "$3" in
@@ -62,7 +53,7 @@ names=(deb.debian.org download.proxmox.com pypi.org)
 gw=$(ip route show default | awk '{print $3; exit}')
 addr=$(ip -4 addr show scope global | awk '/inet /{print $2; exit}')
 resolver=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null)
-echo "guest ${addr:-no address}, mode $mode, gateway ${gw:-none}, resolver ${resolver:-none}, kernel $(uname -r)"
+echo "guest ${addr:-no address}, gateway ${gw:-none}, resolver ${resolver:-none}, kernel $(uname -r)"
 if [ -z "$gw" ]; then
     echo "no default gateway; the host-plane probes below cannot run" >&2
     exit 2
@@ -98,8 +89,7 @@ want blocked "link-local router 169.254.1.1:80" "$(tcp_state 169.254.1.1 80)"
 
 echo
 echo "# IPv6"
-# Forwarded IPv6 is dropped on the host whether or not the egress lockdown is armed, so
-# this section does not flip with the mode.
+# Forwarded IPv6 is dropped on the host whether or not the egress lockdown is armed.
 v6addr=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2; exit}')
 v6route=$(ip -6 route show default 2>/dev/null | head -1)
 want absent "no global IPv6 address" "${v6addr:-absent}"
@@ -109,10 +99,10 @@ want blocked "IPv6 egress https://[2606:4700:4700::1111]/" "$(http_state 'https:
 echo
 echo "# internet egress"
 for target in 1.1.1.1:443 8.8.8.8:53; do
-    want "$egress_want" "TCP ${target/:/ port }" "$(tcp_state "${target%:*}" "${target##*:}")"
+    want blocked "TCP ${target/:/ port }" "$(tcp_state "${target%:*}" "${target##*:}")"
 done
 for name in "${names[@]}"; do
-    want "$egress_want" "package registry https://$name/" "$(http_state "https://$name/")"
+    want blocked "package registry https://$name/" "$(http_state "https://$name/")"
 done
 
 echo
@@ -126,15 +116,15 @@ else
     want answered "SDN resolver $gw:53 answers at all" \
         "$([ -n "$rcode" ] && echo "answered($rcode)" || echo "no response")"
     for name in "${names[@]}"; do
-        want "$egress_want" "recursion via $gw for $name" "$(dns_state "$gw" A "$name")"
+        want blocked "recursion via $gw for $name" "$(dns_state "$gw" A "$name")"
     done
     # A long random label under a name the resolver will recurse for is the classic
     # exfil-over-DNS channel; the TXT reply is the return path.
     label=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    want "$egress_want" "DNS exfil TXT $label.${names[0]}" "$(dns_state "$gw" TXT "$label.${names[0]}")"
+    want blocked "DNS exfil TXT $label.${names[0]}" "$(dns_state "$gw" TXT "$label.${names[0]}")"
     for resolver_ip in 1.1.1.1 8.8.8.8; do
         for port in 53 853 443; do
-            want "$egress_want" "direct resolver $resolver_ip:$port" "$(tcp_state "$resolver_ip" "$port")"
+            want blocked "direct resolver $resolver_ip:$port" "$(tcp_state "$resolver_ip" "$port")"
         done
     done
 fi
@@ -151,4 +141,4 @@ else
 fi
 
 echo
-echo "all probes passed ($mode)"
+echo "all probes passed"
