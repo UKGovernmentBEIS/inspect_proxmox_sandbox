@@ -24,10 +24,9 @@ from .proxmox_sandbox_utils import setup_sandbox
 
 pytestmark = pytest.mark.req_proxmox
 
-CHECK_SCRIPT = (
-    Path(__file__).parents[2]
-    / "src/proxmoxsandbox/scripts/ec2/experimental/check-host-isolation.sh"
-)
+SCRIPTS = Path(__file__).parents[2] / "src/proxmoxsandbox/scripts/ec2/experimental"
+HOST_SCRIPT = SCRIPTS / "check-host-isolation.sh"
+GUEST_SCRIPT = SCRIPTS / "check-guest-isolation.sh"
 
 
 async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
@@ -41,15 +40,19 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
     traffic is forwarded rather than host-bound, so provisioning also installs
     an explicit forwarding block for the fixed metadata endpoints.
 
-    The guest-side probes prove the effect; check-host-isolation.sh run on the
-    host checks the mechanism, so a host that passes by accident (e.g. a unit
-    that fired once and is now disabled) still gets caught.
+    check-guest-isolation.sh proves the effect from inside the VM;
+    check-host-isolation.sh checks the mechanism on the host, so a host that
+    passes by accident (e.g. a unit that fired once and is now disabled) still
+    gets caught. Both scripts are also what a human runs by hand from a console,
+    so the probes live there rather than inline here.
     """
-    args = []
-    if os.getenv("PROXMOX_EGRESS_LOCKDOWN_ENABLED") is not None:
-        args.append("--expect-egress-lockdown")
+    locked_down = os.getenv("PROXMOX_EGRESS_LOCKDOWN_ENABLED") is not None
+
     rc, output = await run_script_on_host(
-        async_proxmox_api, instance_config.node, CHECK_SCRIPT.read_text(), args
+        async_proxmox_api,
+        instance_config.node,
+        HOST_SCRIPT.read_text(),
+        ["--expect-egress-lockdown"] if locked_down else [],
     )
     assert rc == 0, f"check-host-isolation.sh failed (rc={rc}):\n{output}"
     assert "PASS" in output and "FAIL" not in output, output
@@ -62,97 +65,19 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
         env = envs_dict["default"]
         assert isinstance(env, ProxmoxSandboxEnvironment)
 
-        gw_res = await env.exec(
-            ["sh", "-c", "ip route show default | awk '{print $3}'"],
-            timeout=10,
+        # No --strict: CI has no interface endpoint or peering targets to pass,
+        # so those probes SKIP.
+        guest_res = await env.exec(
+            ["bash", "-s", "--"] + (["--expect-no-egress"] if locked_down else []),
+            input=GUEST_SCRIPT.read_text(),
+            timeout=600,
         )
-        assert gw_res.returncode == 0
-        gw = gw_res.stdout.strip()
-        assert gw, "no default gateway found inside the sandbox VM"
-
-        # Without isolation this returns HTTP 401 in ~30ms; with it, the TCP
-        # connection never completes and curl exits 28 (http_code 000).
-        api_res = await env.exec(
-            [
-                "curl",
-                "-sk",
-                "--max-time",
-                "5",
-                "-o",
-                "/dev/null",
-                "-w",
-                "%{http_code}",
-                f"https://{gw}:8006/api2/json/version",
-            ],
-            timeout=15,
+        guest_output = guest_res.stdout + guest_res.stderr
+        assert guest_res.returncode == 0, (
+            f"check-guest-isolation.sh failed (rc={guest_res.returncode}):\n"
+            f"{guest_output}"
         )
-        assert api_res.stdout.strip() == "000", (
-            "pveproxy reachable from sandbox VM "
-            f"(curl returned http_code={api_res.stdout.strip()!r}). "
-            "Was the host provisioned with firewall isolation?"
-        )
-
-        ssh_res = await env.exec(
-            [
-                "sh",
-                "-c",
-                f'timeout 3 bash -c "</dev/tcp/{gw}/22" && echo open || echo blocked',
-            ],
-            timeout=10,
-        )
-        assert ssh_res.stdout.strip() == "blocked", (
-            f"SSH on {gw}:22 reachable from sandbox VM: {ssh_res.stdout!r}"
-        )
-
-        # A token PUT can time out solely because HttpPutResponseHopLimit=1,
-        # even when IMDS is reachable. A tokenless GET returns 401 when IMDSv2
-        # is required (or 200 when optional), so 000 specifically verifies that
-        # the host forwarding rule blocked the request.
-        metadata_get_res = await env.exec(
-            [
-                "curl",
-                "--silent",
-                "--show-error",
-                "--max-time",
-                "5",
-                "-o",
-                "/dev/null",
-                "-w",
-                "%{http_code}",
-                "http://169.254.169.254/latest/meta-data/instance-id",
-            ],
-            timeout=15,
-        )
-        assert metadata_get_res.stdout.strip() == "000", (
-            "cloud instance metadata reachable from sandbox VM "
-            f"(curl returned http_code={metadata_get_res.stdout.strip()!r}). "
-            "Was the metadata forwarding block installed?"
-        )
-
-        metadata_token_res = await env.exec(
-            [
-                "curl",
-                "--silent",
-                "--show-error",
-                "--max-time",
-                "5",
-                "-o",
-                "/dev/null",
-                "-w",
-                "%{http_code}",
-                "-X",
-                "PUT",
-                "-H",
-                "X-aws-ec2-metadata-token-ttl-seconds: 60",
-                "http://169.254.169.254/latest/api/token",
-            ],
-            timeout=15,
-        )
-        assert metadata_token_res.stdout.strip() == "000", (
-            "cloud instance metadata token endpoint reachable from sandbox VM "
-            f"(curl returned http_code={metadata_token_res.stdout.strip()!r}). "
-            "Was the metadata forwarding block installed?"
-        )
+        assert "PASS" in guest_output and "FAIL" not in guest_output, guest_output
 
     finally:
         await ProxmoxSandboxEnvironment.sample_cleanup(
