@@ -10,6 +10,47 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 | `run-on-host.sh`        | Run a single shell command on the host via SSM `send-command`. 60s default timeout.                       |
 | `run-script-on-host.sh` | Upload + run a local script on the host via SSM. 10 min timeout.                                          |
 | `create-test-vm.sh`     | Run *on the host* (via `run-script-on-host.sh`) to bring up an Ubuntu 24.04 cloud VM in an SDN zone and verify DNS + HTTPS. |
+| `check-host-isolation.sh` | Run *on the host* to check the isolation **mechanism** from `userdata.sh`: units installed, enabled and last run OK (guards against stale AMIs), plus the rules they install. |
+| `check-guest-isolation.sh` | Run *inside a Linux guest* to check the **effect**: what the guest can actually reach. |
+
+## Isolation checks
+
+Both scripts check one configuration, the one the parent README's "Properly
+isolating the host" describes: egress lockdown armed, no route off the VPC.
+They have no options. On an ordinary host they fail by design — that host is
+not isolated.
+
+Run the host script first, then the guest one; the host script ends with a
+ready-to-paste guest command line, so per-VPC addresses are never hand-typed or
+committed.
+
+```bash
+export REGION=eu-west-2
+./run-script-on-host.sh <instance-id> check-host-isolation.sh
+# then, in a guest console / via the guest agent:
+bash check-guest-isolation.sh <endpoint-ip> ...
+```
+
+Both print one line per probe — `PASS`, `FAIL`, `SKIP` or `INFO` — and exit at
+the first failure.
+
+The guest script takes any number of `IP[:PORT]` addresses that must be
+unreachable — VPC interface endpoints, a host across a peering link. Port
+defaults to 443. They're site-specific, so nothing is hardcoded and the probes
+`SKIP` when none are given.
+
+For a CVE scan of the baked AMI, get the inventory separately:
+
+```bash
+./run-on-host.sh <instance-id> "pveversion -v; uname -r; dpkg-query -W -f='\${Package}\t\${Version}\n'"
+```
+
+Do that over SSH rather than SSM if you want the whole list: SSM
+`send-command` truncates output at 24k and the package list alone exceeds it.
+
+These are operator tools, run by no test. CI runs `pytest -m "not req_proxmox"`,
+and the manual `req_proxmox` suite needs a connected host, so
+`test_host_isolation_e2e.py` asserts only the subset that holds on any host.
 
 All scripts honour `REGION` (default `eu-west-2`). `connect.sh` also honours
 `SSH_KEY` (default `~/.ssh/id_ed25519`).

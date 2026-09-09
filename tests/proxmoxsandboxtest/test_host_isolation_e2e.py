@@ -5,21 +5,47 @@ README's "Host firewall isolation" section). Every supported way of standing
 up a test host applies it, so this runs unconditionally as part of the
 integration suite — if it fails, the host you're testing against wasn't
 provisioned correctly (e.g. a hand-rolled Proxmox missing the firewall config).
+
+The fuller probes live in scripts/ec2/experimental/check-{host,guest}-isolation.sh,
+which assume the isolated configuration in scripts/ec2/README.md ("Properly isolating
+the host") — its egress lockdown fails the rest of the suite. What is asserted here is
+the subset that holds on any host.
 """
 
 import pytest
 
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
+from proxmoxsandbox.experimental.host_shell import run_script_on_host
+from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 from .proxmox_sandbox_utils import setup_sandbox
 
 pytestmark = pytest.mark.req_proxmox
 
+# Catches a host whose units fired once and are now disabled, or a stale AMI that
+# never had them: the guest probes below would pass on such a host until the rules
+# were next reloaded.
+HOST_UNITS_SCRIPT = """
+set -eu
+for unit in proxmox-ami-fixup-firewall.service \
+            inspect-proxmox-block-cloud-metadata.service \
+            proxmox-ami-fixup-nat.service; do
+    systemctl is-enabled -q "$unit"
+    [ "$(systemctl show -p Result --value "$unit")" = success ]
+done
+pve-firewall status | grep -q enabled/running
+iptables -w -t raw -S PREROUTING | grep -q -- '-d 169.254.0.0/16 -j DROP'
+iptables -w -S FORWARD | grep -q -- '-s 169.254.0.0/16 -j DROP'
+"""
 
-async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata() -> None:
+
+async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
+    async_proxmox_api: AsyncProxmoxAPI, instance_config: ProxmoxInstanceConfig
+) -> None:
     """A sandbox VM can't reach host services or cloud instance metadata.
 
     The VM reaches the host over its SDN bridge, so its packets never ingress
@@ -28,6 +54,11 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata() -> None:
     traffic is forwarded rather than host-bound, so provisioning also installs
     an explicit forwarding block for the fixed metadata endpoints.
     """
+    rc, output = await run_script_on_host(
+        async_proxmox_api, instance_config.node, HOST_UNITS_SCRIPT
+    )
+    assert rc == 0, f"host isolation units not healthy (rc={rc}):\n{output}"
+
     task_name = "test_host_isolation_e2e"
     config = ProxmoxSandboxEnvironmentConfig()
 
