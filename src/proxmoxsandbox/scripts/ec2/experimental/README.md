@@ -21,7 +21,7 @@ hand-typed or committed.
 
 ```bash
 export REGION=eu-west-2
-./run-script-on-host.sh <instance-id> check-host-isolation.sh --expect-egress-lockdown --inventory
+./run-script-on-host.sh <instance-id> check-host-isolation.sh --expect-egress-lockdown --expect-isolated-vpc --inventory
 # then, in a guest console / via the guest agent:
 bash check-guest-isolation.sh --expect-no-egress --aws-endpoint <ip> ...
 ```
@@ -29,13 +29,17 @@ bash check-guest-isolation.sh --expect-no-egress --aws-endpoint <ip> ...
 Both print one `PASS`/`FAIL`/`SKIP` line per probe and exit non-zero on any FAIL.
 Shared flags:
 
-- `--expect-egress-lockdown` (host) / `--expect-no-egress` (guest) — the host was
-  launched `--no-internet`. On the guest this *inverts* the egress probes rather
+- `--expect-egress-lockdown` (host) / `--expect-no-egress` (guest) — the guest
+  egress lockdown is armed. On the guest this *inverts* the egress probes rather
   than skipping them: without it, the internet, package-registry and
   DNS-tunnelling targets must be reachable, which is the negative control proving
   the blocked results elsewhere in the run mean something.
 - `--strict` — a SKIP counts as a failure. Use it for a red-team pass, where an
   unsupplied target is a gap rather than a non-issue.
+
+Host-only `--expect-isolated-vpc` is separate from `--expect-egress-lockdown`
+because the marker can be set by hand on an ordinary host (see CONTRIBUTING.md);
+only a `--no-internet` launch also gets the VPC-level controls.
 
 Guest-only: `--aws-endpoint IP`, `--peer-target IP[:PORT]`, `--egress-target
 HOST:PORT`, `--dns-name NAME`, `--internal-name NAME`, `--peer-guest IP|NAME` —

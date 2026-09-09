@@ -4,20 +4,26 @@
 # install are loaded, in the right order, and not weakened. check-guest-isolation.sh
 # probes the effect from inside a guest; run both.
 #
-# Usage: check-host-isolation.sh [--expect-egress-lockdown] [--strict] [--inventory]
-#   --expect-egress-lockdown  host was launched --no-internet: also require the lockdown
-#                             marker and rules, and the isolated VPC's AWS-level controls
+# Usage: check-host-isolation.sh [--expect-egress-lockdown] [--expect-isolated-vpc]
+#                                [--strict] [--inventory]
+#   --expect-egress-lockdown  the guest egress lockdown is armed: also require its marker
+#                             and rules. Independent of the VPC, since the marker can be
+#                             set by hand on an ordinary host (see CONTRIBUTING.md)
+#   --expect-isolated-vpc     host was launched --no-internet: also require the isolated
+#                             VPC's AWS-level controls
 #   --strict                  a SKIP counts as a failure
 #   --inventory               print PVE/QEMU/kernel/package versions for a CVE scan
 # shellcheck disable=SC2329  # the check helpers are invoked indirectly, via chk
 set -uo pipefail
 
 lockdown=false
+isolated_vpc=false
 strict=false
 inventory=false
 while [ $# -gt 0 ]; do
     case "$1" in
         --expect-egress-lockdown) lockdown=true ;;
+        --expect-isolated-vpc) isolated_vpc=true ;;
         --strict) strict=true ;;
         --inventory) inventory=true ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -156,8 +162,8 @@ echo
 echo "# AWS-level controls, as seen from the host"
 endpoint_ok() { is_private "$1" && connects "https://$2/"; }
 endpoint_args=""
-if ! $lockdown; then
-    skip "interface endpoints and DNS firewall" "connected VPC; no --expect-egress-lockdown"
+if ! $isolated_vpc; then
+    skip "interface endpoints and DNS firewall" "no --expect-isolated-vpc"
     chk "host has internet (negative control for the guest egress probes)" connects https://deb.debian.org/
 else
     region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
