@@ -339,12 +339,12 @@ if [ -z "$MGMT_NIC" ]; then
     echo "ERROR: could not determine management NIC from default route" >&2
     exit 1
 fi
-iptables -t nat -C POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE 2>/dev/null \
-    || iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE
-iptables -C FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT 2>/dev/null \
-    || iptables -A FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT
-iptables -C FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
-    || iptables -A FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -w -t nat -C POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE 2>/dev/null \
+    || iptables -w -t nat -A POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE
+iptables -w -C FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT 2>/dev/null \
+    || iptables -w -A FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT
+iptables -w -C FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+    || iptables -w -A FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 FIXUP_NAT
 chmod +x /usr/local/bin/proxmox-ami-fixup-nat.sh
 
