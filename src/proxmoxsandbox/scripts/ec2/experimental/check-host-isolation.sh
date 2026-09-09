@@ -51,9 +51,21 @@ is_private() {
 }
 http_code() { curl -sk --max-time 5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null; }
 connects() { [ "$(http_code "$1")" != 000 ]; }
-no_connect() { [ "$(http_code "$1")" = 000 ]; }
 resolves_to() { getent ahostsv4 "$1" 2>/dev/null | awk '{print $1; exit}'; }
-unresolvable() { [ -z "$(resolves_to "$1")" ]; }
+no_connect() {
+    local code
+    code=$(http_code "$1")
+    [ "$code" = 000 ] && return 0
+    echo "connected, HTTP $code"
+    return 1
+}
+unresolvable() {
+    local ip
+    ip=$(resolves_to "$1")
+    [ -z "$ip" ] && return 0
+    echo "resolves to $ip"
+    return 1
+}
 
 nic=$(ip route show default | awk '{print $5; exit}')
 node=$(hostname)
@@ -89,33 +101,50 @@ chk "guest NAT path present: nat POSTROUTING -s 10.10.10.0/24 -j MASQUERADE" \
 
 echo
 echo "# Proxmox firewall (host services reachable only on the mgmt NIC)"
-node_rules=$(pvesh get "/nodes/$node/firewall/rules" --output-format json 2>/dev/null || echo '[]')
-cluster_rules=$(pvesh get /cluster/firewall/rules --output-format json 2>/dev/null || echo '[]')
+node_rules=$(pvesh get "/nodes/$node/firewall/rules" --output-format json 2>&1)
+node_rules_rc=$?
+cluster_rules=$(pvesh get /cluster/firewall/rules --output-format json 2>&1)
+cluster_rules_rc=$?
+fetched() { [ "$1" = 0 ] || { echo "$2"; return 1; }; }
+# Read the .fw files, not /cluster/firewall/options: pvesh cannot GET that path since
+# pve-manager 9.2.7 (https://bugzilla.proxmox.com/show_bug.cgi?id=7942). pmxcfs serves the
+# API from these files anyway, and pve-firewall status above covers the effective state.
 fw_enabled() {
-    local opts enable
-    opts=$(pvesh get "$1/firewall/options" --output-format json 2>&1) ||
-        { echo "pvesh get $1/firewall/options failed: $opts"; return 1; }
-    enable=$(jq -r '.enable // empty' <<<"$opts")
-    # Defensive: observed as 1, but accept a JSON boolean too rather than fail opaquely.
-    case "$enable" in 1 | true) return 0 ;; esac
-    echo "enable=${enable:-<absent>}; $1/firewall/options = $opts"
+    local f=$1 enable
+    [ -f "$f" ] || { echo "$f absent, so the firewall is off"; return 1; }
+    enable=$(awk '/^\[/ { s = $0 } s == "[OPTIONS]" && /^[[:space:]]*enable:/ { print $2; exit }' "$f")
+    [ "$enable" = 1 ] && return 0
+    echo "enable=${enable:-<unset>} in $f [OPTIONS]"
     return 1
 }
+in_accepts() { jq -c '[.[] | select(.type == "in" and .action == "ACCEPT") | {pos, proto, dport, iface, macro}]' <<<"$1"; }
 have_accept() {
     jq -e --arg p "$1" --arg d "$2" --arg i "$3" \
         'any(.[]; .type == "in" and .action == "ACCEPT" and ((.enable // 1) | tonumber) == 1
              and .proto == $p and ((.dport // "") | tostring) == $d and .iface == $i)' \
-        <<<"$node_rules" >/dev/null
+        <<<"$node_rules" >/dev/null && return 0
+    echo "node inbound ACCEPTs: $(in_accepts "$node_rules")"
+    return 1
 }
-# Anything an inbound ACCEPT opens without an --iface is open on the SDN gateway too,
-# i.e. to guests. Only the SDN DNS/DHCP ports are meant to be.
+# Anything an inbound ACCEPT opens without an --iface is open on the SDN gateway too, i.e.
+# to guests. Only the SDN DNS/DHCP ports are meant to be. A macro rule can't be resolved to
+# ports here, so it is reported rather than assumed harmless.
 no_unexpected_unbound() {
-    ! jq -e 'any(.[]; .type == "in" and .action == "ACCEPT" and ((.iface // "") == "")
-                 and ((((.proto // "") + "/" + ((.dport // "") | tostring)))
-                      | IN("udp/53", "tcp/53", "udp/67") | not))' <<<"$1" >/dev/null
+    local bad
+    bad=$(jq -r '[ .[]
+                   | select(.type == "in" and .action == "ACCEPT" and ((.iface // "") == ""))
+                   | select((((.proto // "") + "/" + ((.dport // "") | tostring)))
+                            | IN("udp/53", "tcp/53", "udp/67") | not)
+                   | "pos \(.pos) \(.macro // ((.proto // "?") + "/" + ((.dport // "?") | tostring)))"
+                 ] | join("; ")' <<<"$1")
+    [ -z "$bad" ] && return 0
+    echo "open to guests on the SDN gateway: $bad"
+    return 1
 }
-chk "cluster firewall enabled" fw_enabled /cluster
-chk "node firewall enabled" fw_enabled "/nodes/$node"
+chk "node firewall rules readable" fetched "$node_rules_rc" "$node_rules"
+chk "cluster firewall rules readable" fetched "$cluster_rules_rc" "$cluster_rules"
+chk "cluster firewall enabled" fw_enabled /etc/pve/firewall/cluster.fw
+chk "node firewall enabled" fw_enabled "/etc/pve/nodes/$node/host.fw"
 chk "API accepted only on the mgmt NIC: tcp/8006 iface=$nic" have_accept tcp 8006 "$nic"
 chk "SSH accepted only on the mgmt NIC: tcp/22 iface=$nic" have_accept tcp 22 "$nic"
 chk "no unbound inbound ACCEPT beyond SDN DNS/DHCP on the node" no_unexpected_unbound "$node_rules"
@@ -137,15 +166,25 @@ endpoint_ok() { is_private "$1" && connects "https://$2/"; }
 region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
 chk "region from IMDS" test -n "$region"
 endpoints=""
-# The host keeps these four (SSM is the operator's way in); a guest must not be able to
+# The host keeps these three — SSM is the operator's way in; a guest must not be able to
 # reach them at all, which is what the guest script's address arguments probe.
-for svc in ssm ssmmessages ec2messages monitoring; do
+for svc in ssm ssmmessages ec2messages; do
     name="$svc.$region.amazonaws.com"
     ip=$(resolves_to "$name")
     chk "interface endpoint $svc: $name resolves" test -n "$ip"
     chk "interface endpoint $svc: $ip private and answering on 443" endpoint_ok "$ip" "$name"
     endpoints="$endpoints $ip"
 done
+# The CloudWatch endpoint is optional, so a public answer here is a VPC without one rather
+# than a leak. Add it to the guest's target list only when it is an endpoint.
+name="monitoring.$region.amazonaws.com"
+ip=$(resolves_to "$name")
+if is_private "$ip"; then
+    chk "interface endpoint monitoring: $ip answering on 443" connects "https://$name/"
+    endpoints="$endpoints $ip"
+else
+    echo "SKIP  interface endpoint monitoring: ${ip:-unresolved} is not an endpoint in this VPC (metrics are optional)"
+fi
 chk "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" unresolvable deb.debian.org
 chk "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
 
