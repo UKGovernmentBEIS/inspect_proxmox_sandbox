@@ -5,9 +5,9 @@
 # both — this one ends by printing the guest command line to paste.
 # One PASS/SKIP line per check; exits at the first failure.
 #
-# Assumes the egress lockdown is armed (CONTRIBUTING.md) and the host sits in a VPC with
-# no route to the internet, reachable only via interface endpoints. That is the
-# configuration worth checking; an ordinary host fails these by design.
+# Assumes the configuration in the parent README's "Properly isolating the host": egress
+# lockdown armed, no route off the VPC, reachable only via interface endpoints. That is
+# the configuration worth checking; an ordinary host fails these by design.
 # shellcheck disable=SC2329  # the check helpers are invoked indirectly, via chk
 set -uo pipefail
 

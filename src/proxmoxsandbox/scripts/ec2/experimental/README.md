@@ -15,9 +15,10 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 
 ## Isolation checks
 
-Both scripts check one configuration: the egress lockdown armed (see
-CONTRIBUTING.md), in a VPC with no route to the internet. They have no options.
-On an ordinary host they fail by design — that host is not isolated.
+Both scripts check one configuration, the one the parent README's "Properly
+isolating the host" describes: egress lockdown armed, no route off the VPC.
+They have no options. On an ordinary host they fail by design — that host is
+not isolated.
 
 Run the host script first, then the guest one; the host script ends with a
 ready-to-paste guest command line, so per-VPC addresses are never hand-typed or
@@ -46,9 +47,9 @@ For a CVE scan of the baked AMI, get the inventory separately:
 Do that over SSH rather than SSM if you want the whole list: SSM
 `send-command` truncates output at 24k and the package list alone exceeds it.
 
-These are operator tools, not run by CI: the integration suite's host is a
-connected one, so `test_host_isolation_e2e.py` asserts only the subset that
-holds on any host.
+These are operator tools, run by no test. CI runs `pytest -m "not req_proxmox"`,
+and the manual `req_proxmox` suite needs a connected host, so
+`test_host_isolation_e2e.py` asserts only the subset that holds on any host.
 
 All scripts honour `REGION` (default `eu-west-2`). `connect.sh` also honours
 `SSH_KEY` (default `~/.ssh/id_ed25519`).

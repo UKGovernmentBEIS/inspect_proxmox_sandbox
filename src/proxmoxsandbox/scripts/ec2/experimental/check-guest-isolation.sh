@@ -5,9 +5,9 @@
 # script's arguments from the line that one prints.
 # One PASS/SKIP line per probe; exits at the first failure.
 #
-# Assumes a guest on a host with the egress lockdown armed: everything below must be
-# blocked. Without it the egress probes fail by design, because the guest can reach the
-# internet.
+# Assumes a guest on a host isolated per the parent README's "Properly isolating the
+# host": everything below must be blocked. Elsewhere the egress probes fail by design,
+# because the guest can reach the internet.
 #
 # Usage: check-guest-isolation.sh [IP[:PORT] ...]
 #   IP[:PORT]  addresses that must be unreachable — VPC interface endpoints, a host across

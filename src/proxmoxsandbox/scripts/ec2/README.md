@@ -144,6 +144,61 @@ password (see fixup services below), this is a per-launch attribute set at
 the build instance, and as the everyday-launch example above does) or you get
 instance-id only.
 
+## Properly isolating the host
+
+The AMI's rules stop a *sandbox VM* reaching the host and IMDS, and — with the egress
+lockdown armed — the internet. They say nothing about what the *host* can reach, and a
+guest that escapes to the host inherits all of it. For untrusted workloads the VPC has
+to close that half.
+
+`experimental/check-host-isolation.sh` asserts everything below; on a host with ordinary
+internet access it fails by design.
+
+**Host layer.** Arm the egress lockdown: `touch
+/etc/inspect-proxmox-egress-lockdown` and start
+`inspect-proxmox-egress-lockdown.service` (see CONTRIBUTING.md). It drops forwarded
+traffic across the management NIC in both directions and strips SDN dnsmasq's upstream
+resolver, so guests still get leases and DHCP but no recursion. A timer re-arms it, and
+its `OnFailure` halts the Proxmox API rather than leaving guests connected.
+
+**VPC layer**, five pieces:
+
+1. **A subnet with no route to the internet** — no `0.0.0.0/0` via an internet gateway,
+   no NAT gateway. The Prerequisites' "subnet with outbound internet access" is for the
+   *build* instance, which needs apt and the Proxmox repos; launch the baked AMI
+   somewhere with no such route.
+
+2. **Interface endpoints with private DNS enabled** for `com.amazonaws.<region>.ssm`,
+   `.ssmmessages` and `.ec2messages` — Session Manager is now the only way in — plus
+   `.monitoring` if you want the CloudWatch metrics above. Their security group needs
+   inbound 443 from the host's.
+
+3. **A Route 53 Resolver DNS Firewall rule group associated with the VPC**, walled-garden
+   style: an ALLOW rule listing the endpoint domains at a *lower* numeric priority than a
+   BLOCK rule matching `*`. First match wins, so the ordering is the whole mechanism.
+   Give the block rule the `NXDOMAIN` response — that's what the host script's
+   `deb.debian.org does not resolve` check expects.
+
+   The allow rule is not optional: DNS Firewall filters private hosted zone names too,
+   including VPC endpoint names, so a bare block-all takes SSM down with everything else.
+   It also matches on the domain name only and never sees the resolved address, so it
+   stops resolution, not traffic to an IP literal — that's what item 1 is for. It is the
+   only lever here: you [cannot filter the Amazon DNS server with security groups or
+   network ACLs](https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html#amazon-dns-rules).
+   See the [DNS Firewall
+   docs](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-dns-firewall.html).
+
+4. **A security group with no inbound rules** (SSM needs none) and outbound 443 to the
+   endpoints' security group.
+
+5. **`HttpPutResponseHopLimit=1`** — already in the launch example's
+   `--metadata-options`, and a backstop rather than the primary control.
+
+Routes to peered VPCs, transit gateways and on-prem survive all of this, and a guest that
+reaches one is off the host. Nothing in the AMI knows those addresses; pass them to
+`check-guest-isolation.sh` as positional `IP[:PORT]` arguments and it asserts they're
+dead.
+
 ## EC2-specific bits handled by `userdata.sh`
 
 - SSM agent (not in Debian 13 by default) — installed in stage 1.
