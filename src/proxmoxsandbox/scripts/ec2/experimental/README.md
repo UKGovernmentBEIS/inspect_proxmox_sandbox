@@ -15,10 +15,9 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 
 ## Isolation checks
 
-Both scripts check one configuration: a host launched `--no-internet`, with the
-guest egress lockdown armed and the isolated VPC's AWS-level controls in place.
-They have no options. On an ordinary connected host they fail by design — that
-host is not isolated.
+Both scripts check one configuration: the egress lockdown armed (see
+CONTRIBUTING.md), in a VPC with no route to the internet. They have no options.
+On an ordinary host they fail by design — that host is not isolated.
 
 Run the host script first, then the guest one; the host script ends with a
 ready-to-paste guest command line, so per-VPC addresses are never hand-typed or

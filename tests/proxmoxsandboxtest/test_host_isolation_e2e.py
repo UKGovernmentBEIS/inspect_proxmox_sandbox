@@ -7,8 +7,8 @@ integration suite — if it fails, the host you're testing against wasn't
 provisioned correctly (e.g. a hand-rolled Proxmox missing the firewall config).
 
 The fuller probes live in scripts/ec2/experimental/check-{host,guest}-isolation.sh,
-which assume a --no-internet host — not the connected host the rest of the suite
-needs. What is asserted here is the subset that holds on any host.
+which assume the egress lockdown is armed — which fails the rest of the suite. What
+is asserted here is the subset that holds on any host.
 """
 
 import pytest
