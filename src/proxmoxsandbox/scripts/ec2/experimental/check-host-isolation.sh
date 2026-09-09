@@ -194,6 +194,11 @@ if [ -n "$endpoint_args" ]; then
     echo "  check-guest-isolation.sh --expect-no-egress --strict$endpoint_args"
 fi
 
+echo
+echo "$pass pass, $fail fail, $skipped skip"
+
+# Last, and after the summary: SSM send-command truncates at 24k, which the package
+# list blows through on its own.
 if $inventory; then
     echo
     echo "### versions"
@@ -205,8 +210,6 @@ if $inventory; then
     dpkg-query -W -f='${Package}\t${Version}\n'
 fi
 
-echo
-echo "$pass pass, $fail fail, $skipped skip"
 if [ "$fail" -gt 0 ] || { $strict && [ "$skipped" -gt 0 ]; }; then
     exit 1
 fi

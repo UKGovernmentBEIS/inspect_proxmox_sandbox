@@ -44,7 +44,10 @@ only a `--no-internet` launch also gets the VPC-level controls.
 Guest-only: `--aws-endpoint IP`, `--peer-target IP[:PORT]`, `--egress-target
 HOST:PORT`, `--dns-name NAME`, `--internal-name NAME`, `--peer-guest IP|NAME` —
 all repeatable except the last two, all site-specific, all SKIP when not given.
-Host-only: `--inventory` prints PVE/QEMU/kernel/package versions for a CVE scan.
+Host-only: `--inventory` prints PVE/QEMU/kernel/package versions for a CVE scan. It comes
+after the summary because SSM `send-command` truncates output at 24k and the package list
+alone exceeds that — for the whole list, run it over SSH rather than through
+`run-script-on-host.sh`.
 
 `tests/proxmoxsandboxtest/test_host_isolation_e2e.py` runs both scripts, so they
 stay the single source of truth for what "isolated" means here.
