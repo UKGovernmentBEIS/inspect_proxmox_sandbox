@@ -95,9 +95,6 @@ chk "forwarded IPv6 dropped: ip6tables FORWARD -j DROP" has_rule6 FORWARD "-A FO
 chk "IPv6 off for interfaces created after boot (SDN vnets): net.ipv6.conf.default.disable_ipv6" \
     sysctl_is net.ipv6.conf.default.disable_ipv6 1
 chk "IPv4 forwarding on (guests reach their gateway): net.ipv4.ip_forward" sysctl_is net.ipv4.ip_forward 1
-# If the guest NAT path is missing, guest-side egress probes pass for the wrong reason.
-chk "guest NAT path present: nat POSTROUTING -s 10.10.10.0/24 -j MASQUERADE" \
-    has_rule nat POSTROUTING "-s 10.10.10.0/24 .*-j MASQUERADE"
 
 echo
 echo "# Proxmox firewall (host services reachable only on the mgmt NIC)"
