@@ -21,6 +21,7 @@ dependencies = [
 
 [project.entry-points."inspect_ai"]
 "proxmox-sandbox" = "proxmoxsandbox._proxmox_sandbox_environment"
+"proxmox-existing-sandbox" = "proxmoxsandbox._existing_proxmox_sandbox_environment"
 
 [tool.uv.sources]
 inspect-ai = { git = "https://github.com/UKGovernmentBEIS/inspect_ai", rev = "9fa31ccbccd0157bab73b1caa8b03c522470f83d" }
