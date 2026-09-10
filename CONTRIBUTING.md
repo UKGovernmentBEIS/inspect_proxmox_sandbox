@@ -6,6 +6,36 @@ in our [Inspect
 Community](https://join.slack.com/t/inspectcommunity/shared_invite/zt-2w9eaeusj-4Hu~IBHx2aORsKz~njuz4g)
 Slack workspace.
 
+## Before you open a PR
+
+This provider is a thin layer over infrastructure we don't control — the Proxmox REST
+API and the QEMU guest agent. Most bugs in it are claims about what that infrastructure
+does at runtime, and those are cheap to get wrong from reading documentation or upstream
+source.
+
+If your change asserts a runtime behaviour, we need the observation, not the derivation.
+
+- **Run it against a real Proxmox host and paste what you saw.** A local or EC2-hosted
+  instance is fine — see below. The `req_proxmox` marker identifies the tests that need
+  one. A test without that marker is not evidence about runtime behaviour, however green
+  it is.
+- **Show the negative control.** Give the result with your change and without it. If you
+  can't produce a run that fails on `main` and passes on your branch, say so and explain
+  why.
+- **If you can't run it, open an issue rather than a PR.** Reasoning, upstream source
+  links and a proposed patch are all welcome in an issue. A confidently argued wrong
+  premise costs more than no PR at all, because it has to be disproved before it can be
+  declined.
+
+Two traps specific to this repo. The QEMU guest agent channel on Windows drops roughly
+5–7% of calls, so a single passing run is weak evidence — repeat it and report the counts
+(`5/5`). And the Proxmox API returns HTTP 500 rather than 404 for resources that don't
+exist, so error-path claims in particular can't be settled from the API docs.
+
+A sufficient experiment looks like: baseline without the change, the behaviour with it,
+then baseline again to show the effect went away — several attempts per phase, plus a
+positive control proving the test could have observed a difference if there were one.
+
 ## Getting started
 
 This project uses [uv](https://github.com/astral-sh/uv) for Python packaging.
@@ -16,13 +46,12 @@ Run this beforehand:
 uv sync
 ```
 
-You then can either source the venv with
+The commands below are written as `uv run ...`, which works whether or not the venv is
+activated. Drop the prefix if you'd rather activate it:
 
 ```
 source .venv/bin/activate
 ```
-
-or prefix your pytest (etc.) commands with `uv run ...`
 
 ## Setting up a Proxmox instance for testing
 
@@ -46,7 +75,7 @@ The intended workflow is to build a Proxmox AMI once, then launch from it many t
 
 Such proxmox servers require `PROXMOX_IMAGE_STORAGE=local` as they have no lvm storage.
 
-## Tests
+## Testing
 
 To run the tests, you will need a Proxmox instance and an `.env` file per README.md.
 
@@ -59,6 +88,12 @@ uv run pytest
 ```
 
 The tests require your Proxmox node to have at least 3 vCPUs available.
+
+Tests that need a host carry the `req_proxmox` marker, so to run only those that don't:
+
+```
+uv run pytest -m "not req_proxmox"
+```
 
 ### Windows VM Tests
 
@@ -129,6 +164,38 @@ manually:
 ```bash
 uv run mypy
 ```
+
+## Changelog
+
+If appropriate, add an entry under the `## Unreleased` heading in `CHANGELOG.md` when
+submitting a PR. Create that heading if the last release consumed it.
+
+Entries under a dated release heading are published history — don't add to or edit
+them. In particular, if a release is cut after you branch, a stale branch can silently
+land your entry in the just-released section (the release commit renames `##
+Unreleased` to the dated heading, so your diff still applies): after rebasing onto
+`main`, check your entry still sits under `## Unreleased`.
+
+## Conventions
+
+### Package Structure and API Visibility
+
+The Python packages, modules and members follow a similar API visibility naming
+convention to that used in the [inspect_ai](https://inspect.aisi.org.uk/) package.
+
+The public surface is `schema.py` (the config models an eval imports) and the
+`proxmox-sandbox` entry point. Everything else is internal.
+
+Module-private members are prefixed with an underscore `_`. These members are not
+intended for use outside of the module in which they are defined (except in tests).
+
+Class-private members are prefixed with an underscore `_`. These members are not
+intended for use outside of the class in which they are defined (except in tests). We
+don't use double underscores `__`  which is consistent with [Google's Python style
+guide](https://google.github.io/styleguide/pyguide.html).
+
+Non-public modules (i.e. .py files) are prefixed with an underscore `_` (unless a parent
+package is already prefixed with an underscore).
 
 ## Design Notes
 
