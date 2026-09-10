@@ -83,51 +83,50 @@ async def test_cli_cleanup_all_instances(multi_instance_config_file):
             ) as mock_proxmox_api,
             patch.object(InfraCommands, "build", side_effect=create_mock_infra),
         ):
+            mock_proxmox_api.from_instance_config.return_value.aclose = AsyncMock()
             await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
 
-            mock_proxmox_api.from_instance_config.assert_has_calls(
-                [
-                    call(
-                        ProxmoxInstanceConfig(
-                            instance_id="server-1",
-                            pool_id="pool-a",
-                            host="10.0.1.10",
-                            port=8006,
-                            user="root",
-                            user_realm="pam",
-                            password="test",
-                            node="pve1",
-                            verify_tls=False,
-                        )
-                    ),
-                    call(
-                        ProxmoxInstanceConfig(
-                            instance_id="server-2",
-                            pool_id="pool-a",
-                            host="10.0.1.11",
-                            port=8006,
-                            user="root",
-                            user_realm="pam",
-                            password="test",
-                            node="pve2",
-                            verify_tls=False,
-                        )
-                    ),
-                    call(
-                        ProxmoxInstanceConfig(
-                            instance_id="server-3",
-                            pool_id="pool-b",
-                            host="10.0.1.20",
-                            port=8006,
-                            user="root",
-                            user_realm="pam",
-                            password="test",
-                            node="pve3",
-                            verify_tls=False,
-                        )
-                    ),
-                ]
-            )
+            assert mock_proxmox_api.from_instance_config.call_args_list == [
+                call(
+                    ProxmoxInstanceConfig(
+                        instance_id="server-1",
+                        pool_id="pool-a",
+                        host="10.0.1.10",
+                        port=8006,
+                        user="root",
+                        user_realm="pam",
+                        password="test",
+                        node="pve1",
+                        verify_tls=False,
+                    )
+                ),
+                call(
+                    ProxmoxInstanceConfig(
+                        instance_id="server-2",
+                        pool_id="pool-a",
+                        host="10.0.1.11",
+                        port=8006,
+                        user="root",
+                        user_realm="pam",
+                        password="test",
+                        node="pve2",
+                        verify_tls=False,
+                    )
+                ),
+                call(
+                    ProxmoxInstanceConfig(
+                        instance_id="server-3",
+                        pool_id="pool-b",
+                        host="10.0.1.20",
+                        port=8006,
+                        user="root",
+                        user_realm="pam",
+                        password="test",
+                        node="pve3",
+                        verify_tls=False,
+                    )
+                ),
+            ]
             assert mock_proxmox_api.from_instance_config.call_count == 3
 
             # Verify InfraCommands.build was called for each instance
@@ -237,9 +236,12 @@ async def test_cli_cleanup_handles_cleanup_error():
             return mock_infra
 
         with (
-            patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"),
+            patch(
+                "proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"
+            ) as mock_proxmox_api,
             patch.object(InfraCommands, "build", side_effect=create_failing_infra),
         ):
+            mock_proxmox_api.from_instance_config.return_value.aclose = AsyncMock()
             # Should raise the exception from the first cleanup
             with pytest.raises(Exception, match="Cleanup failed on first instance"):
                 await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
@@ -297,9 +299,12 @@ async def test_cli_cleanup_pools_created_correctly():
             return mock_infra
 
         with (
-            patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"),
+            patch(
+                "proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"
+            ) as mock_proxmox_api,
             patch.object(InfraCommands, "build", side_effect=create_mock_infra),
         ):
+            mock_proxmox_api.from_instance_config.return_value.aclose = AsyncMock()
             # Pools should not exist before cleanup
             assert len(ProxmoxSandboxEnvironment.proxmox_pool._instance_pools) == 0
 
