@@ -30,6 +30,11 @@ from proxmoxsandbox.schema import (
 )
 
 VM_TIMEOUT = 1200
+CLOUD_INIT_TIMEOUT = 1200
+# 41 GiB used after install (39 GiB of it /usr), so ~20 GiB free for the eval
+KALI_DISK_GIB = 64
+# Measured 25 min on a 2-vCPU guest on an r8i.4xlarge host in eu-west-2
+KALI_CLOUD_INIT_TIMEOUT = 3600
 
 TRACE_NAME = "proxmox_built_in_vm"
 
@@ -96,11 +101,7 @@ class BuiltInVM(abc.ABC):
                 f"{required_major}.{required_minor}"
             )
 
-    async def create_and_upload_cloudinit_iso(
-        self,
-        vm_id: int,
-        meta_data: str = """instance-id: proxmox\n""",  # TODO sort this
-        user_data: str = """#cloud-config
+    DEFAULT_USER_DATA = """#cloud-config
 package_update: true
 # Installs packages equivalent to Inspect's default Docker image for tool compatibility
 # TODO actually install inspect-tool-support here
@@ -167,7 +168,23 @@ runcmd:
   - [ systemctl, mask, systemd-networkd-wait-online.service ]
 # systemd-networkd-wait-online.service causes startup delays
 # and makes it annoying to debug network issues
-""",  # noqa: E501
+"""  # noqa: E501
+
+    # Not in packages: the Kali image has no qemu-guest-agent, so one apt transaction
+    # would keep the agent down past await_vm's 5 min ping window.
+    # Must stay the last runcmd entry: cloud-init only reports the last command's exit
+    # status, so a failed install would otherwise still produce "status: done".
+    # apt-get clean drops ~13 GiB of cached .debs from the template
+    KALI_USER_DATA = (
+        DEFAULT_USER_DATA.rstrip("\n")
+        + "\n  - [ sh, -c, DEBIAN_FRONTEND=noninteractive apt-get install -y kali-linux-everything && apt-get clean ]\n"  # noqa: E501
+    )
+
+    async def create_and_upload_cloudinit_iso(
+        self,
+        vm_id: int,
+        meta_data: str = """instance-id: proxmox\n""",  # TODO sort this
+        user_data: str = DEFAULT_USER_DATA,
         network_config: str = """network:
   version: 2
   ethernets:
@@ -331,6 +348,9 @@ runcmd:
                 built_in=built_in_name,
                 source_image_source_url=KALI_DOWNLOAD_URL,
                 disk_renamed=KALI_DISK_RENAMED,
+                user_data=self.KALI_USER_DATA,
+                disk_gib=KALI_DISK_GIB,
+                cloud_init_timeout=KALI_CLOUD_INIT_TIMEOUT,
             )
         else:
             raise ValueError(f"Unknown built-in {built_in_name}")
@@ -380,6 +400,9 @@ runcmd:
         built_in: str,
         source_image_source_url: str,
         disk_renamed: str,
+        user_data: str,
+        disk_gib: int | None,
+        cloud_init_timeout: int,
     ) -> None:
         # Unfortunately Kali only provide VM images in .xz and .7z formats,
         # neither of which are supported by Proxmox's "download from URL".
@@ -389,7 +412,7 @@ runcmd:
 
         download_filename = Path(urlparse(source_image_source_url).path).name
 
-        if await self.content_exists(download_filename):
+        if await self.content_exists(disk_renamed):
             self.logger.debug(f"source image {built_in} already uploaded")
         else:
             with trace_action(
@@ -437,7 +460,14 @@ runcmd:
 
         await self.ensure_static_sdn_exists()
 
-        await self.startup_vm(next_available_vm_id, built_in, f"import/{disk_renamed}")
+        await self.startup_vm(
+            next_available_vm_id,
+            built_in,
+            f"import/{disk_renamed}",
+            user_data=user_data,
+            disk_gib=disk_gib,
+            cloud_init_timeout=cloud_init_timeout,
+        )
 
     async def ensure_source_uploaded(
         self,
@@ -478,11 +508,14 @@ runcmd:
         next_available_vm_id: int,
         built_in: str,
         import_source: str,
+        user_data: str = DEFAULT_USER_DATA,
+        disk_gib: int | None = None,
+        cloud_init_timeout: int = CLOUD_INIT_TIMEOUT,
     ) -> None:
         with trace_action(
             self.logger,
             TRACE_NAME,
-            f"create VM from OVA {next_available_vm_id=}",
+            f"create VM from import {next_available_vm_id=}",
         ):
 
             async def do_create() -> None:
@@ -510,8 +543,20 @@ runcmd:
 
             await self.task_wrapper.do_action_and_wait_for_tasks(do_create)
 
+            if disk_gib is not None:
+                # cloud-init's growpart/resizefs pick this up on first boot
+                async def resize_disk() -> None:
+                    await self.async_proxmox.request(
+                        "PUT",
+                        f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
+                        json={"disk": "scsi0", "size": f"{disk_gib}G"},
+                    )
+
+                await self.task_wrapper.do_action_and_wait_for_tasks(resize_disk)
+
             await self.create_and_upload_cloudinit_iso(
                 vm_id=next_available_vm_id,
+                user_data=user_data,
             )
 
             async def update_tags() -> None:
@@ -538,8 +583,9 @@ runcmd:
             )
 
             @tenacity.retry(
-                wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                stop=tenacity.stop_after_delay(VM_TIMEOUT),
+                # Uncapped, the backoff reaches tens of minutes per poll inside an hour
+                wait=tenacity.wait_exponential(min=0.1, max=30, exp_base=1.3),
+                stop=tenacity.stop_after_delay(cloud_init_timeout),
                 retry=tenacity.retry_if_result(lambda x: x is False),
             )
             async def wait_for_cloud_init() -> bool:
