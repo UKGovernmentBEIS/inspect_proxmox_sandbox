@@ -14,16 +14,13 @@ dependencies = [
     "pycdlib>=1.14.0",
     "pydantic-extra-types>=2.10.2",
     "pycurl>=7.45.0",
-    "inspect_ai>=0.3.79",
+    "inspect_ai>=0.3.261",
     "rich>=13.9",
     "platformdirs>=4.3.7",
 ]
 
 [project.entry-points."inspect_ai"]
 "proxmox-sandbox" = "proxmoxsandbox._proxmox_sandbox_environment"
-
-[tool.uv.sources]
-inspect-ai = { git = "https://github.com/UKGovernmentBEIS/inspect_ai", rev = "9fa31ccbccd0157bab73b1caa8b03c522470f83d" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
