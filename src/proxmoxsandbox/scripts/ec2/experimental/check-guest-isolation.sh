@@ -42,9 +42,9 @@ dig_rcode() { # server type name -> rcode, empty if nothing answered
 dns_state() { # server type name
     local rcode
     rcode=$(dig_rcode "$@")
-    case "${rcode:-none}" in
+    case "$rcode" in
         NOERROR|NXDOMAIN) echo "reachable($rcode)" ;;
-        none) echo "blocked(no response)" ;;
+        "") echo "blocked(no response)" ;;
         *) echo "blocked($rcode)" ;;
     esac
 }
