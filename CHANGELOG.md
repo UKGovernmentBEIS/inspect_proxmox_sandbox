@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The `kali2025.4` built-in now installs `kali-linux-everything` on a 64 GiB disk. Hosts that already have a `builtin-kali2025.4` template must `qm destroy` it.
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.

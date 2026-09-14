@@ -540,6 +540,8 @@ Two things worth knowing:
 
 The built-in VMs (`ubuntu24.04`, `debian13`, `kali2025.4`) pin specific upstream image URLs in `built_in_vm.py`. These are not auto-updated — when a new upstream release appears (e.g. a new Kali quarterly release), the URL, the `Literal` type in `schema.py`, and all references in tests and examples must be updated together.
 
+The Kali built-in installs the `kali-linux-everything` metapackage on top of the buildpack set, so an eval can run offline.
+
 ## Tech debt
 
 - Large OVA uploads use PycURL, because neither aiohttp nor httpx worked with large uploads

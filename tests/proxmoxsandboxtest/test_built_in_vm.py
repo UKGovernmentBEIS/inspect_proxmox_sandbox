@@ -3,17 +3,18 @@ import pytest
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 
-pytestmark = pytest.mark.req_proxmox
 
-
+@pytest.mark.req_proxmox
 async def test_ubuntu(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
     await _do_test_builtin(qemu_commands, built_in_vm, "ubuntu24.04")
 
 
+@pytest.mark.req_proxmox
 async def test_debian(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
     await _do_test_builtin(qemu_commands, built_in_vm, "debian13")
 
 
+@pytest.mark.req_proxmox
 async def test_kali(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
     await _do_test_builtin(qemu_commands, built_in_vm, "kali2025.4")
 
