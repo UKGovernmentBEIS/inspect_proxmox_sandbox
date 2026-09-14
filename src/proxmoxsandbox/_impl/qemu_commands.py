@@ -18,6 +18,17 @@ from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
 
 
+def _canonical_vm_id(vm_id: int | str) -> int:
+    if (
+        isinstance(vm_id, bool)
+        or not isinstance(vm_id, (int, str))
+        or re.fullmatch(r"[0-9]+", str(vm_id)) is None
+        or int(vm_id) <= 0
+    ):
+        raise ValueError("VM ID must be a positive integer or decimal string")
+    return int(vm_id)
+
+
 class QemuCommands(abc.ABC):
     logger = getLogger(__name__)
 
@@ -45,12 +56,14 @@ class QemuCommands(abc.ABC):
         self.image_storage = image_storage
         self._tracked_vm_ids: Set[int] = set()
 
-    def register_vm(self, vm_id: int) -> None:
-        self._tracked_vm_ids.add(vm_id)
+    def register_vm(self, vm_id: int | str) -> None:
+        # /cluster/nextid can return a string while VM inventory returns ints.
+        self._tracked_vm_ids.add(_canonical_vm_id(vm_id))
 
-    def deregister_vms(self, vm_ids: Collection[int]) -> None:
-        for vm_id in vm_ids:
-            self._tracked_vm_ids.discard(vm_id)
+    def deregister_vms(self, vm_ids: Collection[int | str]) -> None:
+        self._tracked_vm_ids.difference_update(
+            {_canonical_vm_id(vm_id) for vm_id in vm_ids}
+        )
 
     async def task_cleanup(self) -> None:
         self.logger.debug(f"qemu_commands task_cleanup; vms={self._tracked_vm_ids}")

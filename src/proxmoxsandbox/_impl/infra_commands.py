@@ -557,6 +557,21 @@ class InfraCommands(abc.ABC):
 
         for vm in noticed_vms:
             await self.qemu_commands.destroy_vm(vm["vmid"])
+            # Retire each successful deletion even if a later resource fails:
+            # task_cleanup must not poll an already-deleted VM's stop status.
+            self.qemu_commands.deregister_vms((vm["vmid"],))
         await self.sdn_commands.tear_down_sdn_zones_and_vnets(
             zones_to_delete, noticed_ipam_mappings
         )
+        # SDN teardown logs some API failures without raising, so retain
+        # ownership until the zone is confirmed absent from the inventory.
+        remaining_zones = (
+            {zone["zone"] for zone in await self.sdn_commands.list_sdn_zones()}
+            if zones_to_delete
+            else set()
+        )
+        for zone_id in zones_to_delete - remaining_zones:
+            self.sdn_commands.deregister_sdn_resources(
+                zone_id,
+                [m for m in noticed_ipam_mappings if m.zone_id == zone_id],
+            )

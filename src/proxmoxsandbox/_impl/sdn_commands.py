@@ -116,6 +116,13 @@ class SdnCommands(abc.ABC):
     ) -> None:
         if sdn_zone_id:
             self._tracked_sdn_zone_ids.discard(sdn_zone_id)
+            # The server may already have removed leases before discovery.
+            # No lease can remain owned once its zone is successfully removed.
+            self._tracked_ipam_mappings[:] = [
+                mapping
+                for mapping in self._tracked_ipam_mappings
+                if mapping.zone_id != sdn_zone_id
+            ]
         for m in ipam_mappings:
             try:
                 self._tracked_ipam_mappings.remove(m)
