@@ -38,8 +38,10 @@ class VmReadinessState:
     phase: str = "pending"
     detail: str = "waiting to start"
     checks: list[CheckState] = field(init=False)
+    pending_dependencies: tuple[str, ...] = field(init=False)
 
     def __post_init__(self) -> None:
+        self.pending_dependencies = self.config.depends_on
         self.checks = [
             CheckState(check) for check in self.config.effective_readiness_checks()
         ]

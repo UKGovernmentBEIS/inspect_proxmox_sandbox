@@ -5,6 +5,7 @@ import pytest
 from inspect_ai.util import ExecResult
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
+from proxmoxsandbox._impl.readiness_display import ReadinessDisplay
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
@@ -112,7 +113,18 @@ async def test_tuple_scheduler_preserves_legacy_startup_barriers():
     ] == [100, 101]
 
 
-async def test_dependency_scheduler_starts_newly_unblocked_vms():
+async def test_dependency_scheduler_starts_newly_unblocked_vms(monkeypatch):
+    snapshots = []
+
+    class RecordingDisplay(ReadinessDisplay):
+        def changed(self):
+            snapshots.append(
+                {state.name: state.pending_dependencies for state in self.states}
+            )
+
+    monkeypatch.setattr(
+        "proxmoxsandbox._impl.infra_commands.ReadinessDisplay", RecordingDisplay
+    )
     vms_config = {
         "dns": vm_config(),
         "database": vm_config(),
@@ -143,6 +155,17 @@ async def test_dependency_scheduler_starts_newly_unblocked_vms():
     vm_configs_with_ids, _, _ = await asyncio.wait_for(create_task, timeout=1)
 
     assert [proxmox_id for proxmox_id, _ in vm_configs_with_ids] == [100, 101, 102, 103]
+    assert snapshots[0] == {
+        "dns": (),
+        "database": (),
+        "worker": ("database",),
+        "application": ("dns", "database"),
+    }
+    assert any(
+        snapshot["worker"] == () and snapshot["application"] == ("dns",)
+        for snapshot in snapshots
+    )
+    assert snapshots[-1] == dict.fromkeys(vms_config, ())
 
 
 async def test_dependency_readiness_failure_does_not_start_dependants():
@@ -276,3 +299,43 @@ async def test_all_ipam_mappings_precede_any_vm_creation():
         event.set()
     await infra.create_sdn_and_vms("test", None, configs)
     assert calls == ["ipam", "ipam", "create", "create"]
+
+
+async def test_legacy_barrier_dependencies_are_explicit_and_cleared(monkeypatch):
+    snapshots = []
+
+    class RecordingDisplay(ReadinessDisplay):
+        def changed(self):
+            snapshots.append(
+                tuple(
+                    (state.phase, state.pending_dependencies) for state in self.states
+                )
+            )
+
+    monkeypatch.setattr(
+        "proxmoxsandbox._impl.infra_commands.ReadinessDisplay", RecordingDisplay
+    )
+    configs = {
+        "database": vm_config(await_before_next_vm=True),
+        "application": vm_config(),
+        "worker": vm_config(),
+    }
+    infra, started, ready = infra_with_vm_events(configs)
+    create = asyncio.create_task(
+        infra.create_sdn_and_vms("test", None, tuple(configs.values()))
+    )
+    await wait_until_set(started["database"])
+    assert any(snapshot[1][1] == snapshot[2][1] == ("1:vm",) for snapshot in snapshots)
+    assert not started["application"].is_set()
+    ready["database"].set()
+    await wait_until_set(started["application"])
+    ready["application"].set()
+    ready["worker"].set()
+    await asyncio.wait_for(create, 1)
+    assert all(dependencies == () for _, dependencies in snapshots[-1])
+    assert all(
+        dependencies == ()
+        for snapshot in snapshots
+        for phase, dependencies in snapshot
+        if phase == "creating"
+    )

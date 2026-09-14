@@ -490,29 +490,57 @@ avoid detaching background work from them.
 
 #### Startup display
 
-Startup prints every VM, including those blocked on dependencies, followed by its
-individual checks. The display includes ready/not-ready state, retry and timeout
-countdowns, scheduled repairs, repair command progress, and attempt counts:
+Startup has three output levels, selected with `PROXMOX_READINESS_LEVEL=0|1|2`.
+The default, level 0, prints one aggregate line for the whole sample:
 
 ```text
-database (ID=101): NOT READY / checking — waiting for readiness checks
-  proxmox-running: ready: passed
-  qemu-agent: ready: passed
-  application-service: waiting: exit code 3; expected 0; retry in 4.0s; timeout in 580.0s; repair in 280.0s; repairs 0/1
-worker: NOT READY / pending — waiting for dependencies: database
-  proxmox-running: pending: waiting for VM startup
-  qemu-agent: pending: waiting for VM startup
+[sample123] 9 ready. Booting: {dc-udra 8/9, web 3/9}. Waiting to boot: {fs, db}.
 ```
 
-Use Inspect's `--display=rich` in a terminal for an in-place tree refreshed each
-second (requires a Rich version that supports nested live displays if Inspect
-already has one). CI/non-terminal output, `--display=plain`, and Inspect's
-full-screen/conversation UI receive timestamped snapshots on changes, coalesced
-to once per second, and a heartbeat snapshot every 15 seconds. Older Rich versions
-fall back to snapshots. Probe outcomes and repair transitions are also printed as
-durable events, so a short-lived repair isn't lost between refreshes. A final tree
-is printed on success, failure, or cancellation. Command arguments and output are
-not echoed by the readiness display. `--display=none` suppresses this output too.
+Each booting VM's `n/m` is its green check count over its total effective check
+count, including implicit checks. Ready VMs are counted; pending VMs, unresolved
+`depends_on` waits, and legacy tuple startup barriers appear under `Waiting to
+boot`. `Booting` includes creation and readiness checks. Names within each group
+follow VM declaration order. Both `Booting: {...}.` and `Waiting to boot: {...}.`
+remain present when empty. `Failed: {...}.` and `Cancelled: {...}.` are appended
+when nonempty; failed or cancelled VMs are excluded from the other groups.
+
+Level 1 prints every VM's compact status together as one multiline snapshot:
+
+```text
+[sample123] database: BOOTING. 2/3 checks green, 0 repair attempts.
+[sample123] worker: WAITING ON {database}
+```
+
+`WAITING ON` lists unresolved dependency identifiers in their configured order,
+or the current legacy tuple startup barrier. Pending VMs without a dependency
+use `WAITING TO BOOT`. The repair count sums attempts across the VM's checks.
+Terminal states use `READY`, `FAILED`, or `CANCELLED` with the same counts.
+
+Level 2 includes every VM and every check, one row each, in the same snapshot:
+
+```text
+[sample123] database: BOOTING. 1/2 checks green, 0 repair attempts.
+[sample123]   database/proxmox-running: ready: passed; probes 1
+[sample123]   database/application-service: waiting: exit code 3; expected 0; retry in 4.0s; timeout in 580.0s; repair in 280.0s; repairs 0/1; probes 2
+[sample123] worker: WAITING ON {database}
+[sample123]   worker/proxmox-running: pending: waiting for VM startup
+```
+
+Every snapshot is emitted through one `Console.print` call. Lines stay in the
+transcript; there are no live redraws, timers, or heartbeat snapshots. A snapshot
+prints only when state visible at its selected level changes. At levels 1 and 2,
+the complete snapshot is repeated when needed, including unchanged VMs, so each
+block is self-contained. Level 2 also responds to probe, retry, and repair state
+changes. Countdown values describe the snapshot time; elapsed time alone never
+causes a new snapshot.
+
+Each line carries the sample label, and the console does not insert line wraps.
+Commands, guest output, and raw exception messages are excluded. Terminal control
+characters are escaped and Rich markup is treated literally. Inspect's
+`--display=none` suppresses all three levels. The internal
+`ReadinessDisplay(..., level=0|1|2)` constructor overrides the environment setting.
+The environment defaults to `0`; invalid levels are rejected.
 
 ### VM Names
 

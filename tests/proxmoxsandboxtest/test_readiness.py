@@ -6,7 +6,6 @@ import pytest
 from inspect_ai.util import ExecResult
 from pydantic import ValidationError
 from rich.console import Console
-from rich.errors import LiveError
 from rich.live import Live
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
@@ -387,7 +386,7 @@ async def test_command_executor_reuses_guest_wrapper_with_timeout():
     )
 
 
-def test_render_tree_includes_every_vm_retry_and_repair():
+def test_detailed_render_includes_every_vm_retry_and_repair():
     runner, _, _, _ = runner_for(
         vm(
             command_check(
@@ -403,32 +402,46 @@ def test_render_tree_includes_every_vm_retry_and_repair():
     check.next_retry = 15
     check.next_repair = 300
     check.deadline = 600
-    pending = VmReadinessState("worker", vm())
-    pending.detail = "waiting for dependencies: database"
-    tree = render_readiness([state, pending], 10)
-    assert "database (ID=100): NOT READY" in tree
-    assert "  service: waiting: exit code 1; retry in 5.0s" in tree
+    pending = VmReadinessState(
+        "worker", vm().model_copy(update={"depends_on": ("database",)})
+    )
+    pending.detail = "arbitrary details are not dependency names"
+    tree = render_readiness([state, pending], 10, level=2)
+    assert "database: BOOTING. 0/2 checks green, 0 repair attempts." in tree
+    assert "  database/service: waiting: exit code 1; retry in 5.0s" in tree
     assert "repair in 290.0s; repairs 0/1" in tree
-    assert "worker: NOT READY / pending" in tree
-    assert "waiting for dependencies: database" in tree
+    assert "worker: WAITING ON {database}" in tree
+    assert "arbitrary details" not in tree
 
 
-async def test_display_snapshots_and_durable_repair_events():
+async def test_compact_display_deduplicates_summaries_across_interleaved_output():
     output = StringIO()
     console = Console(file=output, width=200, color_system=None)
     state = VmReadinessState("vm", vm(command_check()), vm_id=100)
-    display = ReadinessDisplay([state], "sample-1", console=console)
+    display = ReadinessDisplay([state], "sample-1", console=console, level=1)
     async with display:
+        state.phase = "checking"
+        state.checks[0].phase = "ready"
+        display.changed()
+        console.print("unrelated provider log")
         state.checks[-1].phase = "repairing"
+        state.checks[-1].repairs = 1
         state.checks[-1].detail = "repair attempt 1/1"
         display.changed()
+        state.checks[-1].detail = "repair attempt 1/1, command 1/2"
+        display.changed()
+        display.changed()
+        for check in state.checks:
+            check.phase = "ready"
         state.phase = "ready"
-    text = output.getvalue()
-    assert "sample-1" in text
-    assert "NOT READY" in text
-    assert "repair attempt 1/1" in text
-    assert "vm (ID=100): READY" in text
-    assert display.task is not None and display.task.done()
+        display.changed()
+    assert output.getvalue().splitlines() == [
+        "[sample-1] vm: WAITING TO BOOT. 0/2 checks green, 0 repair attempts.",
+        "[sample-1] vm: BOOTING. 1/2 checks green, 0 repair attempts.",
+        "unrelated provider log",
+        "[sample-1] vm: BOOTING. 1/2 checks green, 1 repair attempts.",
+        "[sample-1] vm: READY. 2/2 checks green, 1 repair attempts.",
+    ]
 
 
 async def test_public_status_does_not_echo_exception_secrets():
@@ -439,7 +452,10 @@ async def test_public_status_does_not_echo_exception_secrets():
     with pytest.raises(ReadinessTimeoutError) as exc:
         await runner.run()
     assert "secret-token" not in str(exc.value)
-    assert "secret-token" not in render_readiness([runner.state], 1)
+    for level in (0, 1, 2):
+        rendered = render_readiness([runner.state], 1, level=level)
+        assert "secret-token" not in rendered
+        assert "service-health" not in rendered
 
 
 async def test_checks_have_independent_retry_schedules_and_latch_success():
@@ -518,36 +534,268 @@ async def test_revalidation_does_not_reset_repair_attempt_budget():
     assert repairs == ["repair-a", "repair-b"]
 
 
-async def test_live_display_can_share_an_existing_rich_display(monkeypatch):
+async def test_display_does_not_replace_an_existing_rich_display(monkeypatch):
     monkeypatch.setattr("inspect_ai.util.display_type", lambda: "rich")
     console = Console(file=StringIO(), force_terminal=True, width=100)
     state = VmReadinessState("vm", vm())
     with Live("Inspect", console=console, auto_refresh=False) as outer:
+        monkeypatch.setattr(
+            Live, "start", MagicMock(side_effect=AssertionError("nested live display"))
+        )
         async with ReadinessDisplay([state], "test", console=console):
             state.phase = "ready"
         assert outer.is_started
 
 
-async def test_older_rich_falls_back_to_snapshots(monkeypatch):
+async def test_terminal_display_never_starts_live_redraw(monkeypatch):
     monkeypatch.setattr("inspect_ai.util.display_type", lambda: "rich")
     monkeypatch.setattr(
-        Live, "start", MagicMock(side_effect=LiveError("nested display"))
+        Live, "start", MagicMock(side_effect=AssertionError("live display"))
     )
     output = StringIO()
     console = Console(file=output, force_terminal=True, width=100)
     state = VmReadinessState("vm", vm())
-    async with ReadinessDisplay([state], "test", console=console) as display:
-        assert display.live is None
-    assert "NOT READY" in output.getvalue()
+    async with ReadinessDisplay([state], "test", console=console):
+        pass
+    assert output.getvalue() == "[test] 0 ready. Booting: {}. Waiting to boot: {vm}.\n"
 
 
-async def test_display_none_suppresses_status_output(monkeypatch):
+@pytest.mark.parametrize("level", [0, 1, 2])
+async def test_display_none_suppresses_status_output(monkeypatch, level):
     monkeypatch.setattr("inspect_ai.util.display_type", lambda: "none")
     output = StringIO()
     console = Console(file=output)
     state = VmReadinessState("vm", vm())
-    async with ReadinessDisplay([state], "test", console=console) as display:
+    async with ReadinessDisplay(
+        [state], "test", console=console, level=level
+    ) as display:
         state.checks[0].phase = "ready"
         display.changed()
     assert output.getvalue() == ""
-    assert display.task is None
+
+
+async def test_compact_display_preserves_declaration_order_and_terminal_states():
+    output = StringIO()
+    console = Console(file=output, width=200, color_system=None)
+    dependency = VmReadinessState("z-database", vm())
+    dependent = VmReadinessState(
+        "a-worker", vm().model_copy(update={"depends_on": ("z-database", "dns")})
+    )
+    async with ReadinessDisplay(
+        [dependency, dependent], "test", console=console, level=1
+    ) as display:
+        dependent.pending_dependencies = ("z-database",)
+        dependent.detail = "waiting for dependencies: not-a-dependency"
+        display.changed()
+        dependency.phase = "failed"
+        dependency.checks[0].phase = "failed"
+        dependent.phase = "cancelled"
+        display.changed()
+    assert output.getvalue().splitlines() == [
+        "[test] z-database: WAITING TO BOOT. 0/1 checks green, 0 repair attempts.",
+        "[test] a-worker: WAITING ON {z-database, dns}",
+        "[test] z-database: WAITING TO BOOT. 0/1 checks green, 0 repair attempts.",
+        "[test] a-worker: WAITING ON {z-database}",
+        "[test] z-database: FAILED. 0/1 checks green, 0 repair attempts.",
+        "[test] a-worker: CANCELLED. 0/1 checks green, 0 repair attempts.",
+    ]
+
+
+async def test_detailed_display_records_short_check_transitions_without_idle_repeats(
+    monkeypatch,
+):
+    output = StringIO()
+    console = Console(file=output, width=300, color_system=None)
+    state = VmReadinessState("database", vm(command_check()))
+    monkeypatch.setattr(
+        "proxmoxsandbox._impl.readiness_display.time.monotonic", lambda: 10
+    )
+    async with ReadinessDisplay([state], "test", console=console, level=2) as display:
+        check = state.checks[-1]
+        check.phase = "waiting"
+        check.detail = "exit code 1; expected 0"
+        check.next_retry = 15
+        display.changed()
+        monkeypatch.setattr(
+            "proxmoxsandbox._impl.readiness_display.time.monotonic", lambda: 12
+        )
+        display.changed()
+        check.phase = "repairing"
+        check.repairs = 1
+        check.detail = "repair attempt 1/1"
+        display.changed()
+        check.phase = "ready"
+        check.detail = "passed"
+        display.changed()
+    text = output.getvalue()
+    assert (
+        text.count("database: WAITING TO BOOT. 0/2 checks green, 0 repair attempts.")
+        == 2
+    )
+    assert text.count("database/proxmox-running: pending") == 4
+    assert text.count("database/service: waiting") == 1
+    assert "retry in 5.0s" in text
+    assert "retry in 3.0s" not in text
+    assert "database/service: repairing: repair attempt 1/1" in text
+    assert "database/service: ready: passed" in text
+
+
+@pytest.mark.parametrize("environment", [None, "0", "1", "2"])
+@pytest.mark.parametrize("explicit", [None, 0, 1, 2])
+def test_display_level_environment_and_explicit_override(
+    monkeypatch, environment, explicit
+):
+    if environment is None:
+        monkeypatch.delenv("PROXMOX_READINESS_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("PROXMOX_READINESS_LEVEL", environment)
+    display = ReadinessDisplay([], "test", level=explicit)
+    assert display.level == (int(environment or "0") if explicit is None else explicit)
+
+
+@pytest.mark.parametrize("value", ["-1", "3", "true", "secret-value"])
+def test_display_rejects_invalid_environment_without_echoing_it(monkeypatch, value):
+    monkeypatch.setenv("PROXMOX_READINESS_LEVEL", value)
+    with pytest.raises(
+        ValueError, match="PROXMOX_READINESS_LEVEL must be 0, 1, or 2"
+    ) as error:
+        ReadinessDisplay([], "test")
+    assert "secret-value" not in str(error.value)
+    assert ReadinessDisplay([], "test", level=0).level == 0
+
+
+@pytest.mark.parametrize("level", [-1, 3])
+def test_display_rejects_invalid_explicit_levels(level):
+    with pytest.raises(ValueError, match="readiness level must be 0, 1, or 2"):
+        ReadinessDisplay([], "test", level=level)
+    with pytest.raises(ValueError, match="readiness level must be 0, 1, or 2"):
+        render_readiness([], 0, level=level)
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+async def test_display_cancellation_is_visible_and_text_is_literal(level):
+    output = StringIO()
+    state = VmReadinessState("[red]vm\n\x1b[2J", vm())
+    with pytest.raises(asyncio.CancelledError):
+        async with ReadinessDisplay(
+            [state],
+            "sample\n\x1b[2J",
+            console=Console(file=output, width=10, color_system=None),
+            level=level,
+        ):
+            raise asyncio.CancelledError()
+    text = output.getvalue()
+    assert "[red]vm\\n\\x1b[2J" in text
+    assert ("Cancelled: {" if level == 0 else "CANCELLED.") in text
+    assert all(line.startswith("[sample\\n\\x1b[2J]") for line in text.splitlines())
+    assert "\x1b" not in text
+    assert state.checks[0].phase == "cancelled"
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+async def test_display_never_echoes_guest_stdout_or_stderr(level):
+    runner, _, execute, _ = runner_for(
+        vm(command_check(retry=ReadinessRetry(timeout=1)))
+    )
+    execute.return_value = ExecResult(
+        success=False, returncode=1, stdout="stdout-secret", stderr="stderr-secret"
+    )
+    with pytest.raises(ReadinessTimeoutError):
+        await runner.run()
+    rendered = render_readiness([runner.state], 1, level=level)
+    assert "stdout-secret" not in rendered
+    assert "stderr-secret" not in rendered
+    assert "service-health" not in rendered
+
+
+async def test_default_snapshot_is_one_aggregate_line_with_green_check_counts():
+    output = StringIO()
+    console = Console(file=output, width=10, color_system=None)
+    config = vm(
+        *(
+            ReadinessCheck(
+                name=f"check-{index}", command=ReadinessCommand(argv=("probe",))
+            )
+            for index in range(8)
+        )
+    )
+    ready = [
+        VmReadinessState(f"ready-{index}", vm(), phase="ready") for index in range(9)
+    ]
+    dc = VmReadinessState("dc-udra", config, phase="checking")
+    web = VmReadinessState("web", config, phase="checking")
+    for state, count in ((dc, 8), (web, 3)):
+        for check in state.checks[:count]:
+            check.phase = "ready"
+    waiting = [
+        VmReadinessState("fs", vm().model_copy(update={"depends_on": ("dc-udra",)})),
+        VmReadinessState("db", vm()),
+    ]
+    states = [*ready, dc, web, *waiting]
+    with patch.object(console, "print", wraps=console.print) as printed:
+        async with ReadinessDisplay(states, "sample", console=console) as display:
+            assert printed.call_count == 1
+            assert output.getvalue() == (
+                "[sample] 9 ready. Booting: {dc-udra 8/9, web 3/9}. "
+                "Waiting to boot: {fs, db}.\n"
+            )
+            dc.checks[-1].repairs = 1
+            dc.checks[-1].phase = "repairing"
+            display.changed()
+            assert printed.call_count == 1
+            dc.phase = "failed"
+            waiting[0].phase = "cancelled"
+            display.changed()
+            assert printed.call_count == 2
+        assert printed.call_count == 2
+    assert output.getvalue().splitlines()[-1] == (
+        "[sample] 9 ready. Booting: {web 3/9}. Waiting to boot: {db}. "
+        "Failed: {dc-udra}. Cancelled: {fs}."
+    )
+
+
+@pytest.mark.parametrize(
+    "phase", ["pending", "creating", "checking", "ready", "failed", "cancelled"]
+)
+def test_aggregate_groups_include_empty_booting_and_waiting_fields(phase):
+    state = VmReadinessState("vm", vm(), phase=phase)
+    summary = render_readiness([state], 0)
+    assert "Booting: " in summary
+    assert "Waiting to boot: " in summary
+    assert ("Failed: " in summary) is (phase == "failed")
+    assert ("Cancelled: " in summary) is (phase == "cancelled")
+    if phase in ("creating", "checking"):
+        assert "Booting: {vm 0/1}." in summary
+    if phase == "ready":
+        assert summary == "1 ready. Booting: {}. Waiting to boot: {}."
+
+
+@pytest.mark.parametrize("level", [1, 2])
+async def test_vm_snapshots_include_all_rows_in_one_atomic_print(level):
+    output = StringIO()
+    console = Console(file=output, width=10, color_system=None)
+    first = VmReadinessState("z-first", vm(), phase="checking")
+    second = VmReadinessState("a-second", vm())
+    with patch.object(console, "print", wraps=console.print) as printed:
+        async with ReadinessDisplay(
+            [first, second], "sample", console=console, level=level
+        ) as display:
+            assert printed.call_count == 1
+            first.checks[0].phase = "ready"
+            display.changed()
+            assert printed.call_count == 2
+            display.changed()
+            assert printed.call_count == 2
+        assert printed.call_count == 2
+    for call in printed.call_args_list:
+        assert len(call.args) == 1
+        rows = call.args[0].plain.splitlines()
+        assert len(rows) == (2 if level == 1 else 4)
+        assert rows[0].startswith("[sample] z-first: BOOTING.")
+        assert rows[1 if level == 1 else 2].startswith(
+            "[sample] a-second: WAITING TO BOOT."
+        )
+        if level == 2:
+            assert rows[1].startswith("[sample]   z-first/proxmox-running: ")
+            assert rows[3].startswith("[sample]   a-second/proxmox-running: ")
+        assert call.kwargs["soft_wrap"] is True

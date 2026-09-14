@@ -223,6 +223,7 @@ class InfraCommands(abc.ABC):
                     if task.done():
                         await task
                 state = states[i]
+                state.pending_dependencies = ()
                 state.phase = "creating"
                 state.detail = "cloning, configuring, and starting VM"
                 changed()
@@ -239,11 +240,15 @@ class InfraCommands(abc.ABC):
                 tasks.append(task)
                 if vm_config.await_before_next_vm:
                     for later in states[i + 1 :]:
+                        later.pending_dependencies = (state.name,)
                         later.detail = (
                             f"waiting for legacy startup barrier: {state.name}"
                         )
                     changed()
                     await task
+                    for later in states[i + 1 :]:
+                        later.pending_dependencies = ()
+                    changed()
             await asyncio.gather(*tasks)
         finally:
             for task in tasks:
@@ -274,7 +279,10 @@ class InfraCommands(abc.ABC):
                         await readiness_task
                         ready.add(vm_id)
                 for vm_id, vm_config in pending.items():
-                    missing = [dep for dep in vm_config.depends_on if dep not in ready]
+                    missing = tuple(
+                        dep for dep in vm_config.depends_on if dep not in ready
+                    )
+                    states[vm_id].pending_dependencies = missing
                     states[vm_id].detail = (
                         f"waiting for dependencies: {', '.join(missing)}"
                         if missing
