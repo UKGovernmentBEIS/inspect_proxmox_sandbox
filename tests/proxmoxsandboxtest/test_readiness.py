@@ -417,7 +417,15 @@ def test_detailed_render_includes_every_vm_retry_and_repair():
 async def test_compact_display_deduplicates_summaries_across_interleaved_output():
     output = StringIO()
     console = Console(file=output, width=200, color_system=None)
-    state = VmReadinessState("vm", vm(command_check()), vm_id=100)
+    state = VmReadinessState(
+        "vm",
+        vm(
+            command_check(
+                repair=ReadinessRepair(commands=(ReadinessCommand(argv=("repair",)),))
+            )
+        ),
+        vm_id=100,
+    )
     display = ReadinessDisplay([state], "sample-1", console=console, level=1)
     async with display:
         state.phase = "checking"
@@ -439,9 +447,143 @@ async def test_compact_display_deduplicates_summaries_across_interleaved_output(
         "[sample-1] vm: WAITING TO BOOT. 0/2 checks green, 0 repair attempts.",
         "[sample-1] vm: BOOTING. 1/2 checks green, 0 repair attempts.",
         "unrelated provider log",
+        "[sample-1] WARNING: VM vm (ID=100), check service: automatic readiness "
+        "repair attempt 1/1; running 1 repair command.",
         "[sample-1] vm: BOOTING. 1/2 checks green, 1 repair attempts.",
         "[sample-1] vm: READY. 2/2 checks green, 1 repair attempts.",
     ]
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+@pytest.mark.parametrize("outcome", ["success", "failure", "exception"])
+async def test_every_repair_attempt_warns_before_execution_without_secrets(
+    level, outcome
+):
+    repair = ReadinessRepair(
+        after=0,
+        interval=1,
+        max_attempts=2,
+        commands=(
+            ReadinessCommand(argv=("repair-program", "argument-secret")),
+            ReadinessCommand(argv=("second-program",)),
+        ),
+    )
+    runner, _, execute, _ = runner_for(vm(command_check(repair=repair)))
+    output = StringIO()
+    console = Console(file=output, width=10, color_system=None)
+    attempts = []
+
+    async def run(command):
+        check = runner.state.checks[-1]
+        if command == repair.commands[0]:
+            attempts.append(check.repairs)
+            assert (
+                f"automatic readiness repair attempt {check.repairs}/2; "
+                "running 2 repair commands."
+            ) in output.getvalue()
+            if outcome == "exception":
+                raise RuntimeError("exception-secret")
+        if command in repair.commands:
+            return ExecResult(
+                success=outcome == "success",
+                returncode=0 if outcome == "success" else 1,
+                stdout="stdout-secret",
+                stderr="stderr-secret",
+            )
+        return result(0 if check.repairs == 2 else 1)
+
+    execute.side_effect = run
+    async with ReadinessDisplay(
+        [runner.state], "sample", console=console, level=level
+    ) as display:
+        runner.changed = display.changed
+        await runner.run()
+    assert attempts == [1, 2]
+    assert runner.state.phase == "ready"
+    text = output.getvalue()
+    warnings = [line for line in text.splitlines() if "WARNING:" in line]
+    assert warnings == [
+        "[sample] WARNING: VM database (ID=100), check service: automatic "
+        f"readiness repair attempt {attempt}/2; running 2 repair commands."
+        for attempt in (1, 2)
+    ]
+    for secret in (
+        "repair-program",
+        "argument-secret",
+        "second-program",
+        "service-health",
+        "stdout-secret",
+        "stderr-secret",
+        "exception-secret",
+    ):
+        assert secret not in text
+
+
+@pytest.mark.parametrize("level", [1, 2])
+async def test_repair_warning_and_complete_snapshot_share_one_atomic_print(level):
+    output = StringIO()
+    console = Console(file=output, width=10, color_system=None)
+    first = VmReadinessState(
+        "z-first",
+        vm(
+            command_check(
+                repair=ReadinessRepair(commands=(ReadinessCommand(argv=("repair",)),))
+            )
+        ),
+        phase="checking",
+    )
+    second = VmReadinessState("a-second", vm())
+    with patch.object(console, "print", wraps=console.print) as printed:
+        async with ReadinessDisplay(
+            [first, second], "sample", console=console, level=level
+        ) as display:
+            console.print("unrelated provider log")
+            check = first.checks[-1]
+            check.phase = "repairing"
+            check.repairs = 1
+            display.changed()
+            assert printed.call_count == 3
+            warning_call = printed.call_args
+            assert len(warning_call.args) == 1
+            lines = warning_call.args[0].plain.splitlines()
+            assert lines[0] == (
+                "[sample] WARNING: VM z-first, check service: automatic "
+                "readiness repair attempt 1/1; running 1 repair command."
+            )
+            snapshot = render_readiness([first, second], 0, level=level)
+            assert lines[1:] == [f"[sample] {line}" for line in snapshot.splitlines()]
+            assert warning_call.kwargs["soft_wrap"] is True
+            display.changed()
+            assert printed.call_count == 3
+
+
+async def test_repair_warning_escapes_control_characters_and_preserves_literal_names():
+    state = VmReadinessState(
+        "[red]vm\n\x1b[2J",
+        vm(
+            ReadinessCheck(
+                name="[blue]service",
+                command=ReadinessCommand(argv=("probe",)),
+                repair=ReadinessRepair(commands=(ReadinessCommand(argv=("repair",)),)),
+            )
+        ),
+    )
+    output = StringIO()
+    async with ReadinessDisplay(
+        [state],
+        "sample\n\x1b[2J",
+        console=Console(file=output, width=10, color_system=None),
+        level=0,
+    ) as display:
+        state.checks[-1].phase = "repairing"
+        state.checks[-1].repairs = 1
+        display.changed()
+    assert output.getvalue().splitlines()[-1] == (
+        "[sample\\n\\x1b[2J] WARNING: VM [red]vm\\n\\x1b[2J, "
+        "check [blue]service: automatic readiness repair attempt 1/1; "
+        "running 1 repair command."
+    )
+    assert "\x1b" not in output.getvalue()
 
 
 async def test_public_status_does_not_echo_exception_secrets():
@@ -565,11 +707,19 @@ async def test_display_none_suppresses_status_output(monkeypatch, level):
     monkeypatch.setattr("inspect_ai.util.display_type", lambda: "none")
     output = StringIO()
     console = Console(file=output)
-    state = VmReadinessState("vm", vm())
+    state = VmReadinessState(
+        "vm",
+        vm(
+            command_check(
+                repair=ReadinessRepair(commands=(ReadinessCommand(argv=("repair",)),))
+            )
+        ),
+    )
     async with ReadinessDisplay(
         [state], "test", console=console, level=level
     ) as display:
-        state.checks[0].phase = "ready"
+        state.checks[-1].phase = "repairing"
+        state.checks[-1].repairs = 1
         display.changed()
     assert output.getvalue() == ""
 
@@ -714,7 +864,9 @@ async def test_default_snapshot_is_one_aggregate_line_with_green_check_counts():
     config = vm(
         *(
             ReadinessCheck(
-                name=f"check-{index}", command=ReadinessCommand(argv=("probe",))
+                name=f"check-{index}",
+                command=ReadinessCommand(argv=("probe",)),
+                repair=ReadinessRepair(commands=(ReadinessCommand(argv=("repair",)),)),
             )
             for index in range(8)
         )
@@ -742,12 +894,18 @@ async def test_default_snapshot_is_one_aggregate_line_with_green_check_counts():
             dc.checks[-1].repairs = 1
             dc.checks[-1].phase = "repairing"
             display.changed()
-            assert printed.call_count == 1
+            assert printed.call_count == 2
+            assert output.getvalue().splitlines()[-1] == (
+                "[sample] WARNING: VM dc-udra, check check-7: automatic readiness "
+                "repair attempt 1/1; running 1 repair command."
+            )
+            display.changed()
+            assert printed.call_count == 2
             dc.phase = "failed"
             waiting[0].phase = "cancelled"
             display.changed()
-            assert printed.call_count == 2
-        assert printed.call_count == 2
+            assert printed.call_count == 3
+        assert printed.call_count == 3
     assert output.getvalue().splitlines()[-1] == (
         "[sample] 9 ready. Booting: {web 3/9}. Waiting to boot: {db}. "
         "Failed: {dc-udra}. Cancelled: {fs}."

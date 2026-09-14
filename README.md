@@ -497,6 +497,17 @@ The default, level 0, prints one aggregate line for the whole sample:
 [sample123] 9 ready. Booting: {dc-udra 8/9, web 3/9}. Waiting to boot: {fs, db}.
 ```
 
+Every automatic repair attempt emits a warning at all three output levels,
+even when the aggregate counts stay unchanged:
+
+```text
+[sample123] WARNING: VM database (ID=100), check application-service: automatic readiness repair attempt 1/2; running 2 repair commands.
+```
+
+Warnings identify the VM and check, attempt budget, and number of repair
+commands. They do not include command arguments or guest output. Inspect's
+`display=none` setting suppresses readiness output, including these warnings.
+
 Each booting VM's `n/m` is its green check count over its total effective check
 count, including implicit checks. Ready VMs are counted; pending VMs, unresolved
 `depends_on` waits, and legacy tuple startup barriers appear under `Waiting to

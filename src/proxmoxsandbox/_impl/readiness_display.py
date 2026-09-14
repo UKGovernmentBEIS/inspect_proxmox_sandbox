@@ -105,6 +105,7 @@ class ReadinessDisplay:
     Level 0 is one aggregate line; level 1 lists every VM; level 2 also lists
     every check. PROXMOX_READINESS_LEVEL selects the default. Countdown values
     describe the snapshot time; elapsed time alone never generates output.
+    Repair attempts always produce a warning, independent of snapshot changes.
     """
 
     def __init__(
@@ -128,6 +129,7 @@ class ReadinessDisplay:
         self.level = level
         self.last_events: dict[str, tuple[str, str]] = {}
         self.last_snapshot: object = None
+        self.last_repairs: dict[tuple[str, str], int] = {}
         self.enabled = True
 
     def _snapshot_key(self) -> object:
@@ -154,20 +156,42 @@ class ReadinessDisplay:
         )
 
     def changed(self) -> None:
-        """Print one complete snapshot when the selected level's state changes."""
+        """Print new repair warnings and any changed snapshot atomically."""
         if not self.enabled:
             return
+        label = _single_line(self.label)
+        output = Text()
+        # Aggregate counts may not change when a repair starts. Track attempts
+        # separately so compact output still records every automatic repair.
+        for vm in self.states:
+            for check in vm.checks:
+                repair = check.config.repair
+                repair_key = (vm.name, check.config.name)
+                if repair is None or check.repairs <= self.last_repairs.get(
+                    repair_key, 0
+                ):
+                    continue
+                self.last_repairs[repair_key] = check.repairs
+                vm_id = f" (ID={vm.vm_id})" if vm.vm_id is not None else ""
+                commands = len(repair.commands)
+                warning = (
+                    f"[{label}] WARNING: VM {vm.name}{vm_id}, "
+                    f"check {check.config.name}: automatic readiness repair "
+                    f"attempt {check.repairs}/{repair.max_attempts}; "
+                    f"running {commands} repair command"
+                    f"{'s' if commands != 1 else ''}."
+                )
+                output.append(_single_line(warning) + "\n", style="bold yellow")
         key = self._snapshot_key()
-        if key == self.last_snapshot:
-            return
-        self.last_snapshot = key
-        snapshot = render_readiness(self.states, time.monotonic(), level=self.level)
-        if snapshot:
-            label = _single_line(self.label)
-            self.console.print(
-                Text("\n".join(f"[{label}] {line}" for line in snapshot.splitlines())),
-                soft_wrap=True,
+        if key != self.last_snapshot:
+            self.last_snapshot = key
+            snapshot = render_readiness(self.states, time.monotonic(), level=self.level)
+            output.append(
+                "\n".join(f"[{label}] {line}" for line in snapshot.splitlines())
             )
+        if output:
+            output.rstrip()
+            self.console.print(output, soft_wrap=True)
 
     async def __aenter__(self) -> "ReadinessDisplay":
         # display_type was added after the provider's minimum Inspect version.
