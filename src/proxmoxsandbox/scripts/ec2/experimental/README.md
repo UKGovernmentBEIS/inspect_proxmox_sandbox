@@ -31,8 +31,9 @@ export REGION=eu-west-2
 bash check-guest-isolation.sh <endpoint-ip> ...
 ```
 
-Both print one line per probe — `PASS`, `FAIL`, `SKIP` or `INFO` — and exit at
-the first failure.
+Both print one line per probe — `PASS`, `FAIL`, `SKIP` or `INFO` — run every
+probe, and end with a summary line. The exit status is nonzero if any probe
+failed.
 
 The guest script takes any number of `IP[:PORT]` addresses that must be
 unreachable — VPC interface endpoints, a host across a peering link. Port

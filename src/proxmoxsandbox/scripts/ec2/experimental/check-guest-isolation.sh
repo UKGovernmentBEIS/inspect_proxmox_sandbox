@@ -3,7 +3,8 @@
 # Probes the effect of the isolation baked by ../userdata.sh: what the guest can actually
 # reach. check-host-isolation.sh checks the mechanism on the host; run both, and take this
 # script's arguments from the line that one prints.
-# One PASS/SKIP line per probe; exits at the first failure.
+# One PASS/FAIL/SKIP line per probe. Every probe runs; the exit status is nonzero if any
+# failed, and the trailing summary line says how many.
 #
 # Assumes a guest on a host isolated per the parent README's "Properly isolating the
 # host": everything below must be blocked. Elsewhere the egress probes fail by design,
@@ -17,10 +18,13 @@ set -uo pipefail
 
 unreachable=("$@")
 
+probes=0
+failures=0
 want() { # want EXPECTED NAME ACTUAL
+    probes=$((probes + 1))
     case "$3" in
         "$1"*) echo "PASS  $2 [$3]" ;;
-        *) echo "FAIL  $2 [$3, want $1]"; exit 1 ;;
+        *) echo "FAIL  $2 [$3, want $1]"; failures=$((failures + 1)) ;;
     esac
 }
 skip() { echo "SKIP  $1 ($2)"; }
@@ -92,8 +96,10 @@ echo "# IPv6"
 # Forwarded IPv6 is dropped on the host whether or not the egress lockdown is armed.
 v6addr=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2; exit}')
 v6route=$(ip -6 route show default 2>/dev/null | head -1)
-want "" "no global IPv6 address" "$v6addr"
-want "" "no IPv6 default route" "$v6route"
+# want's pattern is "$1"*, so an empty expectation matches anything: the sentinel is what
+# makes these two checks able to fail.
+want absent "no global IPv6 address" "${v6addr:-absent}"
+want absent "no IPv6 default route" "${v6route:-absent}"
 want blocked "IPv6 egress https://[2606:4700:4700::1111]/" "$(http_state 'https://[2606:4700:4700::1111]/')"
 
 echo
@@ -141,4 +147,11 @@ else
 fi
 
 echo
-echo "all probes passed"
+# Load-bearing: without it there is nothing to distinguish a clean run from one SSM
+# truncated at 24k.
+if [ "$failures" -eq 0 ]; then
+    echo "all $probes probes passed"
+else
+    echo "$failures of $probes probes FAILED"
+    exit 1
+fi

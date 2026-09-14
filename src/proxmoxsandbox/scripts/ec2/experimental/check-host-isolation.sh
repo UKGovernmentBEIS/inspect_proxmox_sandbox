@@ -3,7 +3,8 @@
 # are installed, enabled and last ran OK (guards against stale AMIs), and the rules they
 # install are loaded. check-guest-isolation.sh probes the effect from inside a guest; run
 # both — this one ends by printing the guest command line to paste.
-# One PASS/SKIP line per check; exits at the first failure.
+# One PASS/FAIL/SKIP line per check. Every check runs; the exit status is nonzero if any
+# failed, and the trailing summary line says how many.
 #
 # Assumes the configuration in the parent README's "Properly isolating the host": egress
 # lockdown armed, no route off the VPC, reachable only via interface endpoints. That is
@@ -14,19 +15,22 @@ set -uo pipefail
 usage() { echo "usage: $0" >&2; exit 2; }
 [ $# -eq 0 ] || usage
 
+checks=0
+failures=0
 chk() {
     local name=$1 out
     shift
+    checks=$((checks + 1))
     if out=$("$@" 2>&1); then
         echo "PASS  $name"
     else
         echo "FAIL  $name"
-        # Most helpers are quiet; the ones reading a value print what they saw, since
-        # fail-fast means this line is all the operator gets.
+        # Most helpers are quiet; the ones reading a value print what they saw.
         [ -n "$out" ] && echo "      ${out//$'\n'/$'\n'      }"
-        exit 1
+        failures=$((failures + 1))
     fi
 }
+skip() { echo "SKIP  $1 ($2)"; }
 
 unit_ok() { systemctl is-enabled -q "$1" && [ "$(systemctl show -p Result --value "$1")" = success ]; }
 pvefw_running() { pve-firewall status | grep -q enabled/running; }
@@ -142,10 +146,20 @@ chk "node firewall rules readable" fetched "$node_rules_rc" "$node_rules"
 chk "cluster firewall rules readable" fetched "$cluster_rules_rc" "$cluster_rules"
 chk "cluster firewall enabled" fw_enabled /etc/pve/firewall/cluster.fw
 chk "node firewall enabled" fw_enabled "/etc/pve/nodes/$node/host.fw"
-chk "API accepted only on the mgmt NIC: tcp/8006 iface=$nic" have_accept tcp 8006 "$nic"
-chk "SSH accepted only on the mgmt NIC: tcp/22 iface=$nic" have_accept tcp 22 "$nic"
-chk "no unbound inbound ACCEPT beyond SDN DNS/DHCP on the node" no_unexpected_unbound "$node_rules"
-chk "no unbound inbound ACCEPT beyond SDN DNS/DHCP on the cluster" no_unexpected_unbound "$cluster_rules"
+# Both jq helpers parse the fetched rules, so an unreadable fetch would fail them for a
+# reason that has nothing to do with the rules.
+if [ "$node_rules_rc" = 0 ]; then
+    chk "API accepted only on the mgmt NIC: tcp/8006 iface=$nic" have_accept tcp 8006 "$nic"
+    chk "SSH accepted only on the mgmt NIC: tcp/22 iface=$nic" have_accept tcp 22 "$nic"
+    chk "no unbound inbound ACCEPT beyond SDN DNS/DHCP on the node" no_unexpected_unbound "$node_rules"
+else
+    skip "node inbound ACCEPT checks" "node firewall rules unreadable"
+fi
+if [ "$cluster_rules_rc" = 0 ]; then
+    chk "no unbound inbound ACCEPT beyond SDN DNS/DHCP on the cluster" no_unexpected_unbound "$cluster_rules"
+else
+    skip "cluster inbound ACCEPT check" "cluster firewall rules unreadable"
+fi
 
 echo
 echo "# guest egress lockdown"
@@ -163,31 +177,47 @@ endpoint_ok() { is_private "$1" && connects "https://$2/"; }
 region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
 chk "region from IMDS" test -n "$region"
 endpoints=""
-# The host keeps these three — SSM is the operator's way in; a guest must not be able to
-# reach them at all, which is what the guest script's address arguments probe.
-for svc in ssm ssmmessages ec2messages; do
-    name="$svc.$region.amazonaws.com"
-    ip=$(resolves_to "$name")
-    chk "interface endpoint $svc: $name resolves" test -n "$ip"
-    chk "interface endpoint $svc: $ip private and answering on 443" endpoint_ok "$ip" "$name"
-    endpoints="$endpoints $ip"
-done
-# The CloudWatch endpoint is optional, so a public answer here is a VPC without one rather
-# than a leak. Add it to the guest's target list only when it is an endpoint.
-name="monitoring.$region.amazonaws.com"
-ip=$(resolves_to "$name")
-if is_private "$ip"; then
-    chk "interface endpoint monitoring: $ip answering on 443" connects "https://$name/"
-    endpoints="$endpoints $ip"
+if [ -z "$region" ]; then
+    skip "interface endpoint checks" "no region, so the endpoint names cannot be built"
 else
-    echo "SKIP  interface endpoint monitoring: ${ip:-unresolved} is not an endpoint in this VPC (metrics are optional)"
+    # The host keeps these three — SSM is the operator's way in; a guest must not be able
+    # to reach them at all, which is what the guest script's address arguments probe.
+    for svc in ssm ssmmessages ec2messages; do
+        name="$svc.$region.amazonaws.com"
+        ip=$(resolves_to "$name")
+        chk "interface endpoint $svc: $name resolves" test -n "$ip"
+        chk "interface endpoint $svc: $ip private and answering on 443" endpoint_ok "$ip" "$name"
+        endpoints="$endpoints $ip"
+    done
+    # The CloudWatch endpoint is optional, so a public answer here is a VPC without one
+    # rather than a leak. Add it to the guest's target list only when it is an endpoint.
+    name="monitoring.$region.amazonaws.com"
+    ip=$(resolves_to "$name")
+    if is_private "$ip"; then
+        chk "interface endpoint monitoring: $ip answering on 443" connects "https://$name/"
+        endpoints="$endpoints $ip"
+    else
+        skip "interface endpoint monitoring" \
+            "${ip:-unresolved} is not an endpoint in this VPC (metrics are optional)"
+    fi
 fi
 chk "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" unresolvable deb.debian.org
 chk "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
 
 echo
-echo "# paste into the guest run (endpoint IPs are per-VPC; do not commit them):"
-echo "  check-guest-isolation.sh$endpoints"
+if [ -n "$endpoints" ]; then
+    echo "# paste into the guest run (endpoint IPs are per-VPC; do not commit them):"
+    echo "  check-guest-isolation.sh$endpoints"
+else
+    echo "# no endpoint addresses resolved, so there is no guest command line to print"
+fi
 
 echo
-echo "all checks passed"
+# Load-bearing: without it there is nothing to distinguish a clean run from one SSM
+# truncated at 24k.
+if [ "$failures" -eq 0 ]; then
+    echo "all $checks checks passed"
+else
+    echo "$failures of $checks checks FAILED"
+    exit 1
+fi
