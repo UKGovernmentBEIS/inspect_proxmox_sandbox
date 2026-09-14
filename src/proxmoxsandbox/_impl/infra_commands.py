@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import os
 import sys
 from logging import getLogger
@@ -24,6 +25,7 @@ from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     SdnConfigType,
     VmConfig,
+    VmConfigs,
 )
 
 
@@ -135,9 +137,8 @@ class InfraCommands(abc.ABC):
         self,
         proxmox_ids_start: str,
         sdn_config: SdnConfigType,
-        vms_config: Tuple[VmConfig, ...],
+        vms_config: VmConfigs,
     ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
-        vm_configs_with_ids = []
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config
         )
@@ -147,17 +148,38 @@ class InfraCommands(abc.ABC):
         known_builtins = await self.built_in_vm.known_builtins()
 
         ipam_mappings = []
+        ordered_vm_configs = (
+            tuple(vms_config.values()) if isinstance(vms_config, dict) else vms_config
+        )
 
         # Create ALL IPAM mappings FIRST, before creating/starting any VMs.
         # This prevents race conditions where a booting VM's DHCP request
         # causes Proxmox to auto-allocate IPs that we wanted to reserve.
-        for vm_config in vms_config:
+        for vm_config in ordered_vm_configs:
             per_vm_ipam_mappings = await self.create_ipam_mappings(
                 vnet_aliases, vm_config, sdn_zone_id
             )
             ipam_mappings.extend(per_vm_ipam_mappings)
 
-        # Now create and start VMs
+        if isinstance(vms_config, dict):
+            vm_configs_with_ids = await self._create_dependency_vms(
+                vms_config, vnet_aliases, known_builtins
+            )
+        else:
+            vm_configs_with_ids = await self._create_ordered_vms(
+                vms_config, vnet_aliases, known_builtins
+            )
+
+        return tuple(vm_configs_with_ids), sdn_zone_id, tuple(ipam_mappings)
+
+    async def _create_ordered_vms(
+        self,
+        vms_config: Tuple[VmConfig, ...],
+        vnet_aliases: VnetAliases,
+        known_builtins: Dict[str, int],
+    ) -> Tuple[Tuple[int, VmConfig], ...]:
+        """Create tuple-configured VMs with the legacy barrier semantics."""
+        vm_configs_with_ids = []
         for i, vm_config in enumerate(vms_config):
             self.logger.info(f"Creating VM {i + 1}/{len(vms_config)}: {vm_config.name}")
             with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
@@ -170,14 +192,77 @@ class InfraCommands(abc.ABC):
                 self.qemu_commands.register_vm(vm_id)
                 vm_configs_with_ids.append((vm_id, vm_config))
 
-        # TODO check for failed starts in the log somehow
-
         for vm_id, vm_config in vm_configs_with_ids:
             self.logger.info(f"Waiting for VM {vm_config.name} (ID={vm_id})")
             await self.qemu_commands.await_vm(vm_id, vm_config.is_sandbox)
             self.logger.info(f"VM {vm_config.name} (ID={vm_id}) is ready")
 
-        return tuple(vm_configs_with_ids), sdn_zone_id, tuple(ipam_mappings)
+        return tuple(vm_configs_with_ids)
+
+    async def _create_dependency_vms(
+        self,
+        vms_config: Dict[str, VmConfig],
+        vnet_aliases: VnetAliases,
+        known_builtins: Dict[str, int],
+    ) -> Tuple[Tuple[int, VmConfig], ...]:
+        """Start a VM as soon as all of its dependencies are ready."""
+        pending = dict(vms_config)
+        ready: Set[str] = set()
+        created: Dict[str, Tuple[int, VmConfig]] = {}
+        readiness_tasks: Dict[asyncio.Task[None], str] = {}
+
+        try:
+            while pending or readiness_tasks:
+                startable = [
+                    vm_id
+                    for vm_id, vm_config in pending.items()
+                    if set(vm_config.depends_on).issubset(ready)
+                ]
+                for vm_id in startable:
+                    vm_config = pending.pop(vm_id)
+                    self.logger.info(
+                        f"Creating VM {len(created) + 1}/{len(vms_config)}: {vm_id}"
+                    )
+                    with trace_action(
+                        self.logger,
+                        self.TRACE_NAME,
+                        f"create VM {vm_id=} {vm_config=}",
+                    ):
+                        proxmox_vm_id = await self.qemu_commands.create_and_start_vm(
+                            sdn_vnet_aliases=vnet_aliases,
+                            vm_config=vm_config,
+                            built_in_vm_ids=known_builtins,
+                            wait_until_ready=False,
+                        )
+                        self.qemu_commands.register_vm(proxmox_vm_id)
+                        created[vm_id] = (proxmox_vm_id, vm_config)
+                    readiness_task = asyncio.create_task(
+                        self.qemu_commands.await_vm(proxmox_vm_id, vm_config.is_sandbox)
+                    )
+                    readiness_tasks[readiness_task] = vm_id
+
+                if not readiness_tasks:
+                    raise RuntimeError(
+                        "VM dependency scheduler made no progress; the dependency "
+                        "graph should have been rejected during validation"
+                    )
+
+                completed, _ = await asyncio.wait(
+                    readiness_tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                for readiness_task in completed:
+                    vm_id = readiness_tasks.pop(readiness_task)
+                    await readiness_task
+                    ready.add(vm_id)
+                    proxmox_vm_id = created[vm_id][0]
+                    self.logger.info(f"VM {vm_id} (ID={proxmox_vm_id}) is ready")
+        finally:
+            for readiness_task in readiness_tasks:
+                readiness_task.cancel()
+            if readiness_tasks:
+                await asyncio.gather(*readiness_tasks, return_exceptions=True)
+
+        return tuple(created[vm_id] for vm_id in vms_config)
 
     async def delete_sdn_and_vms(
         self,

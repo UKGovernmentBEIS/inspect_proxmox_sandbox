@@ -4,7 +4,7 @@ import json
 import os
 from os import getenv
 from pathlib import Path
-from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
+from typing import Annotated, Dict, Literal, Optional, Tuple, TypeAlias, Union
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
@@ -201,6 +201,10 @@ class VmConfig(BaseModel, frozen=True):
             is_sandbox, to answer a guest-agent ping) before creating the next VM in
             vms_config. Defaults to False, so VMs boot concurrently. Set this on a VM
             that later ones depend on at boot time, e.g. a router or DHCP server.
+            This legacy option is only valid when vms_config is a tuple.
+        depends_on: VM identifiers that must be ready before this VM starts. Identifiers
+            are keys in a dictionary vms_config. This option is only valid when
+            vms_config is a dictionary.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -225,6 +229,10 @@ class VmConfig(BaseModel, frozen=True):
     os_type: Optional[OsType] = "l26"
     cpu: Optional[str] = None
     await_before_next_vm: bool = False
+    depends_on: Tuple[str, ...] = ()
+
+
+VmConfigs: TypeAlias = Union[Tuple[VmConfig, ...], Dict[str, VmConfig]]
 
 
 class HttpHeader(BaseModel):
@@ -341,7 +349,9 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
         instance_pool_id: Which pool to use for this sample (must match a pool_id in
             PROXMOX_CONFIG_FILE or defaults to "default" for single-instance mode)
         sdn_config: Software-defined networking configuration
-        vms_config: Configurations for virtual machines
+        vms_config: Configurations for virtual machines. A tuple retains legacy ordered
+            startup semantics. A dictionary enables dependency-based startup, with its
+            keys serving as dependency identifiers.
     """
 
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
@@ -351,6 +361,53 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
 
     # Eval-specific configuration
     sdn_config: SdnConfigType = "auto"
-    vms_config: Tuple[VmConfig, ...] = (
+    vms_config: VmConfigs = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
+
+    @model_validator(mode="after")
+    def validate_vm_startup_config(self) -> "ProxmoxSandboxEnvironmentConfig":
+        """Keep legacy tuple scheduling separate from dependency scheduling."""
+        if isinstance(self.vms_config, tuple):
+            if any(vm.depends_on for vm in self.vms_config):
+                raise ValueError(
+                    "depends_on requires vms_config to be a dictionary; tuple "
+                    "vms_config uses await_before_next_vm"
+                )
+            return self
+
+        vms_config = self.vms_config
+        if any(vm.await_before_next_vm for vm in vms_config.values()):
+            raise ValueError(
+                "await_before_next_vm is not valid when vms_config is a dictionary; "
+                "use depends_on"
+            )
+
+        vm_ids = set(vms_config)
+        for vm_id, vm_config in vms_config.items():
+            if len(vm_config.depends_on) != len(set(vm_config.depends_on)):
+                raise ValueError(f"VM {vm_id!r} contains duplicate dependencies")
+            unknown = set(vm_config.depends_on) - vm_ids
+            if unknown:
+                raise ValueError(
+                    f"VM {vm_id!r} depends on unknown VMs: {sorted(unknown)}"
+                )
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(vm_id: str) -> None:
+            if vm_id in visiting:
+                raise ValueError(f"VM dependency graph contains a cycle at {vm_id!r}")
+            if vm_id in visited:
+                return
+            visiting.add(vm_id)
+            for dependency in vms_config[vm_id].depends_on:
+                visit(dependency)
+            visiting.remove(vm_id)
+            visited.add(vm_id)
+
+        for vm_id in vms_config:
+            visit(vm_id)
+
+        return self

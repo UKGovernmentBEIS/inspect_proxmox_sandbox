@@ -360,6 +360,38 @@ sandbox=SandboxEnvironmentSpec(
 )
 ```
 
+### Dependency-based VM startup
+
+The tuple form of `vms_config` retains the original ordered startup behaviour and
+supports `await_before_next_vm`. To start independent VMs concurrently and gate only
+their actual dependants, use a dictionary. Dictionary keys are dependency identifiers:
+
+```python
+ProxmoxSandboxEnvironmentConfig(
+    vms_config={
+        "dns": VmConfig(
+            vm_source_config=VmSourceConfig(existing_vm_template_tag="dns"),
+        ),
+        "database": VmConfig(
+            vm_source_config=VmSourceConfig(existing_vm_template_tag="database"),
+        ),
+        "application": VmConfig(
+            vm_source_config=VmSourceConfig(existing_vm_template_tag="application"),
+            depends_on=("dns", "database"),
+        ),
+    },
+)
+```
+
+Here `dns` and `database` start without waiting for each other. `application` starts as
+soon as both are ready. Dictionary configurations reject `await_before_next_vm`; tuple
+configurations reject `depends_on`. Unknown dependencies, duplicate dependencies, and
+cycles are rejected during configuration validation.
+
+Readiness currently means that Proxmox reports the VM as running and, for an
+`is_sandbox` VM, that its QEMU guest agent responds. It does not imply that application
+services inside the guest are ready.
+
 ### VM Names
 
 It is recommended that you set the `name=` parameter for your defined VMs. This name serves two purposes:

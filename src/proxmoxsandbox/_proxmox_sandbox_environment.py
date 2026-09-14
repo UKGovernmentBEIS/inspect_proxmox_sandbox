@@ -283,7 +283,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         infra_commands: InfraCommands, config: ProxmoxSandboxEnvironmentConfig
     ) -> None:
         built_in_names = set()
-        for vm_config in config.vms_config:
+        vm_configs = (
+            config.vms_config.values()
+            if isinstance(config.vms_config, dict)
+            else config.vms_config
+        )
+        for vm_config in vm_configs:
             if vm_config.vm_source_config.built_in is not None:
                 built_in_names.add(vm_config.vm_source_config.built_in)
         for built_in_name in built_in_names:
