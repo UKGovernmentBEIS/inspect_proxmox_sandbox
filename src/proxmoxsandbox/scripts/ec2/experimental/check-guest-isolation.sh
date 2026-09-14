@@ -92,8 +92,8 @@ echo "# IPv6"
 # Forwarded IPv6 is dropped on the host whether or not the egress lockdown is armed.
 v6addr=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2; exit}')
 v6route=$(ip -6 route show default 2>/dev/null | head -1)
-want absent "no global IPv6 address" "${v6addr:-absent}"
-want absent "no IPv6 default route" "${v6route:-absent}"
+want "" "no global IPv6 address" "$v6addr"
+want "" "no IPv6 default route" "$v6route"
 want blocked "IPv6 egress https://[2606:4700:4700::1111]/" "$(http_state 'https://[2606:4700:4700::1111]/')"
 
 echo
