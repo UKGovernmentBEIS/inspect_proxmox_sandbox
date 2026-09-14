@@ -599,7 +599,9 @@ class QemuCommands(abc.ABC):
     def other_config_json(
         self, vm_config: VmConfig, json_for_create: ProxmoxJsonDataType
     ) -> None:
-        json_for_create["agent"] = f"enabled={1 if vm_config.is_sandbox else 0}"
+        json_for_create["agent"] = (
+            f"enabled={1 if vm_config.requires_guest_agent else 0}"
+        )
         json_for_create["memory"] = vm_config.ram_mb
         json_for_create["cores"] = vm_config.vcpus
         if vm_config.name is not None:

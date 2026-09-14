@@ -4,7 +4,17 @@ import os
 import sys
 from logging import getLogger
 from random import randint
-from typing import ClassVar, Collection, Dict, List, NamedTuple, Sequence, Set, Tuple
+from typing import (
+    Callable,
+    ClassVar,
+    Collection,
+    Dict,
+    List,
+    NamedTuple,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from inspect_ai.util import trace_action
 from rich import box, print
@@ -14,6 +24,8 @@ from rich.table import Table
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.readiness import ReadinessRunner, VmReadinessState
+from proxmoxsandbox._impl.readiness_display import ReadinessDisplay
 from proxmoxsandbox._impl.sdn_commands import (
     IpamMapping,
     SdnCommands,
@@ -23,6 +35,7 @@ from proxmoxsandbox._impl.sdn_commands import (
 from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
+    ReadinessCommand,
     SdnConfigType,
     VmConfig,
     VmConfigs,
@@ -161,14 +174,34 @@ class InfraCommands(abc.ABC):
             )
             ipam_mappings.extend(per_vm_ipam_mappings)
 
-        if isinstance(vms_config, dict):
-            vm_configs_with_ids = await self._create_dependency_vms(
-                vms_config, vnet_aliases, known_builtins
-            )
-        else:
-            vm_configs_with_ids = await self._create_ordered_vms(
-                vms_config, vnet_aliases, known_builtins
-            )
+        named_configs = (
+            vms_config
+            if isinstance(vms_config, dict)
+            else {f"{i + 1}:{vm.name or 'vm'}": vm for i, vm in enumerate(vms_config)}
+        )
+        states = {
+            name: VmReadinessState(name, vm) for name, vm in named_configs.items()
+        }
+        for state in states.values():
+            if state.config.depends_on:
+                state.detail = (
+                    f"waiting for dependencies: {', '.join(state.config.depends_on)}"
+                )
+        async with ReadinessDisplay(
+            list(states.values()), proxmox_ids_start
+        ) as display:
+            if isinstance(vms_config, dict):
+                vm_configs_with_ids = await self._create_dependency_vms(
+                    vms_config, vnet_aliases, known_builtins, states, display.changed
+                )
+            else:
+                vm_configs_with_ids = await self._create_ordered_vms(
+                    vms_config,
+                    vnet_aliases,
+                    known_builtins,
+                    list(states.values()),
+                    display.changed,
+                )
 
         return tuple(vm_configs_with_ids), sdn_zone_id, tuple(ipam_mappings)
 
@@ -177,25 +210,45 @@ class InfraCommands(abc.ABC):
         vms_config: Tuple[VmConfig, ...],
         vnet_aliases: VnetAliases,
         known_builtins: Dict[str, int],
+        states: Sequence[VmReadinessState],
+        changed: Callable[[], None],
     ) -> Tuple[Tuple[int, VmConfig], ...]:
         """Create tuple-configured VMs with the legacy barrier semantics."""
         vm_configs_with_ids = []
-        for i, vm_config in enumerate(vms_config):
-            self.logger.info(f"Creating VM {i + 1}/{len(vms_config)}: {vm_config.name}")
-            with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
+        tasks: list[asyncio.Task[None]] = []
+        try:
+            for i, vm_config in enumerate(vms_config):
+                # Surface already-failed readiness before creating more guests.
+                for task in tasks:
+                    if task.done():
+                        await task
+                state = states[i]
+                state.phase = "creating"
+                state.detail = "cloning, configuring, and starting VM"
+                changed()
                 vm_id = await self.qemu_commands.create_and_start_vm(
                     sdn_vnet_aliases=vnet_aliases,
                     vm_config=vm_config,
                     built_in_vm_ids=known_builtins,
-                    wait_until_ready=vm_config.await_before_next_vm,
+                    wait_until_ready=False,
                 )
                 self.qemu_commands.register_vm(vm_id)
                 vm_configs_with_ids.append((vm_id, vm_config))
-
-        for vm_id, vm_config in vm_configs_with_ids:
-            self.logger.info(f"Waiting for VM {vm_config.name} (ID={vm_id})")
-            await self.qemu_commands.await_vm(vm_id, vm_config.is_sandbox)
-            self.logger.info(f"VM {vm_config.name} (ID={vm_id}) is ready")
+                state.vm_id = vm_id
+                task = asyncio.create_task(self._await_vm_readiness(state, changed))
+                tasks.append(task)
+                if vm_config.await_before_next_vm:
+                    for later in states[i + 1 :]:
+                        later.detail = (
+                            f"waiting for legacy startup barrier: {state.name}"
+                        )
+                    changed()
+                    await task
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         return tuple(vm_configs_with_ids)
 
@@ -204,6 +257,8 @@ class InfraCommands(abc.ABC):
         vms_config: Dict[str, VmConfig],
         vnet_aliases: VnetAliases,
         known_builtins: Dict[str, int],
+        states: Dict[str, VmReadinessState],
+        changed: Callable[[], None],
     ) -> Tuple[Tuple[int, VmConfig], ...]:
         """Start a VM as soon as all of its dependencies are ready."""
         pending = dict(vms_config)
@@ -213,13 +268,31 @@ class InfraCommands(abc.ABC):
 
         try:
             while pending or readiness_tasks:
+                for readiness_task in list(readiness_tasks):
+                    if readiness_task.done():
+                        vm_id = readiness_tasks.pop(readiness_task)
+                        await readiness_task
+                        ready.add(vm_id)
+                for vm_id, vm_config in pending.items():
+                    missing = [dep for dep in vm_config.depends_on if dep not in ready]
+                    states[vm_id].detail = (
+                        f"waiting for dependencies: {', '.join(missing)}"
+                        if missing
+                        else "waiting for creation slot"
+                    )
+                changed()
                 startable = [
                     vm_id
                     for vm_id, vm_config in pending.items()
                     if set(vm_config.depends_on).issubset(ready)
                 ]
-                for vm_id in startable:
+                # Mutations stay serialized (VM ID allocation / TaskWrapper).
+                # Re-evaluate readiness between clones, rather than after a batch.
+                for vm_id in startable[:1]:
                     vm_config = pending.pop(vm_id)
+                    states[vm_id].phase = "creating"
+                    states[vm_id].detail = "cloning, configuring, and starting VM"
+                    changed()
                     self.logger.info(
                         f"Creating VM {len(created) + 1}/{len(vms_config)}: {vm_id}"
                     )
@@ -236,26 +309,24 @@ class InfraCommands(abc.ABC):
                         )
                         self.qemu_commands.register_vm(proxmox_vm_id)
                         created[vm_id] = (proxmox_vm_id, vm_config)
+                    states[vm_id].vm_id = proxmox_vm_id
                     readiness_task = asyncio.create_task(
-                        self.qemu_commands.await_vm(proxmox_vm_id, vm_config.is_sandbox)
+                        self._await_vm_readiness(states[vm_id], changed)
                     )
                     readiness_tasks[readiness_task] = vm_id
 
+                if startable:
+                    await asyncio.sleep(0)
+                    continue
+                if not pending and not readiness_tasks:
+                    break
                 if not readiness_tasks:
                     raise RuntimeError(
                         "VM dependency scheduler made no progress; the dependency "
                         "graph should have been rejected during validation"
                     )
 
-                completed, _ = await asyncio.wait(
-                    readiness_tasks, return_when=asyncio.FIRST_COMPLETED
-                )
-                for readiness_task in completed:
-                    vm_id = readiness_tasks.pop(readiness_task)
-                    await readiness_task
-                    ready.add(vm_id)
-                    proxmox_vm_id = created[vm_id][0]
-                    self.logger.info(f"VM {vm_id} (ID={proxmox_vm_id}) is ready")
+                await asyncio.wait(readiness_tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for readiness_task in readiness_tasks:
                 readiness_task.cancel()
@@ -263,6 +334,39 @@ class InfraCommands(abc.ABC):
                 await asyncio.gather(*readiness_tasks, return_exceptions=True)
 
         return tuple(created[vm_id] for vm_id in vms_config)
+
+    async def _await_vm_readiness(
+        self, state: VmReadinessState, changed: Callable[[], None]
+    ) -> None:
+        # Reuse the established Linux/Windows exec wrappers (guest-side timeout,
+        # persisted results, duplicate-launch protection), not raw QGA exec-status.
+        # Import here to avoid the environment -> infrastructure import cycle.
+        from proxmoxsandbox._impl.agent_commands import AgentCommands
+        from proxmoxsandbox._proxmox_sandbox_environment import (
+            ProxmoxSandboxEnvironment,
+        )
+
+        assert state.vm_id is not None
+        sandbox = ProxmoxSandboxEnvironment(
+            infra_commands=self,
+            agent_commands=AgentCommands(self.async_proxmox, self.node),
+            ipam_mappings=(),
+            vm_id=state.vm_id,
+            all_vm_ids=(state.vm_id,),
+            sdn_zone_id=None,
+            os_type=state.config.os_type,
+        )
+        # Readiness runs concurrently across VMs while cloning uses TaskWrapper.
+        # Keep script uploads on QGA, not the ISO fast path which mutates storage
+        # and VM media configuration through that same TaskWrapper.
+        sandbox._iso_fast_path_disabled = True
+
+        async def execute(command: ReadinessCommand):
+            return await sandbox.exec(
+                list(command.argv), timeout=command.timeout, timeout_retry=False
+            )
+
+        await ReadinessRunner(self.qemu_commands, state, execute, changed).run()
 
     async def delete_sdn_and_vms(
         self,

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from os import getenv
 from pathlib import Path
 from typing import Annotated, Dict, Literal, Optional, Tuple, TypeAlias, Union
@@ -169,6 +170,84 @@ OsType: TypeAlias = Literal[
 ]
 
 
+class ReadinessRetry(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
+    """Retry timing in seconds; timeout includes attempts, sleeps, and repairs."""
+
+    interval: float = Field(default=2, gt=0)
+    backoff: float = Field(default=1.5, ge=1)
+    max_interval: float = Field(default=30, gt=0)
+    attempt_timeout: float = Field(default=60, gt=0)
+    timeout: float = Field(default=600, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_interval(self) -> "ReadinessRetry":
+        if self.max_interval < self.interval:
+            raise ValueError("max_interval must be >= interval")
+        return self
+
+
+class ReadinessCommand(BaseModel, frozen=True, extra="forbid"):
+    """Guest command and success predicate (exit code AND optional stdout regex).
+
+    Arguments are not implicitly passed to a shell. Use sh -c / PowerShell
+    explicitly for scripts. Commands must be safe to repeat. No command output
+    is included in the startup display, as it may contain credentials.
+    """
+
+    argv: Tuple[str, ...] = Field(min_length=1)
+    timeout: int = Field(default=30, gt=0)
+    expected_exit_code: int = 0
+    stdout_regex: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_command(self) -> "ReadinessCommand":
+        if not self.argv[0] or any("\x00" in arg for arg in self.argv):
+            raise ValueError("argv needs an executable and must not contain NUL")
+        if self.stdout_regex is not None:
+            try:
+                re.compile(self.stdout_regex)
+            except re.error as exc:
+                raise ValueError("Invalid stdout_regex") from exc
+        return self
+
+
+class ReadinessRepair(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
+    """Run an ordered guest-command sequence after a check remains unready.
+
+    The sequence stops at the first unsuccessful command. Attempts are bounded
+    and never establish readiness themselves. Timings are in seconds, measured
+    from the check's first eligibility and then from each repair's completion.
+    """
+
+    commands: Tuple[ReadinessCommand, ...] = Field(min_length=1)
+    after: float = Field(default=300, ge=0)
+    interval: float = Field(default=300, gt=0)
+    max_attempts: int = Field(default=1, gt=0)
+    timeout: float = Field(default=120, gt=0)
+
+
+class ReadinessCheck(BaseModel, frozen=True, extra="forbid"):
+    """Named startup check with independent retry and optional repair policy.
+
+    A running check is always included. Sandboxes also always include an agent
+    ping. Explicit checks of those kinds override their default policies.
+    """
+
+    name: str = Field(min_length=1, pattern=r"^[^\x00-\x1f\x7f]+$")
+    kind: Literal["running", "qemu_agent", "command"] = "command"
+    command: ReadinessCommand | None = None
+    retry: ReadinessRetry = Field(default_factory=ReadinessRetry)
+    repair: ReadinessRepair | None = None
+
+    @model_validator(mode="after")
+    def _validate_check(self) -> "ReadinessCheck":
+        if (self.kind == "command") != (self.command is not None):
+            raise ValueError("Only command checks must specify command")
+        if self.repair is not None and self.repair.after >= self.retry.timeout:
+            raise ValueError("repair.after must be less than retry.timeout")
+        return self
+
+
 class VmConfig(BaseModel, frozen=True):
     """
     Configuration for a virtual machine.
@@ -197,14 +276,18 @@ class VmConfig(BaseModel, frozen=True):
         cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
             defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
             panic on nested virtualization with "host"; use "qemu64" for those.
-        await_before_next_vm: if True, wait for this VM to finish booting (and, when
-            is_sandbox, to answer a guest-agent ping) before creating the next VM in
+        await_before_next_vm: if True, wait for all of this VM's readiness checks
+            before creating the next VM in
             vms_config. Defaults to False, so VMs boot concurrently. Set this on a VM
             that later ones depend on at boot time, e.g. a router or DHCP server.
             This legacy option is only valid when vms_config is a tuple.
         depends_on: VM identifiers that must be ready before this VM starts. Identifiers
             are keys in a dictionary vms_config. This option is only valid when
             vms_config is a dictionary.
+        readiness_checks: Named startup checks. Proxmox running is always required;
+            sandbox VMs additionally require a QEMU agent ping. Commands and repairs
+            require the guest agent even for non-sandbox VMs. Successful checks are
+            latched until startup completes, but any repair invalidates them all.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -230,6 +313,51 @@ class VmConfig(BaseModel, frozen=True):
     cpu: Optional[str] = None
     await_before_next_vm: bool = False
     depends_on: Tuple[str, ...] = ()
+    readiness_checks: Tuple[ReadinessCheck, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_readiness_checks(self) -> "VmConfig":
+        checks = self.effective_readiness_checks()
+        names = [check.name for check in checks]
+        if len(names) != len(set(names)):
+            raise ValueError(
+                "Readiness check names must be unique (including defaults)"
+            )
+        for kind in ("running", "qemu_agent"):
+            if sum(check.kind == kind for check in checks) > 1:
+                raise ValueError(f"Only one {kind} readiness check is allowed")
+        return self
+
+    def effective_readiness_checks(self) -> Tuple[ReadinessCheck, ...]:
+        """Return configured checks plus any missing mandatory built-in checks."""
+        checks = list(self.readiness_checks)
+        if not any(check.kind == "running" for check in checks):
+            checks.insert(
+                0,
+                ReadinessCheck(
+                    name="proxmox-running",
+                    kind="running",
+                    retry=ReadinessRetry(timeout=1200),
+                ),
+            )
+        if self.is_sandbox and not any(check.kind == "qemu_agent" for check in checks):
+            checks.insert(
+                1,
+                ReadinessCheck(
+                    name="qemu-agent",
+                    kind="qemu_agent",
+                    retry=ReadinessRetry(timeout=300),
+                ),
+            )
+        return tuple(checks)
+
+    @property
+    def requires_guest_agent(self) -> bool:
+        """Whether sandbox access or a readiness check/repair needs QGA enabled."""
+        return self.is_sandbox or any(
+            check.kind in ("command", "qemu_agent") or check.repair is not None
+            for check in self.readiness_checks
+        )
 
 
 VmConfigs: TypeAlias = Union[Tuple[VmConfig, ...], Dict[str, VmConfig]]

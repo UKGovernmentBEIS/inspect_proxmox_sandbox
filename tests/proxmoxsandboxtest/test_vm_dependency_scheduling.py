@@ -1,12 +1,15 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from inspect_ai.util import ExecResult
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
+    ReadinessCheck,
+    ReadinessCommand,
     VmConfig,
     VmSourceConfig,
 )
@@ -47,14 +50,13 @@ def infra_with_vm_events(
         started[vm_id].set()
         return proxmox_ids[vm_id]
 
-    async def await_vm(proxmox_vm_id, is_sandbox):
-        await ready[vm_ids_by_proxmox_id[proxmox_vm_id]].wait()
+    async def await_vm(state, changed):
+        await ready[vm_ids_by_proxmox_id[state.vm_id]].wait()
 
     sdn_commands = MagicMock()
     sdn_commands.create_sdn = AsyncMock(return_value=(None, ()))
     qemu_commands = MagicMock()
     qemu_commands.create_and_start_vm = AsyncMock(side_effect=create_and_start_vm)
-    qemu_commands.await_vm = AsyncMock(side_effect=await_vm)
     built_in_vm = MagicMock()
     built_in_vm.known_builtins = AsyncMock(return_value={})
 
@@ -66,6 +68,7 @@ def infra_with_vm_events(
         qemu_commands=qemu_commands,
         built_in_vm=built_in_vm,
     )
+    setattr(infra_commands, "_await_vm_readiness", AsyncMock(side_effect=await_vm))
     return infra_commands, started, ready
 
 
@@ -78,7 +81,6 @@ async def test_tuple_scheduler_preserves_legacy_startup_barriers():
     sdn_commands.create_sdn = AsyncMock(return_value=(None, ()))
     qemu_commands = MagicMock()
     qemu_commands.create_and_start_vm = AsyncMock(side_effect=(100, 101))
-    qemu_commands.await_vm = AsyncMock()
     built_in_vm = MagicMock()
     built_in_vm.known_builtins = AsyncMock(return_value={})
     infra_commands = InfraCommands(
@@ -89,6 +91,7 @@ async def test_tuple_scheduler_preserves_legacy_startup_barriers():
         qemu_commands=qemu_commands,
         built_in_vm=built_in_vm,
     )
+    infra_commands._await_vm_readiness = AsyncMock()
     vms_config = (
         vm_config(await_before_next_vm=True),
         vm_config(await_before_next_vm=False),
@@ -102,8 +105,11 @@ async def test_tuple_scheduler_preserves_legacy_startup_barriers():
     assert [
         invocation.kwargs["wait_until_ready"]
         for invocation in qemu_commands.create_and_start_vm.await_args_list
-    ] == [True, False]
-    assert qemu_commands.await_vm.await_args_list == [call(100, True), call(101, True)]
+    ] == [False, False]
+    assert [
+        invocation.args[0].vm_id
+        for invocation in infra_commands._await_vm_readiness.await_args_list
+    ] == [100, 101]
 
 
 async def test_dependency_scheduler_starts_newly_unblocked_vms():
@@ -145,7 +151,7 @@ async def test_dependency_readiness_failure_does_not_start_dependants():
         "application": vm_config(depends_on=("database",)),
     }
     infra_commands, started, _ = infra_with_vm_events(vms_config)
-    infra_commands.qemu_commands.await_vm = AsyncMock(
+    infra_commands._await_vm_readiness = AsyncMock(
         side_effect=RuntimeError("database did not become ready")
     )
 
@@ -166,3 +172,107 @@ async def test_ensure_vms_reads_dictionary_values():
     await ProxmoxSandboxEnvironment.ensure_vms(infra_commands, config)
 
     infra_commands.built_in_vm.ensure_exists.assert_awaited_once_with("ubuntu24.04")
+
+
+@pytest.mark.parametrize("dictionary", [True, False])
+async def test_custom_checks_gate_graph_dependencies_and_legacy_barriers(
+    monkeypatch, dictionary
+):
+    database = vm_config(await_before_next_vm=not dictionary).model_copy(
+        update={
+            "readiness_checks": (
+                ReadinessCheck(
+                    name="service", command=ReadinessCommand(argv=("health",))
+                ),
+            ),
+        }
+    )
+    configs = {
+        "database": database,
+        "application": vm_config(depends_on=("database",) if dictionary else ()),
+    }
+    infra, started, _ = infra_with_vm_events(configs)
+    monkeypatch.setattr(
+        infra,
+        "_await_vm_readiness",
+        lambda state, changed: InfraCommands._await_vm_readiness(infra, state, changed),
+    )
+    infra.qemu_commands.node = "node"
+    infra.qemu_commands.async_proxmox.request = AsyncMock(
+        return_value={"status": "running"}
+    )
+    infra.qemu_commands.ping_qemu_agent = AsyncMock()
+    checking = asyncio.Event()
+    healthy = asyncio.Event()
+
+    async def health(*args, **kwargs):
+        checking.set()
+        await healthy.wait()
+        return ExecResult(success=True, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        ProxmoxSandboxEnvironment, "exec", AsyncMock(side_effect=health)
+    )
+    create = asyncio.create_task(
+        infra.create_sdn_and_vms(
+            "test", None, configs if dictionary else tuple(configs.values())
+        )
+    )
+    try:
+        await wait_until_set(checking)
+        assert started["database"].is_set()
+        assert not started["application"].is_set()
+        healthy.set()
+        await wait_until_set(started["application"])
+        result, _, _ = await asyncio.wait_for(create, 1)
+        assert [vm_id for vm_id, _ in result] == [100, 101]
+    finally:
+        create.cancel()
+        await asyncio.gather(create, return_exceptions=True)
+
+
+async def test_graph_failure_cancels_other_readiness_waits():
+    configs = {"database": vm_config(), "other": vm_config()}
+    infra, started, _ = infra_with_vm_events(configs)
+    cancelled = asyncio.Event()
+    other_checking = asyncio.Event()
+
+    async def readiness(state, changed):
+        if state.name == "database":
+            await other_checking.wait()
+            raise RuntimeError("failed readiness")
+        other_checking.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    infra._await_vm_readiness = AsyncMock(side_effect=readiness)
+    with pytest.raises(RuntimeError, match="failed readiness"):
+        await asyncio.wait_for(infra.create_sdn_and_vms("test", None, configs), 1)
+    assert all(event.is_set() for event in started.values())
+    assert cancelled.is_set()
+
+
+async def test_all_ipam_mappings_precede_any_vm_creation():
+    configs = {"database": vm_config(), "application": vm_config()}
+    infra, _, ready = infra_with_vm_events(configs)
+    calls = []
+
+    async def mappings(*args):
+        calls.append("ipam")
+        return []
+
+    create_vm = infra.qemu_commands.create_and_start_vm
+
+    async def create(**kwargs):
+        assert calls[:2] == ["ipam", "ipam"]
+        calls.append("create")
+        return await create_vm(**kwargs)
+
+    infra.create_ipam_mappings = AsyncMock(side_effect=mappings)
+    infra.qemu_commands.create_and_start_vm = AsyncMock(side_effect=create)
+    for event in ready.values():
+        event.set()
+    await infra.create_sdn_and_vms("test", None, configs)
+    assert calls == ["ipam", "ipam", "create", "create"]

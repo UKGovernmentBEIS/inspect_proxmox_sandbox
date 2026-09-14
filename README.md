@@ -388,9 +388,131 @@ soon as both are ready. Dictionary configurations reject `await_before_next_vm`;
 configurations reject `depends_on`. Unknown dependencies, duplicate dependencies, and
 cycles are rejected during configuration validation.
 
-Readiness currently means that Proxmox reports the VM as running and, for an
-`is_sandbox` VM, that its QEMU guest agent responds. It does not imply that application
-services inside the guest are ready.
+Readiness includes the checks below. Cloning/configuring/starting VMs remains
+serialized for safe Proxmox VM ID allocation; their boot/readiness waits overlap.
+Dependencies are reconsidered between clones, so a clone already in progress is
+not interrupted when another VM becomes ready. Results retain declaration order.
+
+### VM readiness checks and repairs
+
+Every VM requires Proxmox to report `running`. With `is_sandbox=True`, a successful
+QEMU guest-agent ping is also required. Leaving `readiness_checks=()` preserves
+those defaults; it does **not** imply application-level readiness.
+
+Add named guest-command checks to gate startup on application readiness:
+
+```python
+from proxmoxsandbox.schema import (
+    ReadinessCheck, ReadinessCommand, ReadinessRepair, ReadinessRetry,
+    VmConfig, VmSourceConfig,
+)
+
+service_vm = VmConfig(
+    vm_source_config=VmSourceConfig(existing_vm_template_tag="service"),
+    readiness_checks=(
+        ReadinessCheck(
+            name="application-service",
+            command=ReadinessCommand(
+                argv=("systemctl", "is-active", "example.service"),
+                expected_exit_code=0,
+                stdout_regex=r"^active\s*$",
+                timeout=30,
+            ),
+            retry=ReadinessRetry(
+                interval=2, backoff=1.5, max_interval=30,
+                attempt_timeout=60, timeout=900,
+            ),
+            repair=ReadinessRepair(
+                after=300,
+                commands=(
+                    ReadinessCommand(argv=("systemctl", "daemon-reload")),
+                    ReadinessCommand(argv=("systemctl", "restart", "example.service")),
+                ),
+                max_attempts=1,
+                timeout=120,
+            ),
+        ),
+    ),
+)
+```
+
+All checks must pass before a dictionary dependant starts or a tuple's
+`await_before_next_vm` barrier is released. Running is checked first, then agent
+ping if configured, then custom checks. Checks have independent polling schedules,
+but probes and repairs within one VM are serialized; different VMs are checked
+concurrently. Readiness is a **startup latch**, not continuous health monitoring.
+
+Command success requires the configured exit code (default `0`) **and**, if set,
+a Python `re.search` match on stdout. Use anchors for an exact match, or inline
+regex flags such as `(?m)` for multiline matching. Commands are argument vectors,
+not implicit shell strings. For complex scripts use `("sh", "-c", script)` or an
+explicit PowerShell invocation. They run as the guest agent's user (normally
+root/SYSTEM), through the same Linux/Windows command wrappers as sandbox `exec`.
+Set `os_type` appropriately for Windows, including when cloning templates.
+
+Guest-command checks/repairs require an installed, running QEMU guest agent and
+the usual sandbox command-wrapper utilities. They automatically enable its Proxmox
+configuration even for `is_sandbox=False`. They do not use SSH, and guest-side
+repairs cannot recover a stopped VM or an unavailable guest agent.
+
+All timings are seconds:
+
+- `ReadinessRetry` defaults: interval `2`, multiplier `1.5`, capped at `30`;
+  per-probe wall-clock limit `60`; total check budget `600`. The implicit running
+  check has a `1200` budget and the implicit agent check has `300`.
+- Each check's budget starts when its prerequisites first pass. Retries are
+  scheduled from the end of the preceding attempt; sleeps, API calls and repairs
+  consume the budget. One slow probe cannot overrun another outstanding deadline.
+- `ReadinessCommand.timeout` defaults to `30` and is enforced inside the guest.
+  Choose a larger `attempt_timeout` to allow for command upload/result retrieval.
+- A repair defaults to becoming eligible after `300` seconds without that check
+  succeeding. It runs at the next opportunity after an unsuccessful probe, stops
+  its command sequence on the first failure, and has a `120` wall-clock limit.
+  `max_attempts=1` by default; when increased, `interval=300` separates repairs,
+  measured from the previous repair's completion. `after` must be below the
+  check's total timeout.
+- A repair never counts as readiness, and does not reset the failing check's
+  deadline. It invalidates **all** earlier successes on that VM, even if the repair
+  fails. Previously-passed checks get fresh revalidation budgets. Repairs remain
+  bounded by their configured attempt counts.
+
+To customize a built-in check, explicitly include a `ReadinessCheck` with
+`kind="running"` or `kind="qemu_agent"`, a name, and a retry policy (no `command`).
+That replaces the implicit check of that kind. Names must be unique, including
+the implicit names `proxmox-running` and `qemu-agent`. Configuration is JSON/YAML
+serializable; misspelled fields inside readiness policies are rejected.
+
+Checks and repairs must be safe to repeat. Cancellation stops local polling, but
+cannot guarantee an already-launched guest command was killed immediately; it may
+continue until its guest-side timeout (and kill grace). Likewise, a lost API
+response can leave the outcome uncertain. Prefer idempotent repair scripts and
+avoid detaching background work from them.
+
+#### Startup display
+
+Startup prints every VM, including those blocked on dependencies, followed by its
+individual checks. The display includes ready/not-ready state, retry and timeout
+countdowns, scheduled repairs, repair command progress, and attempt counts:
+
+```text
+database (ID=101): NOT READY / checking — waiting for readiness checks
+  proxmox-running: ready: passed
+  qemu-agent: ready: passed
+  application-service: waiting: exit code 3; expected 0; retry in 4.0s; timeout in 580.0s; repair in 280.0s; repairs 0/1
+worker: NOT READY / pending — waiting for dependencies: database
+  proxmox-running: pending: waiting for VM startup
+  qemu-agent: pending: waiting for VM startup
+```
+
+Use Inspect's `--display=rich` in a terminal for an in-place tree refreshed each
+second (requires a Rich version that supports nested live displays if Inspect
+already has one). CI/non-terminal output, `--display=plain`, and Inspect's
+full-screen/conversation UI receive timestamped snapshots on changes, coalesced
+to once per second, and a heartbeat snapshot every 15 seconds. Older Rich versions
+fall back to snapshots. Probe outcomes and repair transitions are also printed as
+durable events, so a short-lived repair isn't lost between refreshes. A final tree
+is printed on success, failure, or cancellation. Command arguments and output are
+not echoed by the readiness display. `--display=none` suppresses this output too.
 
 ### VM Names
 
