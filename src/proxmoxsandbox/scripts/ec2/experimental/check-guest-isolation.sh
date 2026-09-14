@@ -76,8 +76,9 @@ for host in "${hosts[@]}"; do
     done
     want blocked "Proxmox API https://$host:8006/api2/json/version" "$(http_state "https://$host:8006/api2/json/version")"
 done
-# Not judged: the L3 path to the gateway is what makes "blocked" above mean the port is
-# shut rather than the network being dead.
+# Not judged, and blocked on an isolated host: the node firewall accepts only DNS/DHCP from
+# guests. So this is not the witness that the probes above found shut ports rather than a
+# dead network — that is "SDN resolver $gw:53 answers at all" below, which needs dig.
 echo "INFO  ICMP to the gateway [$(ping -c1 -W2 "$gw" >/dev/null 2>&1 && echo reachable || echo blocked)]"
 
 echo
