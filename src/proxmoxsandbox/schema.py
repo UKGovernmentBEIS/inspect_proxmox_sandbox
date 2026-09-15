@@ -2,9 +2,21 @@
 
 import json
 import os
+from collections import defaultdict
 from os import getenv
 from pathlib import Path
-from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
+from typing import (
+    Annotated,
+    Dict,
+    List,
+    Literal,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeAlias,
+    Union,
+)
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
@@ -169,13 +181,76 @@ OsType: TypeAlias = Literal[
 ]
 
 
+class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
+    """
+    Guest healthcheck evaluated during sample startup, gating this VM's readiness.
+
+    Field names follow docker compose's `healthcheck` so the semantics are
+    guessable, but the defaults do not: compose's 30s/3-retries gives up after
+    ~90s, far too short for a booting VM. Durations are seconds (floats), not
+    compose duration strings.
+
+    Success is exit code 0. `test` is an argument vector with no CMD/CMD-SHELL
+    sentinel; use ("sh", "-c", script) or an explicit PowerShell invocation when
+    a shell is needed. Requires a running qemu-guest-agent in the guest, even when
+    is_sandbox is False.
+
+    Attributes:
+        test: Command to run inside the guest.
+        interval: Seconds between attempts.
+        timeout: Per-attempt limit in seconds, enforced inside the guest.
+        retries: Consecutive failures tolerated before the sample fails.
+        start_period: Grace window in seconds after the first attempt during which
+            failures do not count towards retries.
+    """
+
+    test: Tuple[str, ...] = Field(min_length=1)
+    interval: float = Field(default=5, gt=0)
+    timeout: int = Field(default=30, gt=0)
+    retries: int = Field(default=60, gt=0)
+    start_period: float = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_test(self) -> "HealthCheck":
+        if not self.test[0]:
+            raise ValueError("test needs an executable as its first element")
+        if any("\x00" in arg for arg in self.test):
+            raise ValueError("test arguments must not contain NUL")
+        return self
+
+
+DependencyOrigin: TypeAlias = Literal["depends_on", "await_before_next_vm"]
+
+
+class DependencyEdge(NamedTuple):
+    """One resolved startup edge: `dependant` waits for `dependency`.
+
+    Both are indices into `ProxmoxSandboxEnvironmentConfig.vms_config`.
+    """
+
+    dependant: int
+    dependency: int
+    origin: DependencyOrigin
+
+    def describe(self, labels: Sequence[str]) -> str:
+        """Human-readable edge, attributing implied edges to their source."""
+        text = f"{labels[self.dependant]} waits for {labels[self.dependency]}"
+        if self.origin == "await_before_next_vm":
+            text += f" (implied by await_before_next_vm on {labels[self.dependency]})"
+        return text
+
+
 class VmConfig(BaseModel, frozen=True):
     """
     Configuration for a virtual machine.
 
     Attributes:
         vm_source_config: The source configuration for the VM
-        name: The name of the VM (optional). Must be a valid DNS name.
+        name: The name of the VM (optional). Must be a valid DNS name. Names that
+            are set must be unique within a sample: the name is the Proxmox VM
+            name, the key used with Inspect's sandbox(), and the identifier other
+            VMs use in depends_on. The first is_sandbox VM is also always
+            reachable as sandbox("default").
         ram_mb: RAM allocation in megabytes (default: 2048)
         vcpus: Number of virtual CPUs (default: 2)
         nics: Network interface configurations (optional)
@@ -197,10 +272,18 @@ class VmConfig(BaseModel, frozen=True):
         cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
             defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
             panic on nested virtualization with "host"; use "qemu64" for those.
-        await_before_next_vm: if True, wait for this VM to finish booting (and, when
-            is_sandbox, to answer a guest-agent ping) before creating the next VM in
-            vms_config. Defaults to False, so VMs boot concurrently. Set this on a VM
-            that later ones depend on at boot time, e.g. a router or DHCP server.
+        await_before_next_vm: if True, every later VM in vms_config waits for this
+            VM to be ready before it is created. Equivalent to each later VM
+            listing this one in depends_on. Defaults to False. Prefer depends_on
+            for new configs; this is kept for backwards compatibility.
+        depends_on: names of VMs that must be ready before this VM is created.
+            Ready means the dependency's healthcheck passed if it has one,
+            otherwise that Proxmox reports it running (and, if it needs a guest
+            agent, that the agent answers). May name a VM later in vms_config; that
+            VM is simply created first. Unnamed VMs cannot be depended on.
+        healthcheck: optional guest command polled until it exits 0. Gates this
+            VM's readiness for depends_on and await_before_next_vm. Requires
+            qemu-guest-agent even when is_sandbox is False.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -225,6 +308,13 @@ class VmConfig(BaseModel, frozen=True):
     os_type: Optional[OsType] = "l26"
     cpu: Optional[str] = None
     await_before_next_vm: bool = False
+    depends_on: Tuple[str, ...] = ()
+    healthcheck: Optional[HealthCheck] = None
+
+    @property
+    def requires_guest_agent(self) -> bool:
+        """Whether sandbox access or a healthcheck needs QGA enabled in Proxmox."""
+        return self.is_sandbox or self.healthcheck is not None
 
 
 class HttpHeader(BaseModel):
@@ -354,3 +444,109 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     vms_config: Tuple[VmConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
+
+    def vm_labels(self) -> Tuple[str, ...]:
+        """Labels for error messages; unnamed VMs are identified by position."""
+        return tuple(
+            repr(vm.name) if vm.name is not None else f"vms_config[{i}]"
+            for i, vm in enumerate(self.vms_config)
+        )
+
+    def dependency_edges(self) -> Tuple[DependencyEdge, ...]:
+        """Collect all dependency edges.
+
+        This is explicit depends_on edges unioned with those implied by
+        await_before_next_vm. We collect an origin (named edge or await_before_next_vm)
+        for use in reporting errors (like cycles).
+
+        Deduplicated on (dependant, dependency), preferring the explicit origin so
+        error messages quote what the user actually wrote. Assumes names have
+        already been validated as unique and resolvable.
+        """
+        index_of = {vm.name: i for i, vm in enumerate(self.vms_config) if vm.name}
+        barriers = [
+            i for i, vm in enumerate(self.vms_config) if vm.await_before_next_vm
+        ]
+        edges: List[DependencyEdge] = []
+        for i, vm in enumerate(self.vms_config):
+            explicit = {index_of[dep] for dep in vm.depends_on}
+            edges.extend(DependencyEdge(i, j, "depends_on") for j in explicit)
+            edges.extend(
+                DependencyEdge(i, j, "await_before_next_vm")
+                for j in barriers
+                if j < i and j not in explicit
+            )
+        return tuple(edges)
+
+    @model_validator(mode="after")
+    def _validate_vm_names(self) -> "ProxmoxSandboxEnvironmentConfig":
+        seen: Dict[str, int] = {}
+        for i, vm in enumerate(self.vms_config):
+            if vm.name is None:
+                continue
+            if vm.name in seen:
+                raise ValueError(
+                    f"Duplicate VM name {vm.name!r} at vms_config[{seen[vm.name]}] "
+                    f"and vms_config[{i}]; names identify VMs to Inspect and to "
+                    f"depends_on, so they must be unique within a sample"
+                )
+            seen[vm.name] = i
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dependencies(self) -> "ProxmoxSandboxEnvironmentConfig":
+        labels = self.vm_labels()
+        named = {vm.name for vm in self.vms_config if vm.name is not None}
+        unnamed = sum(1 for vm in self.vms_config if vm.name is None)
+
+        for i, vm in enumerate(self.vms_config):
+            if len(vm.depends_on) != len(set(vm.depends_on)):
+                raise ValueError(f"{labels[i]} lists a duplicate dependency")
+            if vm.name is not None and vm.name in vm.depends_on:
+                raise ValueError(f"{labels[i]} depends on itself")
+            for dep in vm.depends_on:
+                if dep not in named:
+                    hint = (
+                        f"; {unnamed} VM(s) have no name and cannot be depended on"
+                        if unnamed
+                        else ""
+                    )
+                    raise ValueError(
+                        f"{labels[i]} depends on unknown VM {dep!r}. "
+                        f"Known names: {sorted(named)}{hint}"
+                    )
+
+        self._reject_cycles(self.dependency_edges(), labels)
+        return self
+
+    def _reject_cycles(
+        self, edges: Sequence[DependencyEdge], labels: Sequence[str]
+    ) -> None:
+        # DFS that tracks the edge path, so a cycle through an implied
+        # await_before_next_vm edge is reported with its origin attached.
+        adjacency: Dict[int, List[DependencyEdge]] = defaultdict(list)
+        for edge in edges:
+            adjacency[edge.dependant].append(edge)
+
+        white, grey, black = 0, 1, 2
+        colour: Dict[int, int] = defaultdict(int)
+        path: List[DependencyEdge] = []
+
+        def visit(node: int) -> None:
+            colour[node] = grey
+            for edge in adjacency[node]:
+                path.append(edge)
+                if colour[edge.dependency] == grey:
+                    start = next(
+                        k for k, e in enumerate(path) if e.dependant == edge.dependency
+                    )
+                    cycle = " -> ".join(e.describe(labels) for e in path[start:])
+                    raise ValueError(f"VM dependency cycle: {cycle}")
+                if colour[edge.dependency] == white:
+                    visit(edge.dependency)
+                path.pop()
+            colour[node] = black
+
+        for node in range(len(self.vms_config)):
+            if colour[node] == white:
+                visit(node)
