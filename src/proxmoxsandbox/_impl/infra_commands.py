@@ -167,7 +167,6 @@ class InfraCommands(abc.ABC):
                     built_in_vm_ids=known_builtins,
                     wait_until_ready=vm_config.await_before_next_vm,
                 )
-                self.qemu_commands.register_vm(vm_id)
                 vm_configs_with_ids.append((vm_id, vm_config))
 
         # TODO check for failed starts in the log somehow
@@ -363,3 +362,6 @@ class InfraCommands(abc.ABC):
         await self.sdn_commands.tear_down_sdn_zones_and_vnets(
             zones_to_delete, noticed_ipam_mappings
         )
+        self.qemu_commands.deregister_vms([vm["vmid"] for vm in noticed_vms])
+        for zone in zones_to_delete:
+            self.sdn_commands.deregister_sdn_resources(zone, noticed_ipam_mappings)
