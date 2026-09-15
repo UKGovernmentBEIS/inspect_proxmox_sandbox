@@ -17,6 +17,18 @@ from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCom
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
 
+# Budgets for the two VM readiness preconditions, in seconds.
+_RUNNING_TIMEOUT = 1200.0
+_AGENT_TIMEOUT = 300.0
+
+
+class VmNotRunningError(TimeoutError):
+    """Proxmox did not report the VM in the awaited status within the budget."""
+
+
+class GuestAgentUnavailableError(TimeoutError):
+    """The QEMU guest agent never answered a ping within the budget."""
+
 
 class QemuCommands(abc.ABC):
     logger = getLogger(__name__)
@@ -80,9 +92,23 @@ class QemuCommands(abc.ABC):
         is_sandbox: bool,
         status_for_wait: str = "running",
     ) -> None:
+        """Wait for the VM's status and, for sandboxes, a guest-agent ping."""
+        await self.await_running(vm_id, status_for_wait=status_for_wait)
+        if is_sandbox and status_for_wait == "running":
+            await self.await_agent(vm_id)
+
+    async def await_running(
+        self,
+        vm_id: int,
+        *,
+        status_for_wait: str = "running",
+        timeout: float = _RUNNING_TIMEOUT,
+    ) -> None:
+        """Poll Proxmox until the VM reports `status_for_wait`."""
+
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(1200),
+            stop=tenacity.stop_after_delay(timeout),
         )
         async def is_in_status() -> None:
             vm_status = await self.async_proxmox.request(
@@ -101,30 +127,42 @@ class QemuCommands(abc.ABC):
             self.TRACE_NAME,
             f"await VM {vm_id} to be in status {status_for_wait}",
         ):
-            await is_in_status()
+            try:
+                await is_in_status()
+            except tenacity.RetryError as e:
+                raise VmNotRunningError(
+                    f"VM {vm_id} did not reach status {status_for_wait!r} "
+                    f"within {timeout:g}s"
+                ) from e
 
-        if is_sandbox and status_for_wait == "running":
-            attempt_count = [0]  # Use list to allow mutation in nested function
+    async def await_agent(self, vm_id: int, *, timeout: float = _AGENT_TIMEOUT) -> None:
+        """Ping the QEMU guest agent until it answers."""
+        attempt_count = [0]  # Use list to allow mutation in nested function
 
-            @tenacity.retry(
-                wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                stop=tenacity.stop_after_delay(300),
-            )
-            async def qemu_agent_reachable() -> None:
-                attempt_count[0] += 1
-                if attempt_count[0] % 10 == 1:  # Log every 10 attempts
-                    self.logger.info(
-                        f"VM {vm_id} QEMU agent ping attempt {attempt_count[0]}"
-                    )
-                await self.ping_qemu_agent(vm_id)
+        @tenacity.retry(
+            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            stop=tenacity.stop_after_delay(timeout),
+        )
+        async def qemu_agent_reachable() -> None:
+            attempt_count[0] += 1
+            if attempt_count[0] % 10 == 1:  # Log every 10 attempts
+                self.logger.info(
+                    f"VM {vm_id} QEMU agent ping attempt {attempt_count[0]}"
+                )
+            await self.ping_qemu_agent(vm_id)
 
-            with trace_action(
-                self.logger, self.TRACE_NAME, f"await VM {vm_id} QEMU agent"
-            ):
+        with trace_action(self.logger, self.TRACE_NAME, f"await VM {vm_id} QEMU agent"):
+            try:
                 await qemu_agent_reachable()
-            self.logger.info(
-                f"VM {vm_id} QEMU agent responded after {attempt_count[0]} attempts"
-            )
+            except tenacity.RetryError as e:
+                raise GuestAgentUnavailableError(
+                    f"VM {vm_id} QEMU guest agent did not answer within "
+                    f"{timeout:g}s ({attempt_count[0]} pings). Check that "
+                    f"qemu-guest-agent is installed and running in the guest."
+                ) from e
+        self.logger.info(
+            f"VM {vm_id} QEMU agent responded after {attempt_count[0]} attempts"
+        )
 
     async def destroy_vm(self, vm_id: int) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"stop VM {vm_id}"):
@@ -599,7 +637,9 @@ class QemuCommands(abc.ABC):
     def other_config_json(
         self, vm_config: VmConfig, json_for_create: ProxmoxJsonDataType
     ) -> None:
-        json_for_create["agent"] = f"enabled={1 if vm_config.is_sandbox else 0}"
+        json_for_create["agent"] = (
+            f"enabled={1 if vm_config.requires_guest_agent else 0}"
+        )
         json_for_create["memory"] = vm_config.ram_mb
         json_for_create["cores"] = vm_config.vcpus
         if vm_config.name is not None:
