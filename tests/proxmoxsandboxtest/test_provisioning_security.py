@@ -1,4 +1,6 @@
 import re
+import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -118,3 +120,50 @@ def test_provisioners_contain_egress_lockdown(provisioner: Path) -> None:
     assert "could not determine management NIC" not in lockdown
     assert "ERROR: no default-route NIC found" in lockdown
     assert "RemainAfterExit" not in _extract_heredoc(script, "EGRESS_LOCKDOWN_UNIT")
+
+
+def _fixup_seed_extraction_line() -> str:
+    """Return the fixup's ``SEEDED_HASH=...`` pipeline that reads the marker."""
+    fixup = _extract_heredoc(
+        (EC2_SCRIPTS / "userdata.sh").read_text(), "FIXUP_PASSWORD"
+    )
+    for line in fixup.splitlines():
+        if line.startswith("SEEDED_HASH="):
+            return line
+    raise AssertionError("SEEDED_HASH extraction line not found in the fixup")
+
+
+def test_seeded_password_fixup_extracts_the_hash_from_user_data(tmp_path) -> None:
+    # Run the fixup's real extraction pipeline, redirecting only its data source
+    # (call-ec2-hypervisor) to a fake user-data blob — the grep/cut under test is
+    # taken verbatim from the script.
+    blob = tmp_path / "user-data"
+
+    def extract(user_data: str) -> str:
+        blob.write_text(user_data)
+        line = _fixup_seed_extraction_line().replace(
+            "/usr/local/bin/call-ec2-hypervisor latest/user-data",
+            f"cat {shlex.quote(str(blob))}",
+        )
+        script = f'set -euo pipefail\n{line}\nprintf "%s" "$SEEDED_HASH"'
+        return subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=True
+        ).stdout
+
+    hashed = "$6$" + "a" * 8 + "$" + "b" * 40
+    # Present — including indented, as it is once embedded in the cloud-init doc.
+    assert extract(f"#cloud-config\n      # proxmox-root-pw-hash={hashed}\n") == hashed
+    # Absent — empty, so the fixup falls through to generating a password.
+    assert extract("#cloud-config\nruncmd:\n  - echo hi\n") == ""
+
+
+def test_seeded_password_fixup_applies_encrypted_and_drops_the_plaintext_file() -> None:
+    # The apply half writes to /root, so it can't be exercised root-free here;
+    # assert on the script text (as the rest of this suite does) that a seeded
+    # hash is applied as already-encrypted and the plaintext file the SSM-fetch
+    # path relies on is removed.
+    fixup = _extract_heredoc(
+        (EC2_SCRIPTS / "userdata.sh").read_text(), "FIXUP_PASSWORD"
+    )
+    assert "chpasswd -e" in fixup
+    assert "rm -f /root/root-password" in fixup

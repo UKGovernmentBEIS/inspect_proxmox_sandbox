@@ -300,6 +300,17 @@ cat > /usr/local/bin/proxmox-ami-fixup-password.sh << 'FIXUP_PASSWORD'
 set -euo pipefail
 CURRENT_ID=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/instance-id)
 SAVED_ID=$(cat /root/.last-instance-id 2>/dev/null || true)
+# A launcher can seed the root password by advertising its sha512crypt hash on a
+# `proxmox-root-pw-hash=` marker line in the instance user-data. When present,
+# apply that instead of generating one, and don't write /root/root-password, so
+# the plaintext lives only on the launcher and is never read back off this host.
+SEEDED_HASH=$(/usr/local/bin/call-ec2-hypervisor latest/user-data 2>/dev/null | grep -oE 'proxmox-root-pw-hash=\$6\$[./0-9A-Za-z]+\$[./0-9A-Za-z]+' | head -n1 | cut -d= -f2- || true)
+if [ -n "$SEEDED_HASH" ]; then
+    echo "root:$SEEDED_HASH" | chpasswd -e
+    rm -f /root/root-password
+    echo "$CURRENT_ID" > /root/.last-instance-id
+    exit 0
+fi
 if [ "$CURRENT_ID" = "$SAVED_ID" ] && [ -s /root/root-password ]; then
     exit 0
 fi

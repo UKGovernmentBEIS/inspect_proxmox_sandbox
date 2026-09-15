@@ -112,6 +112,14 @@ aws ssm get-command-invocation --region "$REGION" \
     --query 'StandardOutputContent' --output text
 ```
 
+Alternatively, a launcher can **seed** the root password rather than reading it
+back: advertise its sha512crypt hash on a `proxmox-root-pw-hash=$6$...` marker
+line in the instance user-data, and the boot-time fixup sets root's
+`/etc/shadow` from it (via `chpasswd -e`) and skips both generation and
+`/root/root-password`. The launcher then already knows the password without any
+SSM round-trip. The hash is readable by anyone who can read the host's
+user-data, so only seed a high-entropy, machine-generated password.
+
 To open the Proxmox web UI, use `experimental/connect.sh` to forward port 8006
 over SSM (no inbound SG rules required); see `experimental/README.md`.
 

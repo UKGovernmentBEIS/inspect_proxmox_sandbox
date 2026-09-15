@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- EC2 provisioning: the boot-time root-password fixup applies a launcher-seeded sha512crypt hash when the instance user-data carries a `proxmox-root-pw-hash=` marker, instead of generating a random password and writing `/root/root-password`. This lets a launcher provision a root credential it already holds without reading one back off the host. Absent the marker, behaviour is unchanged.
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
