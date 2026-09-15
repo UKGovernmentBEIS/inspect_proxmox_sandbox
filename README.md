@@ -419,7 +419,7 @@ service_vm = VmConfig(
                 timeout=30,
             ),
             retry=ReadinessRetry(
-                interval=2, backoff=1.5, max_interval=30,
+                initial_delay=0, interval=2, backoff=1.5, max_interval=30,
                 attempt_timeout=60, timeout=900,
             ),
             repair=ReadinessRepair(
@@ -457,10 +457,11 @@ repairs cannot recover a stopped VM or an unavailable guest agent.
 
 All timings are seconds:
 
-- `ReadinessRetry` defaults: interval `2`, multiplier `1.5`, capped at `30`;
+- `ReadinessRetry` defaults: initial delay `0`, interval `2`, multiplier `1.5`, capped at `30`;
   per-probe wall-clock limit `60`; total check budget `600`. The implicit running
   check has a `1200` budget and the implicit agent check has `300`.
-- Each check's budget starts when its prerequisites first pass. Retries are
+- Each check's budget starts when its prerequisites first pass. `initial_delay`
+  defers the first probe but still consumes that budget. Retries are
   scheduled from the end of the preceding attempt; sleeps, API calls and repairs
   consume the budget. One slow probe cannot overrun another outstanding deadline.
 - `ReadinessCommand.timeout` defaults to `30` and is enforced inside the guest.

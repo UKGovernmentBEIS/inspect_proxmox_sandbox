@@ -100,16 +100,19 @@ class ReadinessRunner:
                 for check in eligible:
                     if check.deadline is None:
                         check.deadline = now + check.config.retry.timeout
-                        check.next_retry = now
+                        check.next_retry = now + check.config.retry.initial_delay
                         check.delay = check.config.retry.interval
                         if (
                             check.config.repair is not None
                             and check.repairs < check.config.repair.max_attempts
                         ):
                             check.next_repair = now + check.config.repair.after
-                    check.detail = (
-                        check.detail if check.attempts else "first attempt due"
-                    )
+                    if not check.attempts:
+                        check.detail = (
+                            f"initial delay {check.config.retry.initial_delay:g}s"
+                            if check.config.retry.initial_delay
+                            else "first attempt due"
+                        )
 
                 # Earliest-due work wins, so slow/failing checks cannot starve
                 # other checks. Repairs wait for the current probe to finish.

@@ -171,8 +171,9 @@ OsType: TypeAlias = Literal[
 
 
 class ReadinessRetry(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
-    """Retry timing in seconds; timeout includes attempts, sleeps, and repairs."""
+    """Retry timing in seconds; timeout includes initial delay, attempts, and sleeps."""
 
+    initial_delay: float = Field(default=0, ge=0)
     interval: float = Field(default=2, gt=0)
     backoff: float = Field(default=1.5, ge=1)
     max_interval: float = Field(default=30, gt=0)
@@ -183,6 +184,8 @@ class ReadinessRetry(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False
     def _validate_interval(self) -> "ReadinessRetry":
         if self.max_interval < self.interval:
             raise ValueError("max_interval must be >= interval")
+        if self.initial_delay >= self.timeout:
+            raise ValueError("initial_delay must be less than timeout")
         return self
 
 

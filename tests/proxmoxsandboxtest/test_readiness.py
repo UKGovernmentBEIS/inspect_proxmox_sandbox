@@ -123,6 +123,8 @@ def test_schema_roundtrip():
         {"max_interval": 1},
         {"timeout": -1},
         {"attempt_timeout": 0},
+        {"initial_delay": -1},
+        {"initial_delay": 600},
         {"timeout": float("inf")},
         {"backoff": float("nan")},
         {"intervall": 1},
@@ -232,6 +234,18 @@ async def test_independent_backoffs_are_capped():
     execute.side_effect = [result(1)] * 4 + [result()]
     await runner.run()
     assert clock.sleeps == [2, 4, 5, 5]
+
+
+async def test_initial_delay_defers_first_probe():
+    check = ReadinessCheck(
+        name="boot-grace",
+        kind="running",
+        retry=ReadinessRetry(initial_delay=300, timeout=600),
+    )
+    runner, qemu, _, clock = runner_for(vm(check))
+    await runner.run()
+    assert clock.sleeps == [300]
+    assert qemu.async_proxmox.request.await_count == 1
 
 
 async def test_failed_check_times_out_without_oversleeping():
