@@ -394,6 +394,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     proxmox_ids_start,
                     sdn_config=config.sdn_config,
                     vms_config=config.vms_config,
+                    dependency_edges=config.dependency_edges(),
                 )
 
             sandboxes: Dict[str, SandboxEnvironment] = {}
