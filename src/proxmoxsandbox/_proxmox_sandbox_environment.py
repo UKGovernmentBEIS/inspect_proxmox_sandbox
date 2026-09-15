@@ -421,14 +421,17 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     pool_id=pool_id,
                     os_type=vm_config_and_id[1].os_type,
                 )
+                vm_name = vm_config_and_id[1].name
                 if not found_default and vm_config_and_id[1].is_sandbox:
                     sandboxes["default"] = vm_sandbox_environment
                     found_default = True
+                    # Also reachable by its own name, so sandbox(name) works for
+                    # the same identifier depends_on uses.
+                    if vm_name is not None and vm_name != "default":
+                        sandboxes[vm_name] = vm_sandbox_environment
                 else:
                     sandbox_name = (
-                        vm_config_and_id[1].name
-                        if vm_config_and_id[1].name is not None
-                        else f"vm_{vm_config_and_id[0]}"
+                        vm_name if vm_name is not None else f"vm_{vm_config_and_id[0]}"
                     )
                     sandboxes[sandbox_name] = vm_sandbox_environment
 
