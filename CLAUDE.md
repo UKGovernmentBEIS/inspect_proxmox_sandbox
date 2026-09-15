@@ -61,7 +61,7 @@ All config models use `frozen=True` — immutable after creation. You can't modi
 `sample_init` and `sample_cleanup` use try/finally to release instances back to pools. If you add new failure paths, ensure they don't leak instances.
 
 ### Windows QGA Reliability
-The QEMU guest agent channel on Windows drops ~5-7% of calls. `agent_commands.py` retries any HTTP 500 from QGA endpoints (3 attempts, 3s delay).
+The QEMU guest agent channel on Windows drops ~5-7% of calls. `agent_commands.py` retries transient QGA errors (`_QGA_MAX_RETRIES=25`, 2s delay doubling to a 20s cap). Healthchecks (`_impl/healthcheck.py`) likewise don't count transport errors toward `retries`.
 
 ## Comment Policy
 

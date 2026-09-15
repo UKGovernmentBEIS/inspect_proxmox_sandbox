@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Dependency-ordered VM startup: `VmConfig.depends_on` names other VMs that must be ready before this one is created. VMs are created in `vms_config` order except that a VM whose dependencies are not yet ready is deferred; cloning stays serial but readiness waits overlap. `await_before_next_vm` is kept and is now equivalent to every later VM depending on it
+- Compose-style `VmConfig.healthcheck` (`test`, `interval`, `timeout`, `retries`, `start_period`): a guest command polled until it exits 0, gating the VM's readiness for `depends_on`. Enables the QEMU guest agent for non-sandbox VMs that declare one
+- VM names that are set must now be unique within a sample; the first `is_sandbox` VM is now registered under both `default` and its own name
+- Clearer errors when a VM never reaches `running` or its guest agent never answers (`VmNotRunningError`, `GuestAgentUnavailableError`, both `TimeoutError` subclasses)
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
