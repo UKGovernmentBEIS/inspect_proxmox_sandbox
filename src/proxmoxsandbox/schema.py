@@ -493,6 +493,25 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
 
+    def _identity(self) -> tuple[object, ...]:
+        vms_config = self.vms_config
+        if isinstance(vms_config, dict):
+            # Declaration order controls which ready VMs get the first creation slots.
+            vms_identity: object = ("mapping", tuple(vms_config.items()))
+        else:
+            vms_identity = ("sequence", vms_config)
+        return (self.instance_pool_id, self.sdn_config, vms_identity)
+
+    def __hash__(self) -> int:
+        """Hash the complete, order-sensitive sandbox configuration."""
+        return hash(self._identity())
+
+    def __eq__(self, other: object) -> bool:
+        """Compare sandbox configurations using the same identity as hashing."""
+        if not isinstance(other, ProxmoxSandboxEnvironmentConfig):
+            return NotImplemented
+        return self._identity() == other._identity()
+
     @model_validator(mode="after")
     def validate_vm_startup_config(self) -> "ProxmoxSandboxEnvironmentConfig":
         """Keep legacy tuple scheduling separate from dependency scheduling."""

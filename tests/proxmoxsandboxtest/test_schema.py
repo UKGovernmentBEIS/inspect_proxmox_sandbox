@@ -1,6 +1,7 @@
 from ipaddress import ip_address
 
 import pytest
+from inspect_ai.util import SandboxEnvironmentSpec
 from pydantic import ValidationError
 from pydantic_extra_types.mac_address import MacAddress
 
@@ -116,3 +117,35 @@ def test_dictionary_vms_config_accepts_dependency_graph():
 
     assert isinstance(config.vms_config, dict)
     assert config.vms_config["application"].depends_on == ("dns", "database")
+
+
+def test_dictionary_vms_config_is_hashable_for_inspect():
+    config = ProxmoxSandboxEnvironmentConfig(
+        vms_config={
+            "database": vm_config(),
+            "application": vm_config(depends_on=("database",)),
+        }
+    )
+    equivalent = config.model_copy(deep=True)
+
+    assert config == equivalent
+    assert hash(config) == hash(equivalent)
+    specs = {
+        SandboxEnvironmentSpec("proxmox", config),
+        SandboxEnvironmentSpec("proxmox", equivalent),
+    }
+    assert len(specs) == 1
+
+
+def test_dictionary_vms_config_identity_preserves_declaration_order():
+    database = vm_config()
+    application = vm_config(depends_on=("database",))
+    config = ProxmoxSandboxEnvironmentConfig(
+        vms_config={"database": database, "application": application}
+    )
+    reordered = ProxmoxSandboxEnvironmentConfig(
+        vms_config={"application": application, "database": database}
+    )
+
+    assert config != reordered
+    assert len({config, reordered}) == 2
