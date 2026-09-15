@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: a `sample_init` failure (e.g. a VM whose QEMU guest agent never answers) no longer tears down the partially-created VMs and SDN itself; they are left for `task_cleanup`, so `--no-sandbox-cleanup` now keeps them for inspection. VMs are tracked for `task_cleanup` from the moment they are cloned, and the next sample to acquire the instance sweeps leftover `inspect`-tagged VMs as well as leftover ephemeral VNETs
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.

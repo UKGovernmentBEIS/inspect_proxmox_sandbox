@@ -565,6 +565,9 @@ class QemuCommands(abc.ABC):
             )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
+        # Tracked from here, not once it's ready: if start or the QGA wait
+        # fails, task_cleanup still needs to know about it
+        self.register_vm(new_vm_id)
 
         extra_tags = []
         if preserve_tags:
