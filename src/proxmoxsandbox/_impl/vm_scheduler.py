@@ -48,21 +48,24 @@ class VmScheduler:
                 self.mark_created(index)
                 yield index
 
+    @property
+    def all_ready(self) -> bool:
+        return len(self._ready) == self._count
+
+    def next_creatable(self) -> int | None:
+        """Poll: lowest uncreated index whose dependencies are all ready, if any."""
+        for index in range(self._count):
+            if index not in self._created and not self.blocking_dependencies(index):
+                return index
+        return None
+
+    def blocking_dependencies(self, index: int) -> Tuple[int, ...]:
+        """Dependencies of `index` that are not yet ready, in tuple order."""
+        return tuple(sorted(self._dependencies[index] - self._ready))
+
     def mark_created(self, index: int) -> None:
         """The VM has been (or is being) cloned and started."""
         self._created.add(index)
-
-    def mark_ready(self, index: int) -> None:
-        """Readiness task: the VM passed its preconditions and healthcheck."""
-        self._ready.add(index)
-        self._changed.set()
-
-    def mark_failed(self, index: int, exc: BaseException) -> None:
-        """Readiness task: the VM will never be ready. First failure wins."""
-        self._failed.add(index)
-        if self._failure is None:
-            self._failure = exc
-        self._changed.set()
 
     async def wait_for_progress(self) -> None:
         """Block until a readiness task reports; re-raise if any VM failed.
@@ -86,25 +89,24 @@ class VmScheduler:
         """VMs created whose readiness task has not yet reported either way."""
         return len(self._created - self._ready - self._failed)
 
-    @property
-    def all_created(self) -> bool:
-        return len(self._created) == self._count
-
-    @property
-    def all_ready(self) -> bool:
-        return len(self._ready) == self._count
-
-    def blocking_dependencies(self, index: int) -> Tuple[int, ...]:
-        """Dependencies of `index` that are not yet ready, in tuple order."""
-        return tuple(sorted(self._dependencies[index] - self._ready))
-
-    def next_creatable(self) -> int | None:
-        """Poll: lowest uncreated index whose dependencies are all ready, if any."""
-        for index in range(self._count):
-            if index not in self._created and not self.blocking_dependencies(index):
-                return index
-        return None
-
     def pending_indices(self) -> Tuple[int, ...]:
         """VMs not yet created, in tuple order."""
         return tuple(i for i in range(self._count) if i not in self._created)
+
+    # Called from each VM's readiness task, concurrently with the iteration above.
+
+    def mark_ready(self, index: int) -> None:
+        """Readiness task: the VM passed its preconditions and healthcheck."""
+        self._ready.add(index)
+        self._changed.set()
+
+    def mark_failed(self, index: int, exc: BaseException) -> None:
+        """Readiness task: the VM will never be ready. First failure wins."""
+        self._failed.add(index)
+        if self._failure is None:
+            self._failure = exc
+        self._changed.set()
+
+    @property
+    def all_created(self) -> bool:
+        return len(self._created) == self._count
