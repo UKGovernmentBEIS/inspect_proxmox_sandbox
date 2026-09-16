@@ -25,10 +25,11 @@ from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._impl.vm_scheduler import VmScheduler
 from proxmoxsandbox.schema import (
-    DependencyEdge,
     HealthCheck,
     SdnConfigType,
     VmConfig,
+    dependency_edges,
+    vm_labels,
 )
 
 
@@ -141,13 +142,11 @@ class InfraCommands(abc.ABC):
         proxmox_ids_start: str,
         sdn_config: SdnConfigType,
         vms_config: Tuple[VmConfig, ...],
-        dependency_edges: Sequence[DependencyEdge] = (),
     ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
         """Create the SDN, then create/start VMs in dependency order.
 
-        `dependency_edges` normally comes from
-        `ProxmoxSandboxEnvironmentConfig.dependency_edges()`. Results are in
-        `vms_config` order regardless of the order VMs were created in.
+        Results are in `vms_config` order regardless of the order VMs were
+        created in.
         """
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config
@@ -169,7 +168,7 @@ class InfraCommands(abc.ABC):
             ipam_mappings.extend(per_vm_ipam_mappings)
 
         vm_configs_with_ids = await self._start_vms_in_dependency_order(
-            vms_config, dependency_edges, vnet_aliases, known_builtins
+            vms_config, vnet_aliases, known_builtins
         )
 
         return vm_configs_with_ids, sdn_zone_id, tuple(ipam_mappings)
@@ -177,7 +176,6 @@ class InfraCommands(abc.ABC):
     async def _start_vms_in_dependency_order(
         self,
         vms_config: Tuple[VmConfig, ...],
-        dependency_edges: Sequence[DependencyEdge],
         vnet_aliases: VnetAliases,
         known_builtins: Dict[str, int],
     ) -> Tuple[Tuple[int, VmConfig], ...]:
@@ -188,11 +186,8 @@ class InfraCommands(abc.ABC):
         task state. Only the readiness waits for already-started VMs overlap.
         Returns (vm_id, config) pairs in `vms_config` order.
         """
-        scheduler = VmScheduler(dependency_edges, len(vms_config))
-        labels = tuple(
-            vm.name if vm.name is not None else f"vms_config[{i}]"
-            for i, vm in enumerate(vms_config)
-        )
+        scheduler = VmScheduler(dependency_edges(vms_config), len(vms_config))
+        labels = vm_labels(vms_config)
         created: Dict[int, Tuple[int, VmConfig]] = {}
         readiness_tasks: List[asyncio.Task[None]] = []
         try:
@@ -240,7 +235,6 @@ class InfraCommands(abc.ABC):
                 sdn_vnet_aliases=vnet_aliases,
                 vm_config=vm_config,
                 built_in_vm_ids=known_builtins,
-                wait_until_ready=False,
             )
             self.qemu_commands.register_vm(vm_id)
         return vm_id
@@ -282,10 +276,13 @@ class InfraCommands(abc.ABC):
         """Run healthcheck commands through the sandbox's exec wrapper.
 
         This reuses the Linux/Windows command scripts (guest-side timeout,
-        result files, QGA retry) rather than raw agent/exec, so a healthcheck
-        behaves exactly like sandbox().exec() would for the same command.
+        result files) rather than raw agent/exec, so a healthcheck behaves like
+        sandbox().exec() would for the same command. QGA retry is left to
+        HealthCheckRunner, hence qga_max_retries=1.
         """
-        # Imported here: the environment module imports this one.
+        # Imported here: the environment module imports this one. The exec
+        # wrapper should move out of the environment class; see
+        # https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/issues/132
         from proxmoxsandbox._impl.agent_commands import AgentCommands
         from proxmoxsandbox._proxmox_sandbox_environment import (
             ProxmoxSandboxEnvironment,
@@ -293,7 +290,9 @@ class InfraCommands(abc.ABC):
 
         sandbox = ProxmoxSandboxEnvironment(
             infra_commands=self,
-            agent_commands=AgentCommands(self.async_proxmox, self.node),
+            agent_commands=AgentCommands(
+                self.async_proxmox, self.node, qga_max_retries=1
+            ),
             ipam_mappings=(),
             vm_id=vm_id,
             all_vm_ids=(vm_id,),

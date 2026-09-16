@@ -83,9 +83,6 @@ def test_blocking_dependencies_lists_what_a_vm_is_waiting_on():
     assert s._blocking_dependencies(2) == (0,)
 
 
-# --- rendezvous: readiness tasks report to the scheduler; the driver awaits it ----
-
-
 async def test_wait_for_progress_wakes_on_mark_ready():
     s = VmScheduler(edges=(DependencyEdge(1, 0, "depends_on"),), count=2)
     _drain(s)
@@ -100,14 +97,14 @@ async def test_wait_for_progress_wakes_on_mark_ready():
     assert s._next_creatable() == 1
 
 
-async def test_wait_for_progress_raises_first_failure():
+async def test_iteration_raises_first_failure():
     s = VmScheduler(edges=(), count=2)
     _drain(s)
-    boom = RuntimeError("VM 100 never came up")
-    s.mark_failed(0, boom)
+    s.mark_failed(0, RuntimeError("VM 100 never came up"))
     s.mark_failed(1, RuntimeError("second, ignored"))
     with pytest.raises(RuntimeError, match="VM 100 never came up"):
-        await s._wait_for_progress()
+        async for _ in s:
+            pytest.fail("nothing left to create")
 
 
 async def test_wait_for_progress_returns_immediately_if_already_signalled():
@@ -149,9 +146,6 @@ async def test_wait_for_progress_raises_if_nothing_can_signal():
         await s._wait_for_progress()
 
 
-# --- async iteration: yields each index when creatable, stops when all ready -------
-
-
 async def _ready_soon(s: VmScheduler, index: int) -> None:
     await asyncio.sleep(0)
     s.mark_ready(index)
@@ -170,6 +164,17 @@ async def test_async_iteration_yields_in_dependency_order_and_drains():
 
 async def test_async_iteration_raises_readiness_failure():
     s = VmScheduler(edges=(DependencyEdge(1, 0, "depends_on"),), count=2)
+    seen = []
+    with pytest.raises(RuntimeError, match="VM 100 never came up"):
+        async for index in s:
+            seen.append(index)
+            s.mark_failed(index, RuntimeError("VM 100 never came up"))
+    assert seen == [0]
+
+
+async def test_failure_during_iteration_body_raises_before_next_yield():
+    """No VM is yielded after a readiness task has reported a failure."""
+    s = VmScheduler(edges=(), count=4)
     seen = []
     with pytest.raises(RuntimeError, match="VM 100 never came up"):
         async for index in s:

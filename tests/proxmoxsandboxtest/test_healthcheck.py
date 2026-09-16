@@ -9,7 +9,7 @@ from typing import Callable
 
 import httpx
 import pytest
-from inspect_ai.util import ExecResult
+from inspect_ai.util import ExecResult, OutputLimitExceededError
 
 from proxmoxsandbox._impl.healthcheck import (
     _TRANSPORT_ERROR_LIMIT,
@@ -42,6 +42,13 @@ def _fail(code: int = 1) -> ExecResult[str]:
 
 def _transport_error() -> httpx.TransportError:
     return httpx.ConnectError("boom")
+
+
+def _http_500() -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://pve/x")
+    return httpx.HTTPStatusError(
+        "500", request=request, response=httpx.Response(500, request=request)
+    )
 
 
 def _scripted(*outcomes) -> tuple[Callable, list[HealthCheck]]:
@@ -108,12 +115,57 @@ async def test_start_period_failures_do_not_count():
     assert clock.sleeps == [2, 2, 2, 2, 2]
 
 
+async def test_slow_probe_is_judged_by_when_it_started():
+    """start_period applies to the attempt's start time, as in compose.
+
+    A 25 s probe started at t=0 with start_period=20 must not count; the one
+    started at t=26 must, and with retries=1 that is fatal.
+    """
+    clock = FakeClock()
+    calls: list[float] = []
+
+    async def slow_fail(spec: HealthCheck) -> ExecResult[str]:
+        calls.append(clock.now)
+        clock.now += 25
+        return _fail()
+
+    spec = HealthCheck(test=("x",), interval=1, retries=1, start_period=20)
+    with pytest.raises(HealthCheckFailed, match="failed 1 consecutive"):
+        await _runner(spec, slow_fail, clock).run()
+    assert calls == [1000.0, 1026.0]
+
+
 async def test_timeout_counts_as_failure():
     clock = FakeClock()
     execute, calls = _scripted(TimeoutError("Command timed out"))
     spec = HealthCheck(test=("x",), interval=1, retries=2)
     with pytest.raises(HealthCheckFailed, match="timed out"):
         await _runner(spec, execute, clock).run()
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "exc, detail",
+    [
+        (PermissionError("Permission denied executing command"), "permission denied"),
+        (OutputLimitExceededError("10 MiB", None), "output limit exceeded"),
+    ],
+)
+async def test_exec_classification_errors_count_as_failures(exc, detail):
+    """A non-executable test or oversized output consumes retries like exit 1."""
+    clock = FakeClock()
+    execute, calls = _scripted(exc)
+    spec = HealthCheck(test=("/etc/hostname",), interval=2, retries=3)
+    with pytest.raises(HealthCheckFailed, match=detail):
+        await _runner(spec, execute, clock).run()
+    assert len(calls) == 3
+    assert clock.sleeps == [2, 2]
+
+
+async def test_exec_classification_error_then_success_passes():
+    clock = FakeClock()
+    execute, calls = _scripted(PermissionError("nope"), _ok())
+    await _runner(HealthCheck(test=("x",), interval=1), execute, clock).run()
     assert len(calls) == 2
 
 
@@ -140,13 +192,16 @@ async def test_http_status_errors_are_transport_errors():
     assert len(calls) == 2
 
 
-async def test_transport_errors_are_bounded():
+@pytest.mark.parametrize("error", [_transport_error(), _http_500()])
+async def test_transport_errors_are_bounded(error):
+    """A dead agent costs _TRANSPORT_ERROR_LIMIT probes and `interval` sleeps only."""
     clock = FakeClock()
-    execute, calls = _scripted(_transport_error())
+    execute, calls = _scripted(error)
     spec = HealthCheck(test=("x",), interval=1, retries=1)
     with pytest.raises(HealthCheckFailed, match="guest agent"):
         await _runner(spec, execute, clock).run()
     assert len(calls) == _TRANSPORT_ERROR_LIMIT
+    assert clock.sleeps == [1] * (_TRANSPORT_ERROR_LIMIT - 1)
 
 
 async def test_success_resets_transport_error_count():

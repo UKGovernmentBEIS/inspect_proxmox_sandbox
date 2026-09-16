@@ -369,9 +369,9 @@ It is recommended that you set the `name=` parameter for your defined VMs. This 
 - It will be the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
 - It is the identifier other VMs use in `depends_on`
 
-Names that are set must be unique within a sample; configuration validation rejects duplicates. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`, and cannot be named in another VM's `depends_on`.
+Names that are set must be unique within a sample and non-empty; configuration validation rejects duplicates and `""`. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`, and cannot be named in another VM's `depends_on`.
 
-> Note: The first `is_sandbox=True` VM is Inspect's `default` sandbox, so you can always access it with `sandbox("default")`. If you also give it a name, it is reachable under that name too.
+> Note: The first `is_sandbox=True` VM is Inspect's `default` sandbox, so you can always access it with `sandbox("default")`. If you also give it a name, it is reachable under that name too. Because of this, `default` is reserved: naming any other VM `default` is a configuration error.
 
 ### Dependency-based VM startup
 
@@ -406,11 +406,11 @@ A `HealthCheck` is a command run inside the guest, repeated until it exits 0. Th
 | `interval` | seconds between attempts | `5` |
 | `timeout` | per-attempt limit, enforced inside the guest | `30` |
 | `retries` | consecutive failures tolerated before the sample fails | `60` |
-| `start_period` | seconds after the first attempt during which failures don't count | `0` |
+| `start_period` | grace window in seconds; an attempt that *starts* within it does not count as a failure | `0` |
 
 Deliberate differences from compose: durations are plain seconds, not strings like `"30s"`; there is no `CMD`/`CMD-SHELL` prefix — `test` is always an argument vector, so use `("sh", "-c", "...")` or an explicit PowerShell invocation when you need a shell; and success is exit code 0 only.
 
-Healthchecks run through the same command wrapper as `sandbox().exec()`, so they need a working QEMU guest agent. Declaring a healthcheck on an `is_sandbox=False` VM enables the guest agent device in Proxmox for that VM (the agent must still be installed in the image). Transient guest-agent transport errors are retried without counting toward `retries`. Once a healthcheck passes the VM is considered ready for the rest of the sample; it is not re-run.
+Healthchecks run through the same command wrapper as `sandbox().exec()`, so they need a working QEMU guest agent. Declaring a healthcheck on an `is_sandbox=False` VM enables the guest agent device in Proxmox for that VM (the agent must still be installed in the image). A failed attempt is a non-zero exit, a guest-side timeout, a `test` that is not executable, or output over the exec size limit; each consumes one of `retries`. Attempts that cannot reach the guest agent at all do not count toward `retries`, but 25 of them in a row fail the VM (so a guest whose agent dies is reported after roughly 25 × (`interval` + a few seconds)). Once a healthcheck passes the VM is considered ready for the rest of the sample; it is not re-run.
 
 
 ### Static IP Address Assignment

@@ -12,7 +12,7 @@ from logging import getLogger
 from typing import Awaitable, Callable, Literal
 
 import httpx
-from inspect_ai.util import ExecResult
+from inspect_ai.util import ExecResult, OutputLimitExceededError
 
 from proxmoxsandbox.schema import HealthCheck
 
@@ -21,7 +21,8 @@ logger = getLogger(__name__)
 # Consecutive guest-agent transport failures tolerated before giving up. These
 # do not count towards `HealthCheck.retries`: a flaky QGA channel (Windows
 # drops a few percent of calls) must not masquerade as a failing service.
-# Mirrors _QGA_MAX_RETRIES in agent_commands.py.
+# This is the only transport retry budget: the executor's AgentCommands is built
+# with qga_max_retries=1, so each probe costs one round trip plus `interval`.
 _TRANSPORT_ERROR_LIMIT = 25
 
 HealthCheckExecutor = Callable[[HealthCheck], Awaitable[ExecResult[str]]]
@@ -36,8 +37,9 @@ class Probe:
     """Result of one healthcheck attempt, with exceptions already classified.
 
     healthy:     the command exited 0.
-    unhealthy:   it exited non-zero or timed out in the guest (counts as a
-                 failed attempt, as in compose).
+    unhealthy:   it exited non-zero, timed out in the guest, was not
+                 executable, or produced too much output (counts as a failed
+                 attempt, as in compose).
     unreachable: the guest agent could not be reached; the service's state is
                  unknown, so this does not count as a failed attempt.
     """
@@ -74,6 +76,7 @@ class HealthCheckRunner:
         failures = 0
         transport_errors = 0
         for attempt in itertools.count(1):
+            probe_started = self.clock()
             probe = await self._probe()
 
             if probe.outcome == "healthy":
@@ -98,7 +101,9 @@ class HealthCheckRunner:
 
             # unhealthy: the guest answered, so the transport streak is over.
             transport_errors = 0
-            if self.clock() - start < self.spec.start_period:
+            # Measured from when the probe started, as compose does, so a slow
+            # probe cannot push its own attempt out of the grace window.
+            if probe_started - start < self.spec.start_period:
                 logger.debug(
                     f"{self.label}: healthcheck attempt {attempt} failed "
                     f"({probe.detail}) during start_period; not counted"
@@ -124,6 +129,10 @@ class HealthCheckRunner:
             return Probe("unreachable", type(e).__name__)
         except TimeoutError:
             return Probe("unhealthy", f"timed out after {self.spec.timeout}s")
+        except PermissionError:
+            return Probe("unhealthy", "permission denied")
+        except OutputLimitExceededError:
+            return Probe("unhealthy", "output limit exceeded")
 
         if result.success:
             return Probe("healthy")

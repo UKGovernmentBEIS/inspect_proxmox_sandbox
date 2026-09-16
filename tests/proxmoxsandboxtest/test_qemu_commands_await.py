@@ -5,21 +5,28 @@
 what a VM needs: agentless appliances only need to be running.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+import tenacity
 
 from proxmoxsandbox._impl.qemu_commands import (
+    _POLL_MAX_WAIT,
+    _POLL_WAIT,
     GuestAgentUnavailableError,
     QemuCommands,
     VmNotRunningError,
 )
 from proxmoxsandbox.schema import HealthCheck, VmConfig, VmSourceConfig
 
-# Real-time tenacity budget for the "gives up" tests; short but enough for
-# several attempts at wait_exponential(min=0.1).
+# Real-time tenacity budgets. The poll backoff starts at 1 s (multiplier 1; the
+# min=0.1 floor never bites) and stop_before_delay refuses a sleep that would
+# overrun the budget, so _TINY allows exactly one attempt and _TWO_ATTEMPTS a
+# second one after the first 1 s sleep.
 _TINY = 0.3
+_TWO_ATTEMPTS = 1.5
 
 
 def _qemu() -> QemuCommands:
@@ -40,15 +47,12 @@ def _http_500() -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError("500", request=request, response=response)
 
 
-# --- await_running ---------------------------------------------------------------
-
-
 async def test_await_running_returns_once_running():
     qemu = _qemu()
     qemu.async_proxmox.request = AsyncMock(
         side_effect=[{"status": "stopped"}, {"status": "running"}]
     )
-    await qemu.await_running(100, timeout=_TINY)
+    await qemu.await_running(100, timeout=_TWO_ATTEMPTS)
     assert qemu.async_proxmox.request.await_count == 2
     method, path = qemu.async_proxmox.request.await_args_list[0].args
     assert (method, path) == ("GET", "/nodes/pve/qemu/100/status/current")
@@ -68,16 +72,42 @@ async def test_await_running_honours_status_for_wait():
     await qemu.await_running(100, status_for_wait="stopped", timeout=_TINY)
 
 
-# --- await_agent -----------------------------------------------------------------
-
-
 async def test_await_agent_returns_on_first_successful_ping():
     qemu = _qemu()
     qemu.async_proxmox.request = AsyncMock(side_effect=[_http_500(), None])
-    await qemu.await_agent(100, timeout=_TINY)
+    await qemu.await_agent(100, timeout=_TWO_ATTEMPTS)
     assert qemu.async_proxmox.request.await_count == 2
     method, path = qemu.async_proxmox.request.await_args_list[-1].args
     assert (method, path) == ("POST", "/nodes/pve/qemu/100/agent/ping")
+
+
+def test_poll_backoff_is_capped():
+    """Uncapped, attempt 14 already waits ~30 s; slow guests need short gaps."""
+    waits = []
+    for attempt in range(1, 100):
+        state = tenacity.RetryCallState(None, None, (), {})
+        state.attempt_number = attempt
+        waits.append(_POLL_WAIT(state))
+    assert waits[:3] == pytest.approx([1.0, 1.3, 1.69])
+    assert waits == sorted(waits)
+    assert max(waits) == _POLL_MAX_WAIT
+
+
+async def test_await_agent_sleeps_follow_the_poll_schedule(monkeypatch):
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await real_sleep(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", recording_sleep)
+    qemu = _qemu()
+    qemu.async_proxmox.request = AsyncMock(side_effect=_http_500)
+    with pytest.raises(GuestAgentUnavailableError):
+        await qemu.await_agent(100, timeout=_TWO_ATTEMPTS)
+    assert sleeps == [1.0]
+    assert max(sleeps) <= _POLL_MAX_WAIT
 
 
 async def test_await_agent_raises_actionable_error_on_timeout():
@@ -89,9 +119,6 @@ async def test_await_agent_raises_actionable_error_on_timeout():
         await qemu.await_agent(100, timeout=_TINY)
     assert "VM 100" in str(exc_info.value)
     assert isinstance(exc_info.value, TimeoutError)
-
-
-# --- await_vm façade -------------------------------------------------------------
 
 
 async def test_await_vm_sandbox_runs_both_preconditions():
@@ -121,8 +148,6 @@ async def test_await_vm_stopped_never_pings_agent():
     qemu.await_running.assert_awaited_once_with(100, status_for_wait="stopped")
     qemu.await_agent.assert_not_awaited()
 
-
-# --- other_config_json: agent enablement -----------------------------------------
 
 _SOURCE = VmSourceConfig(built_in="ubuntu24.04")
 

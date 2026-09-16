@@ -61,10 +61,7 @@ class Harness:
 
         infra.create_ipam_mappings = AsyncMock(side_effect=ipam)
 
-        async def create(
-            sdn_vnet_aliases, vm_config, built_in_vm_ids, wait_until_ready
-        ):
-            assert wait_until_ready is False
+        async def create(sdn_vnet_aliases, vm_config, built_in_vm_ids):
             vm_id = next(ids)
             self._names[vm_id] = vm_config.name
             self.events.append(("create", vm_config.name))
@@ -109,11 +106,10 @@ class Harness:
         self.infra = infra
 
     def start(self) -> "asyncio.Task":
-        edges = ProxmoxSandboxEnvironmentConfig(vms_config=self.vms).dependency_edges()
+        # Validates names/dependencies the way sample_init would.
+        ProxmoxSandboxEnvironmentConfig(vms_config=self.vms)
         return asyncio.create_task(
-            self.infra.create_sdn_and_vms(
-                "abc", sdn_config=None, vms_config=self.vms, dependency_edges=edges
-            )
+            self.infra.create_sdn_and_vms("abc", sdn_config=None, vms_config=self.vms)
         )
 
     def created(self) -> List[str]:
@@ -125,9 +121,6 @@ class Harness:
 
 def _harness(*vms: VmConfig, fail_running: Dict[str, Exception] | None = None):
     return Harness(vms, fail_running or {})
-
-
-# --- legacy parity ----------------------------------------------------------------
 
 
 async def test_no_dependencies_creates_all_before_any_readiness():
@@ -170,9 +163,6 @@ async def test_await_before_next_vm_blocks_later_creates():
     h.ready["c"].set()
     await task
     assert h.index(("running", "a")) < h.index(("create", "b"))
-
-
-# --- depends_on -------------------------------------------------------------------
 
 
 async def test_forward_reference_creates_dependency_first():
@@ -218,11 +208,33 @@ async def test_dependency_failure_fails_startup_and_cancels_others():
     h.ready["a"].set()
     with pytest.raises(VmNotRunningError):
         await task
-    assert "b" not in h.created()
+    assert h.created() == ["a", "c"]
     assert h.cancelled == ["c"]
 
 
-# --- readiness preconditions and healthchecks ----------------------------------------
+async def test_failure_during_create_stops_further_creates():
+    """A readiness failure reported while cloning is raised before the next clone."""
+    h = _harness(
+        _vm("v0"),
+        _vm("v1"),
+        _vm("v2"),
+        _vm("v3"),
+        fail_running={"v0": VmNotRunningError("VM 100 did not reach running")},
+    )
+    original_create = h.infra.qemu_commands.create_and_start_vm.side_effect
+
+    async def create_and_fail_v0(sdn_vnet_aliases, vm_config, built_in_vm_ids):
+        vm_id = await original_create(sdn_vnet_aliases, vm_config, built_in_vm_ids)
+        if vm_config.name == "v1":
+            # v0's readiness task reports failure while v1 is still being cloned.
+            h.ready["v0"].set()
+            await _settle()
+        return vm_id
+
+    h.infra.qemu_commands.create_and_start_vm.side_effect = create_and_fail_v0
+    with pytest.raises(VmNotRunningError):
+        await h.start()
+    assert h.created() == ["v0", "v1"]
 
 
 async def test_agentless_non_sandbox_dependency_only_needs_running():
@@ -267,9 +279,6 @@ async def test_healthcheck_gates_dependants():
     h.infra._healthcheck_executor.assert_called_once()
     vm_id, vm_config = h.infra._healthcheck_executor.call_args.args
     assert (vm_id, vm_config.healthcheck) == (100, spec)
-
-
-# --- _healthcheck_executor ---------------------------------------------------------
 
 
 async def test_healthcheck_executor_runs_test_through_sandbox_exec():

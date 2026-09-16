@@ -38,9 +38,12 @@ class VmScheduler:
         The yielded index is marked created as it is handed out. Iteration
         ends only once every VM is ready, so the same loop that creates VMs
         also drains the last readiness tasks. Readiness failures (and the
-        no-progress guard) raise out of here.
+        no-progress guard) raise out of here; a failure reported while the
+        caller was creating a VM is raised before the next one is yielded.
         """
         while not self._all_ready:
+            if self._failure is not None:
+                raise self._failure
             index = self._next_creatable()
             if index is None:
                 await self._wait_for_progress()
@@ -84,7 +87,7 @@ class VmScheduler:
         self._created.add(index)
 
     async def _wait_for_progress(self) -> None:
-        """Block until a readiness task reports; re-raise if any VM failed.
+        """Block until a readiness task reports (ready or failed).
 
         If nothing is in flight and nothing has signalled, no task can ever
         wake us: that is an unsatisfiable graph (which config validation should
@@ -97,8 +100,6 @@ class VmScheduler:
             )
         await self._changed.wait()
         self._changed.clear()
-        if self._failure is not None:
-            raise self._failure
 
     @property
     def _in_flight(self) -> int:

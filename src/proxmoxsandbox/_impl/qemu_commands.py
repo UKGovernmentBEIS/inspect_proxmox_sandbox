@@ -20,6 +20,12 @@ from proxmoxsandbox.schema import VmConfig
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
+# Uncapped, the backoff reaches 30-50 s gaps after ~70 s, which is what a slow
+# (Windows) guest pays on top of its boot time. agent/ping blocks ~3 s in PVE
+# while the agent is down and returns as soon as it connects, so a short cap
+# costs little on the host side.
+_POLL_MAX_WAIT = 5.0
+_POLL_WAIT = tenacity.wait_exponential(min=0.1, max=_POLL_MAX_WAIT, exp_base=1.3)
 
 
 class VmNotRunningError(TimeoutError):
@@ -107,8 +113,8 @@ class QemuCommands(abc.ABC):
         """Poll Proxmox until the VM reports `status_for_wait`."""
 
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(timeout),
+            wait=_POLL_WAIT,
+            stop=tenacity.stop_before_delay(timeout),
         )
         async def is_in_status() -> None:
             vm_status = await self.async_proxmox.request(
@@ -140,8 +146,8 @@ class QemuCommands(abc.ABC):
         attempt_count = [0]  # Use list to allow mutation in nested function
 
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(timeout),
+            wait=_POLL_WAIT,
+            stop=tenacity.stop_before_delay(timeout),
         )
         async def qemu_agent_reachable() -> None:
             attempt_count[0] += 1
@@ -333,8 +339,8 @@ class QemuCommands(abc.ABC):
         sdn_vnet_aliases: VnetAliases,
         vm_config: VmConfig,
         built_in_vm_ids: Dict[str, int],
-        wait_until_ready: bool,
     ) -> int:
+        """Clone, configure and start a VM; the caller awaits its readiness."""
         if (
             vm_config.os_type != "l26"
             and vm_config.vm_source_config.ova is None
@@ -466,7 +472,6 @@ class QemuCommands(abc.ABC):
             vm_id_to_clone=vm_id_to_clone,
             sdn_vnet_aliases=sdn_vnet_aliases,
             preserve_tags=preserve_tags,
-            wait_until_ready=wait_until_ready,
         )
 
         if new_vm_id is None:
@@ -591,7 +596,6 @@ class QemuCommands(abc.ABC):
         vm_id_to_clone: int,
         sdn_vnet_aliases: VnetAliases,
         preserve_tags: bool,
-        wait_until_ready: bool,
     ) -> int:
         new_vm_id = await self.find_next_available_vm_id()
 
@@ -627,11 +631,6 @@ class QemuCommands(abc.ABC):
         await self.task_wrapper.do_action_and_wait_for_tasks(other_updates)
 
         await self.start(vm_id=new_vm_id)
-        if wait_until_ready:
-            await self.await_vm(
-                vm_id=new_vm_id,
-                is_sandbox=vm_config.is_sandbox,
-            )
         return new_vm_id
 
     def other_config_json(

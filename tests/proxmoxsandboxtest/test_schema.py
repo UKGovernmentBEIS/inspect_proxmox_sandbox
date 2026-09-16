@@ -45,8 +45,6 @@ def test_vmnicconfig_minimal():
     assert nic.ipv4 is None
 
 
-# --- HealthCheck ---------------------------------------------------------------
-
 _SOURCE = VmSourceConfig(built_in="ubuntu24.04")
 
 
@@ -92,9 +90,6 @@ def test_healthcheck_rejects_unknown_fields():
         HealthCheck.model_validate({"test": ["true"], "intervall": 5})
 
 
-# --- VmConfig.requires_guest_agent ----------------------------------------------
-
-
 def test_requires_guest_agent_for_sandbox():
     assert _vm(is_sandbox=True).requires_guest_agent is True
 
@@ -106,9 +101,6 @@ def test_requires_guest_agent_for_healthcheck_on_non_sandbox():
 
 def test_requires_guest_agent_false_for_plain_non_sandbox():
     assert _vm(is_sandbox=False).requires_guest_agent is False
-
-
-# --- VM names -------------------------------------------------------------------
 
 
 def test_duplicate_vm_names_rejected():
@@ -129,7 +121,35 @@ def test_vm_labels_fall_back_to_position():
     assert cfg.vm_labels() == ("'a'", "vms_config[1]")
 
 
-# --- depends_on -----------------------------------------------------------------
+def test_empty_vm_name_rejected():
+    with pytest.raises(ValidationError, match=r"vms_config\[0\] has an empty name"):
+        _config(_vm(""))
+
+
+def test_depends_on_empty_name_is_a_validation_error():
+    with pytest.raises(ValidationError, match="unknown VM ''"):
+        _config(_vm("a", depends_on=("",)), _vm("b"))
+
+
+def test_default_name_allowed_on_first_sandbox_vm():
+    cfg = _config(_vm("default"), _vm("web"))
+    assert cfg.vms_config[0].name == "default"
+    cfg = _config(_vm("router", is_sandbox=False), _vm("default"), _vm("web"))
+    assert cfg.vms_config[1].name == "default"
+
+
+@pytest.mark.parametrize(
+    "vms",
+    [
+        (_vm("web"), _vm("default", is_sandbox=False)),
+        (_vm("default", is_sandbox=False), _vm("web")),
+        (_vm("web"), _vm("default")),
+    ],
+    ids=["non-sandbox-after", "non-sandbox-before", "second-sandbox"],
+)
+def test_default_name_reserved_for_first_sandbox_vm(vms):
+    with pytest.raises(ValidationError, match="reserved for the first is_sandbox"):
+        _config(*vms)
 
 
 def test_depends_on_unknown_name():

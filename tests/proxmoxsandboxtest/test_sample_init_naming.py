@@ -33,15 +33,6 @@ def config_file_env():
     del os.environ["PROXMOX_CONFIG_FILE"]
 
 
-@pytest.fixture
-def mock_proxmox_api():
-    with patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI") as mock:
-        api_instance = AsyncMock()
-        api_instance.get.return_value = {"version": "8.0"}
-        mock.return_value = api_instance
-        yield mock
-
-
 async def _sample_init(*vms: VmConfig) -> dict:
     infra = MagicMock()
     infra.sdn_commands.read_all_vnets = AsyncMock(return_value=[])
