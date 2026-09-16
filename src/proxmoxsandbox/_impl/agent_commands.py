@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import time
 from logging import getLogger
 from typing import List, Tuple
 
@@ -12,6 +13,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
 )
+from proxmoxsandbox._impl.qga_responses import validate_exec_status
 
 # Transient failures talking to the QEMU guest agent (QGA), all retried:
 #   * httpx transport errors - the Proxmox API host was briefly unreachable,
@@ -84,17 +86,34 @@ class AgentCommands:
             return status_code >= 500
         return False
 
-    async def _retry_on_qga_error(self, label: str, coro_fn):
-        """Retry a coroutine function on transient QGA / transport errors."""
+    async def _retry_on_qga_error(self, label: str, coro_fn, deadline=None):
+        """Retry a coroutine function on transient QGA / transport errors.
+
+        `deadline` is an absolute time.monotonic() value: once past it, no further
+        retries are attempted and the last error is raised. This keeps the retry
+        envelope subordinate to the caller's timeout - without it a guest that
+        returns transient-looking 5xx on every exec-status call could keep this
+        loop spinning for ~460s (25 attempts x up to 20s) regardless of the
+        caller's timeout.
+        """
         for attempt in range(1, _QGA_MAX_RETRIES + 1):
             try:
                 return await coro_fn()
             except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                if attempt < _QGA_MAX_RETRIES and self._is_transient_qga_error(e):
+                now = time.monotonic()
+                past_deadline = deadline is not None and now >= deadline
+                if (
+                    attempt < _QGA_MAX_RETRIES
+                    and not past_deadline
+                    and self._is_transient_qga_error(e)
+                ):
                     delay = min(
                         _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
                         _QGA_RETRY_MAX_DELAY,
                     )
+                    if deadline is not None:
+                        # Never sleep past the deadline.
+                        delay = min(delay, max(0.0, deadline - now))
                     self.logger.warning(
                         f"{label} failed (attempt {attempt}/{_QGA_MAX_RETRIES}), "
                         f"retrying in {delay:.1f}s: {e}"
@@ -103,7 +122,7 @@ class AgentCommands:
                 else:
                     raise
 
-    async def get_agent_exec_status(self, vm_id: int, pid: int):
+    async def get_agent_exec_status(self, vm_id: int, pid: int, deadline=None):
         # The status read is single-shot (the agent discards a finished
         # process's output after one successful read), so a retry whose first
         # attempt's response was lost could find the PID already gone. That is
@@ -113,9 +132,10 @@ class AgentCommands:
         # and freely retryable.
         path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec-status?pid={pid}"
         try:
-            return await self._retry_on_qga_error(
+            status = await self._retry_on_qga_error(
                 f"exec-status vm={vm_id} pid={pid}",
                 lambda: self.async_proxmox.request("GET", path),
+                deadline=deadline,
             )
         except httpx.HTTPStatusError as e:
             if _is_pid_gone(e):
@@ -125,6 +145,11 @@ class AgentCommands:
                 )
                 return {"exited": 1}
             raise
+        # Trust boundary: exited/exitcode/signal are guest-controlled. Reject
+        # non-integer values here (once, not on every retry) so they never reach
+        # the wait loop, returncode, or the 128+signal arithmetic downstream.
+        validate_exec_status(status, vm_id)
+        return status
 
     async def write_file(self, vm_id: int, content: bytes, filepath: str):
         """Write a file to the VM using QEMU agent."""

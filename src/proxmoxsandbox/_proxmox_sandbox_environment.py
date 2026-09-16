@@ -28,6 +28,7 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.qga_responses import parse_return_code, validate_exec_pid
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, is_ephemeral_zone
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
@@ -704,6 +705,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         else:
             tmp_start = f"/tmp/{__name__}{time.time_ns()}_"
 
+        exec_deadline = (
+            time.monotonic() + timeout + _EXEC_POLL_GRACE_SECONDS
+            if timeout is not None
+            else None
+        )
+
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
             stop=tenacity.stop_after_delay(timeout + _EXEC_POLL_GRACE_SECONDS)
@@ -719,8 +726,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             # per PID after the process is complete.
             # Do not, for example, try to debug the value of the get_agent_exec_status
             # call. It will break the running code in this loop.
+            #
+            # deadline bounds the per-call retry loop to the same envelope as this
+            # function's tenacity stop, so a guest returning transient-looking
+            # errors can't stretch a 5s exec into minutes of inner retries.
             exec_status = await self.agent_commands.get_agent_exec_status(
-                vm_id=vm_id, pid=exec_response_pid
+                vm_id=vm_id, pid=exec_response_pid, deadline=exec_deadline
             )
 
             if exec_status["exited"] != 1:
@@ -787,9 +798,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 vm_id=self.vm_id, command=launch
             )
 
-        exec_response_pid = exec_post_response["pid"]
-
-        assert isinstance(exec_response_pid, int)
+        # Trust boundary: the pid is guest-controlled and flows straight into the
+        # exec-status URL. Validate it is an int before it can be interpolated
+        # (a string pid would inject into the query string). Not an assert -
+        # `python -O` strips asserts, which would reopen the injection.
+        exec_response_pid = validate_exec_pid(exec_post_response, self.vm_id)
         self.logger.debug(f"VM {self.vm_id} exec pid={exec_response_pid}: {cmd[:100]}")
 
         with trace_action(
@@ -903,8 +916,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         )
         returncode_string_stripped = raw.decode("utf-8", errors="replace").strip()
         if len(returncode_string_stripped) == 0:
+            # An empty file is the wrapper being killed before it wrote a code -
+            # a legitimate outcome, handled by the caller - not tampering.
             raise ReturnCodeNotWritten()
-        return int(returncode_string_stripped)
+        # A non-empty-but-non-integer returncode is guest tampering; a bare int()
+        # here would surface as an unattributable ValueError.
+        return parse_return_code(raw, self.vm_id)
 
     async def _read_exec_output(self, filepath: str) -> str:
         # decode=0 gives raw bytes; decode UTF-8 errors="replace" (output is
