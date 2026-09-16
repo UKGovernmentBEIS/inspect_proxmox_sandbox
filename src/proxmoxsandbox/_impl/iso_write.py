@@ -30,6 +30,7 @@ from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.qga_responses import ExecStatus
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 
 logger = getLogger(__name__)
@@ -251,31 +252,26 @@ cp -f {mount_q}/{payload_q} {target_q}
 umount {mount_q}
 rmdir {mount_q}
 """
-        exec_resp = await self.agent_commands.exec_command(
+        pid = await self.agent_commands.exec_command(
             vm_id=vm_id, command=["sh", "-c", script]
         )
-        pid = exec_resp["pid"]
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
             stop=tenacity.stop_after_delay(120),
-            retry=tenacity.retry_if_result(lambda r: r is False),
+            retry=tenacity.retry_if_result(lambda r: r is None),
         )
-        async def wait() -> bool | dict:
+        async def wait() -> ExecStatus | None:
             status = await self.agent_commands.get_agent_exec_status(
                 vm_id=vm_id, pid=pid
             )
-            if status.get("exited") != 1:
-                return False
-            return status
+            return status if status.exited == 1 else None
 
         status = await wait()
-        assert isinstance(status, dict)
-        exitcode = status.get("exitcode", 1)
-        if exitcode != 0:
-            stderr = status.get("err-data", "")
-            stdout = status.get("out-data", "")
+        if status is None:  # tenacity raises RetryError instead; keeps mypy happy
+            raise IOError("iso_write guest copy: no exec status")
+        if status.exitcode != 0:
             raise IOError(
-                f"iso_write guest copy failed (exitcode={exitcode}): "
-                f"stderr={stderr!r} stdout={stdout!r}"
+                f"iso_write guest copy failed (exitcode={status.exitcode}): "
+                f"stderr={status.err_data!r} stdout={status.out_data!r}"
             )

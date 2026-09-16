@@ -528,6 +528,12 @@ Two things worth knowing:
 - **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it — move that content to `sata0`–`sata4`, or disable the fast path.
 - **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. On failure it also disables itself for the affected VM and logs a `WARNING`; the warning site in the code lists what to check.
 
+## Untrusted guest agents
+
+Everything the provider learns about a command comes back through the QEMU guest agent, and root inside a sandbox VM can replace that agent with anything. Proxmox forwards agent replies without checking them against its own schema. So every guest-originated value (`pid`, exec-status fields, file-read content and its `truncated` flag) is validated in `_impl/qga_responses.py` before use, and a reply an honest agent could not have produced fails the call with `GuestAgentTamperError` (logged at `WARNING` with the VM ID). Results the guest can forge by writing files (stdout, stderr, the exit code) are not tamper-detected; they are the guest's to report.
+
+Waits are bounded too. `exec()` with `timeout=None` stops waiting for the agent to report exit after 4 hours (`PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` overrides it; the command is not killed in the guest, the call just raises `TimeoutError`), and once a command should have finished the agent gets 3 minutes to deliver its status and output. A single guest-agent request is never retried for more than 10 minutes in total.
+
 ## Feature Roadmap
 
 - Proxmox server health and config check

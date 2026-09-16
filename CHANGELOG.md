@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Security: treat every guest-agent response as attacker-controlled. Guest-originated values are validated before use (`GuestAgentTamperError`); `exec()` without a timeout now gives up waiting after 4 hours (`PROXMOX_EXEC_UNTIMED_WAIT_SECONDS`) and a stalled agent can no longer hold a timed `exec()` for tens of minutes. See the README's "Untrusted guest agents"
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
