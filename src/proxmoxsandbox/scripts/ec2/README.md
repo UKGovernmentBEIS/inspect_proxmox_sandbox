@@ -218,9 +218,9 @@ reaches one is off the host. Nothing in the AMI knows those addresses; pass them
 - AMI fixup services for hostname + SSL cert + root password regeneration on every boot.
 - A boot-time firewall rule blocking sandbox forwarding to EC2 instance metadata.
 - CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
-- A `.aisi<N>` contract stamp on the version the API serves, so an off-host caller can tell
-  what a host provides before asserting it. Bumped when a host-side file something off-host
-  asserts changes; an upgrade of `pve-manager` drops it.
+- A `.aisi<N>` contract stamp on the version `pveversion` prints and the API serves, so a
+  caller can tell what a host provides before asserting it. Bumped when a host-side file
+  something off-host asserts changes; an upgrade of `pve-manager` drops it.
 
 ## Other scripts
 

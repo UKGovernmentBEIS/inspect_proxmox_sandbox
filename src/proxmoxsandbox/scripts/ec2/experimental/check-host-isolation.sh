@@ -78,12 +78,12 @@ node=$(hostname)
 marker=/etc/inspect-proxmox-egress-lockdown
 echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev/null | head -1)"
 
-# The contract stamped by ../userdata.sh. Read from the API, not pveversion: the stamp sits in
-# pvecfg.pm's version_info hash, and pveversion prints version_text, which it doesn't touch.
+# The contract stamped by ../userdata.sh. Read locally rather than over the API: if the halt
+# unit has masked pvedaemon, an API read fails and a fine host looks like a stale one.
 WANT_CONTRACT=2
-contract=$(pvesh get /version --output-format json 2>/dev/null | jq -r '.version // ""' 2>/dev/null)
+contract=$(pveversion 2>/dev/null | head -1)
 case "$contract" in
-    *.aisi[0-9]*) contract=${contract##*.aisi} ;;
+    *.aisi[0-9]*) contract=${contract##*.aisi}; contract=${contract%%[!0-9]*} ;;
     *) contract=0 ;;
 esac
 if ! [ "$contract" -ge "$WANT_CONTRACT" ] 2>/dev/null; then
