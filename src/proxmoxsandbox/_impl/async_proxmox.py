@@ -1,9 +1,7 @@
 import asyncio
-import base64
 import json
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from logging import getLogger
 from pathlib import Path
@@ -16,9 +14,31 @@ from inspect_ai.util import (
 )
 from pydantic import BaseModel
 
+from proxmoxsandbox._impl.qga_responses import (
+    FileRead,
+    decode_file_read,
+    parse_guest,
+    tamper,
+)
 from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
+
+# Error bodies are matched on short stable substrings and quoted in logs and
+# exceptions; a guest agent's error `desc` is passed through by PVE, so cap it.
+_MAX_ERROR_TEXT_CHARS = 8192
+
+
+def _http_status_error(response: httpx.Response) -> httpx.HTTPStatusError:
+    # Deliberately not response.raise_for_status(): that omits response.text,
+    # which callers match on (e.g. "No such file", "Is a directory").
+    message = f"HTTP response error: {response.status_code} {response.reason_phrase}"
+    if response.text:
+        text = response.text
+        if len(text) > _MAX_ERROR_TEXT_CHARS:
+            text = f"{text[:_MAX_ERROR_TEXT_CHARS]}... ({len(text)} chars)"
+        message += f": {text}"
+    return httpx.HTTPStatusError(message, request=response.request, response=response)
 
 
 class ProxmoxVersionInfo(BaseModel):
@@ -176,17 +196,7 @@ class AsyncProxmoxAPI:
                 )
 
             if response.is_error and raise_errors:
-                # We are deliberately not using response.raise_for_status here as it
-                # does not include response.text in the raised error
-                message = (
-                    f"HTTP response error: {response.status_code} "
-                    + f"{response.reason_phrase}"
-                )
-                if response.text:
-                    message += f": {response.text}"
-                raise httpx.HTTPStatusError(
-                    message, request=response.request, response=response
-                )
+                raise _http_status_error(response)
             else:
                 if response.is_error:
                     return response.json()
@@ -219,11 +229,6 @@ class AsyncProxmoxAPI:
     # but it's copied here because of read_file
     async def _ping_qemu_agent(self, node: str, vm_id: int):
         await self.request("POST", f"/nodes/{node}/qemu/{vm_id}/agent/ping")
-
-    # decode=0 concatenates each ~1 MiB chunk's own base64 (chunks aren't
-    # 3-aligned, so each keeps its padding) - decode segment by segment, not in
-    # one pass.
-    _B64_SEGMENT = re.compile(rb"[A-Za-z0-9+/]+={0,2}")
 
     _warned_legacy_file_read: bool = False
 
@@ -266,29 +271,14 @@ class AsyncProxmoxAPI:
                 ),
             )
             if response.is_error:
-                # Mirror request()'s error so callers can still match the agent's
-                # message text (e.g. "No such file", "Is a directory").
-                message = (
-                    f"HTTP response error: {response.status_code} "
-                    f"{response.reason_phrase}"
-                )
-                if response.text:
-                    message += f": {response.text}"
-                raise httpx.HTTPStatusError(
-                    message, request=response.request, response=response
-                )
+                raise _http_status_error(response)
             data = response.json()["data"]
-        content: str = data.get("content") or ""
-        if not modern:
-            return self._decode_legacy_file_read(content, data, count)
-        raw = b"".join(
-            base64.b64decode(seg)
-            for seg in self._B64_SEGMENT.findall(content.encode("ascii"))
-        )
-        return raw, bool(data.get("truncated"))
+        if modern:
+            return decode_file_read(vm_id, data, count)
+        return self._decode_legacy_file_read(vm_id, data, count)
 
     def _decode_legacy_file_read(
-        self, content: str, data: dict, count: int
+        self, vm_id: int, data: dict, count: int
     ) -> Tuple[bytes, bool]:
         """decode=1 fallback for PVE < 9.2 (no count/decode params).
 
@@ -306,9 +296,13 @@ class AsyncProxmoxAPI:
                 "full fix.",
                 self.get_discovered_proxmox_version().release,
             )
-        raw = content.encode("iso-8859-1")
-        truncated = bool(data.get("truncated")) or len(raw) > count
-        return raw[:count], truncated
+        parsed = parse_guest(FileRead, vm_id, "file-read", data)
+        try:
+            raw = parsed.content[:count].encode("iso-8859-1")
+        except UnicodeEncodeError:
+            raise tamper(vm_id, "file-read", "content is not Latin-1") from None
+        truncated = bool(parsed.truncated) or len(parsed.content) > count
+        return raw, truncated
 
     def _curl_headers(self) -> List[str]:
         """Request headers for the pycurl upload path."""
@@ -340,9 +334,7 @@ class AsyncProxmoxAPI:
         Returns:
             The API response data
         """
-
-        # This function will be run in a thread
-        def do_upload():
+        with trace_action(self.logger, self.TRACE_NAME, "upload_file_with_curl"):
             if not file.exists():
                 raise FileNotFoundError(f"File not found: {file}")
 
@@ -378,9 +370,26 @@ class AsyncProxmoxAPI:
                 ],
             )
 
-            curl.perform()
-            status_code = curl.getinfo(pycurl.RESPONSE_CODE)
-            curl.close()
+            curl.setopt(pycurl.CONNECTTIMEOUT, 30)
+            multi = pycurl.CurlMulti()
+            multi.add_handle(curl)
+            try:
+                while True:
+                    code, active = multi.perform()
+                    if code == pycurl.E_CALL_MULTI_PERFORM:
+                        continue
+                    if not active:
+                        break
+                    await asyncio.sleep(0.01)
+                _, _, errors = multi.info_read()
+                if errors:
+                    _, number, message = errors[0]
+                    raise pycurl.error(number, message)
+                status_code = curl.getinfo(pycurl.RESPONSE_CODE)
+            finally:
+                multi.remove_handle(curl)
+                curl.close()
+                multi.close()
 
             response_data = response_buffer.getvalue().decode("utf-8")
             response_json = json.loads(response_data)
@@ -389,9 +398,3 @@ class AsyncProxmoxAPI:
                 raise ValueError(f"Error uploading file: {response_json}")
 
             return response_json.get("data", {})
-
-        # Run the upload in a thread to avoid blocking the event loop
-        with trace_action(self.logger, self.TRACE_NAME, "upload_file_with_curl"):
-            loop = asyncio.get_event_loop()
-            with ThreadPoolExecutor() as pool:
-                return await loop.run_in_executor(pool, do_upload)

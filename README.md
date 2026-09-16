@@ -524,12 +524,18 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 
 ## Large `write_file` fast path
 
-For Linux guests, `write_file` payloads larger than 128 KiB are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot, sidestepping the QEMU guest-agent's ~60 KiB per-call write cap. On any failure it falls back to the chunked-QGA path, so it can only speed writes up, never break them. Windows always uses chunked QGA.
+For Linux guests, `write_file` payloads larger than 128 KiB are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot, sidestepping the QEMU guest-agent's ~60 KiB per-call write cap. Ordinary transfer failures fall back to chunked QGA. Cancellation or a malformed guest reply fails the current call and disables the CD-ROM method for later writes. Windows always uses chunked QGA.
 
 Two things worth knowing:
 
 - **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it — move that content to `sata0`–`sata4`, or disable the fast path.
-- **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. On failure it also disables itself for the affected VM and logs a `WARNING`; the warning site in the code lists what to check.
+- **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. A failed or cancelled transfer also disables this method for the affected VM.
+
+## Guest-agent replies and command waiting
+
+`exec()` shares a waiting allowance across uploads, retries and result collection: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup can take additional time, and the guest command may keep running after the provider raises `TimeoutError`.
+
+Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
 
 ## Feature Roadmap
 
