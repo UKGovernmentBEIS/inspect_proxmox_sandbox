@@ -177,65 +177,48 @@ class InfraCommands(abc.ABC):
             for i, vm in enumerate(vms_config)
         )
         created: Dict[int, Tuple[int, VmConfig]] = {}
-        readiness: Dict[asyncio.Task[None], int] = {}
+        readiness_tasks: List[asyncio.Task[None]] = []
         try:
-            while not scheduler.all_created or readiness:
-                for task in [t for t in readiness if t.done()]:
-                    index = readiness.pop(task)
-                    await task  # raises if that VM failed readiness
-                    scheduler.mark_ready(index)
-
-                index_to_create = scheduler.next_creatable()
-                if index_to_create is not None:
-                    vm_config = vms_config[index_to_create]
-                    self.logger.info(
-                        f"Creating VM {len(created) + 1}/{len(vms_config)}: "
-                        f"{labels[index_to_create]}"
-                    )
-                    with trace_action(
-                        self.logger, self.TRACE_NAME, f"create VM {vm_config=}"
-                    ):
-                        vm_id = await self.qemu_commands.create_and_start_vm(
-                            sdn_vnet_aliases=vnet_aliases,
-                            vm_config=vm_config,
-                            built_in_vm_ids=known_builtins,
-                            wait_until_ready=False,
+            while not scheduler.all_created:
+                index = scheduler.next_creatable()
+                if index is None:
+                    if all(task.done() for task in readiness_tasks):
+                        # Nothing creatable and nothing in flight: unsatisfiable
+                        # graph, which config validation should have rejected.
+                        pending = ", ".join(
+                            labels[i] for i in scheduler.pending_indices()
                         )
-                        self.qemu_commands.register_vm(vm_id)
-                    created[index_to_create] = (vm_id, vm_config)
-                    scheduler.mark_created(index_to_create)
-                    readiness[
-                        asyncio.create_task(
-                            self._await_vm_ready(
-                                vm_id,
-                                vm_config,
-                                f"{labels[index_to_create]} (ID={vm_id})",
-                            )
+                        raise RuntimeError(
+                            f"VM startup cannot make progress; still pending: {pending}"
                         )
-                    ] = index_to_create
+                    self._log_blocked(scheduler, labels)
+                    await scheduler.wait_for_progress()
                     continue
 
-                if not readiness:
-                    if scheduler.all_created:
-                        break
-                    # Nothing creatable and nothing in flight: unsatisfiable
-                    # graph, which config validation should have rejected.
-                    pending = ", ".join(labels[i] for i in scheduler.pending_indices())
-                    raise RuntimeError(
-                        f"VM startup cannot make progress; still pending: {pending}"
+                vm_id = await self._create_vm(
+                    index, vms_config, labels, vnet_aliases, known_builtins
+                )
+                created[index] = (vm_id, vms_config[index])
+                scheduler.mark_created(index)
+                readiness_tasks.append(
+                    asyncio.create_task(
+                        self._await_vm_ready(
+                            scheduler,
+                            index,
+                            vm_id,
+                            vms_config[index],
+                            f"{labels[index]} (ID={vm_id})",
+                        )
                     )
-                for index in scheduler.pending_indices():
-                    blocking = scheduler.blocking_dependencies(index)
-                    self.logger.debug(
-                        f"VM {labels[index]} waiting for: "
-                        f"{', '.join(labels[b] for b in blocking)}"
-                    )
-                await asyncio.wait(readiness, return_when=asyncio.FIRST_COMPLETED)
+                )
+
+            while not scheduler.all_ready:
+                await scheduler.wait_for_progress()
         finally:
-            for task in readiness:
+            for task in readiness_tasks:
                 task.cancel()
-            if readiness:
-                await asyncio.gather(*readiness, return_exceptions=True)
+            if readiness_tasks:
+                await asyncio.gather(*readiness_tasks, return_exceptions=True)
 
         return (
             tuple(created[i] for i in range(len(vms_config))),
@@ -243,21 +226,67 @@ class InfraCommands(abc.ABC):
             tuple(ipam_mappings),
         )
 
+    async def _create_vm(
+        self,
+        index: int,
+        vms_config: Tuple[VmConfig, ...],
+        labels: Sequence[str],
+        vnet_aliases: VnetAliases,
+        known_builtins: Dict[str, int],
+    ) -> int:
+        """Clone, configure and start one VM; register it for cleanup."""
+        vm_config = vms_config[index]
+        self.logger.info(
+            f"Creating VM {labels[index]} ({index + 1}/{len(vms_config)} in config)"
+        )
+        with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
+            vm_id = await self.qemu_commands.create_and_start_vm(
+                sdn_vnet_aliases=vnet_aliases,
+                vm_config=vm_config,
+                built_in_vm_ids=known_builtins,
+                wait_until_ready=False,
+            )
+            self.qemu_commands.register_vm(vm_id)
+        return vm_id
+
+    def _log_blocked(self, scheduler: VmScheduler, labels: Sequence[str]) -> None:
+        for index in scheduler.pending_indices():
+            blocking = scheduler.blocking_dependencies(index)
+            self.logger.debug(
+                f"VM {labels[index]} waiting for: "
+                f"{', '.join(labels[b] for b in blocking)}"
+            )
+
     async def _await_vm_ready(
-        self, vm_id: int, vm_config: VmConfig, label: str
+        self,
+        scheduler: VmScheduler,
+        index: int,
+        vm_id: int,
+        vm_config: VmConfig,
+        label: str,
     ) -> None:
-        """Wait for a VM's preconditions (running, agent if needed) and healthcheck."""
+        """Wait for a VM's preconditions and healthcheck, then tell the scheduler.
+
+        Runs as its own task, concurrently with other VMs' waits and with the
+        driver's cloning. Reports success or the first failure to `scheduler`,
+        which is where the driver is blocked.
+        """
         self.logger.info(f"Waiting for VM {label}")
-        await self.qemu_commands.await_running(vm_id)
-        if vm_config.requires_guest_agent:
-            await self.qemu_commands.await_agent(vm_id)
-        if vm_config.healthcheck is not None:
-            await HealthCheckRunner(
-                vm_config.healthcheck,
-                self._healthcheck_executor(vm_id, vm_config),
-                label=label,
-            ).run()
+        try:
+            await self.qemu_commands.await_running(vm_id)
+            if vm_config.requires_guest_agent:
+                await self.qemu_commands.await_agent(vm_id)
+            if vm_config.healthcheck is not None:
+                await HealthCheckRunner(
+                    vm_config.healthcheck,
+                    self._healthcheck_executor(vm_id, vm_config),
+                    label=label,
+                ).run()
+        except Exception as exc:
+            scheduler.mark_failed(index, exc)
+            raise
         self.logger.info(f"VM {label} is ready")
+        scheduler.mark_ready(index)
 
     def _healthcheck_executor(
         self, vm_id: int, vm_config: VmConfig

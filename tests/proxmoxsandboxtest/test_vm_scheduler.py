@@ -4,6 +4,10 @@ No asyncio, no Proxmox: given the config's dependency edges and which VMs have
 become ready, which VM should be created next?
 """
 
+import asyncio
+
+import pytest
+
 from proxmoxsandbox._impl.vm_scheduler import VmScheduler
 from proxmoxsandbox.schema import DependencyEdge
 
@@ -87,3 +91,47 @@ def test_all_created_false_while_pending():
     s.mark_ready(0)
     _drain(s)
     assert s.all_created
+
+
+# --- rendezvous: readiness tasks report to the scheduler; the driver awaits it ----
+
+
+async def test_wait_for_progress_wakes_on_mark_ready():
+    s = VmScheduler(edges=(DependencyEdge(1, 0, "depends_on"),), count=2)
+    _drain(s)
+    assert s.next_creatable() is None
+
+    async def later():
+        await asyncio.sleep(0)
+        s.mark_ready(0)
+
+    asyncio.create_task(later())
+    await asyncio.wait_for(s.wait_for_progress(), timeout=1)
+    assert s.next_creatable() == 1
+
+
+async def test_wait_for_progress_raises_first_failure():
+    s = VmScheduler(edges=(), count=2)
+    _drain(s)
+    boom = RuntimeError("VM 100 never came up")
+    s.mark_failed(0, boom)
+    s.mark_failed(1, RuntimeError("second, ignored"))
+    with pytest.raises(RuntimeError, match="VM 100 never came up"):
+        await s.wait_for_progress()
+
+
+async def test_wait_for_progress_returns_immediately_if_already_signalled():
+    s = VmScheduler(edges=(), count=1)
+    _drain(s)
+    s.mark_ready(0)
+    await asyncio.wait_for(s.wait_for_progress(), timeout=1)
+
+
+def test_all_ready():
+    s = VmScheduler(edges=(), count=2)
+    _drain(s)
+    assert not s.all_ready
+    s.mark_ready(0)
+    assert not s.all_ready
+    s.mark_ready(1)
+    assert s.all_ready

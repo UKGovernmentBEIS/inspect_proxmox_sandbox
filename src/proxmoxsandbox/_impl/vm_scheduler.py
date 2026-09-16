@@ -1,10 +1,13 @@
 """Decide which VM to create next given dependency edges and readiness so far.
 
-Pure bookkeeping, no I/O. `InfraCommands.create_sdn_and_vms` drives it: clone
-and start stay strictly serial (Proxmox VM ID allocation is not safe to race),
-while readiness waits for already-created VMs overlap.
+`InfraCommands.create_sdn_and_vms` drives it: clone and start stay strictly
+serial (Proxmox VM ID allocation is not safe to race), while readiness waits
+for already-created VMs overlap. Those readiness tasks report back here via
+`mark_ready` / `mark_failed`, and the driver blocks in `wait_for_progress`
+until one of them does. The scheduler does no I/O of its own.
 """
 
+import asyncio
 from typing import Dict, Sequence, Set, Tuple
 
 from proxmoxsandbox.schema import DependencyEdge
@@ -25,22 +28,45 @@ class VmScheduler:
             self._dependencies[edge.dependant].add(edge.dependency)
         self._created: Set[int] = set()
         self._ready: Set[int] = set()
+        self._failure: BaseException | None = None
+        self._changed = asyncio.Event()
 
     def mark_created(self, index: int) -> None:
+        """Driver: the VM has been cloned and started."""
         self._created.add(index)
 
     def mark_ready(self, index: int) -> None:
+        """Readiness task: the VM passed its preconditions and healthcheck."""
         self._ready.add(index)
+        self._changed.set()
+
+    def mark_failed(self, index: int, exc: BaseException) -> None:
+        """Readiness task: the VM will never be ready. First failure wins."""
+        if self._failure is None:
+            self._failure = exc
+        self._changed.set()
+
+    async def wait_for_progress(self) -> None:
+        """Block until a readiness task reports; re-raise if any VM failed."""
+        await self._changed.wait()
+        self._changed.clear()
+        if self._failure is not None:
+            raise self._failure
 
     @property
     def all_created(self) -> bool:
         return len(self._created) == self._count
+
+    @property
+    def all_ready(self) -> bool:
+        return len(self._ready) == self._count
 
     def blocking_dependencies(self, index: int) -> Tuple[int, ...]:
         """Dependencies of `index` that are not yet ready, in tuple order."""
         return tuple(sorted(self._dependencies[index] - self._ready))
 
     def next_creatable(self) -> int | None:
+        """Poll: lowest uncreated index whose dependencies are all ready, if any."""
         for index in range(self._count):
             if index not in self._created and not self.blocking_dependencies(index):
                 return index
