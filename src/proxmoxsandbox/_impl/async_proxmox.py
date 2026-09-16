@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 import re
 import time
@@ -16,9 +15,26 @@ from inspect_ai.util import (
 )
 from pydantic import BaseModel
 
+from proxmoxsandbox._impl.qga_responses import decode_file_read, tamper
 from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
+
+# Error bodies are matched on short stable substrings and quoted in logs and
+# exceptions; a guest agent's error `desc` is passed through by PVE, so cap it.
+_MAX_ERROR_TEXT_CHARS = 8192
+
+
+def _http_status_error(response: httpx.Response) -> httpx.HTTPStatusError:
+    # Deliberately not response.raise_for_status(): that omits response.text,
+    # which callers match on (e.g. "No such file", "Is a directory").
+    message = f"HTTP response error: {response.status_code} {response.reason_phrase}"
+    if response.text:
+        text = response.text
+        if len(text) > _MAX_ERROR_TEXT_CHARS:
+            text = f"{text[:_MAX_ERROR_TEXT_CHARS]}... ({len(text)} chars)"
+        message += f": {text}"
+    return httpx.HTTPStatusError(message, request=response.request, response=response)
 
 
 class ProxmoxVersionInfo(BaseModel):
@@ -176,17 +192,7 @@ class AsyncProxmoxAPI:
                 )
 
             if response.is_error and raise_errors:
-                # We are deliberately not using response.raise_for_status here as it
-                # does not include response.text in the raised error
-                message = (
-                    f"HTTP response error: {response.status_code} "
-                    + f"{response.reason_phrase}"
-                )
-                if response.text:
-                    message += f": {response.text}"
-                raise httpx.HTTPStatusError(
-                    message, request=response.request, response=response
-                )
+                raise _http_status_error(response)
             else:
                 if response.is_error:
                     return response.json()
@@ -219,11 +225,6 @@ class AsyncProxmoxAPI:
     # but it's copied here because of read_file
     async def _ping_qemu_agent(self, node: str, vm_id: int):
         await self.request("POST", f"/nodes/{node}/qemu/{vm_id}/agent/ping")
-
-    # decode=0 concatenates each ~1 MiB chunk's own base64 (chunks aren't
-    # 3-aligned, so each keeps its padding) - decode segment by segment, not in
-    # one pass.
-    _B64_SEGMENT = re.compile(rb"[A-Za-z0-9+/]+={0,2}")
 
     _warned_legacy_file_read: bool = False
 
@@ -266,26 +267,13 @@ class AsyncProxmoxAPI:
                 ),
             )
             if response.is_error:
-                # Mirror request()'s error so callers can still match the agent's
-                # message text (e.g. "No such file", "Is a directory").
-                message = (
-                    f"HTTP response error: {response.status_code} "
-                    f"{response.reason_phrase}"
-                )
-                if response.text:
-                    message += f": {response.text}"
-                raise httpx.HTTPStatusError(
-                    message, request=response.request, response=response
-                )
+                raise _http_status_error(response)
             data = response.json()["data"]
-        content: str = data.get("content") or ""
-        if not modern:
-            return self._decode_legacy_file_read(content, data, count)
-        raw = b"".join(
-            base64.b64decode(seg)
-            for seg in self._B64_SEGMENT.findall(content.encode("ascii"))
-        )
-        return raw, bool(data.get("truncated"))
+        if modern:
+            return decode_file_read(vm_id, data, count)
+        if not isinstance(data, dict):
+            raise tamper(vm_id, "file-read", "not an object", data)
+        return self._decode_legacy_file_read(data.get("content") or "", data, count)
 
     def _decode_legacy_file_read(
         self, content: str, data: dict, count: int

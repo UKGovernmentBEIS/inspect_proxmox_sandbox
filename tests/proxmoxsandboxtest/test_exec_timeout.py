@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from proxmoxsandbox import _proxmox_sandbox_environment as mod
+from proxmoxsandbox._impl.qga_responses import ExecStatus
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
 
@@ -30,9 +31,9 @@ async def test_exec_unresponsive_agent_raises_timeouterror(monkeypatch):
 
     agent = MagicMock()
     agent.write_file = AsyncMock()
-    agent.exec_command = AsyncMock(return_value={"pid": 42})
+    agent.exec_command = AsyncMock(return_value=42)
     # exited != 1 means "still running"; the agent never reports completion.
-    agent.get_agent_exec_status = AsyncMock(return_value={"exited": 0})
+    agent.get_agent_exec_status = AsyncMock(return_value=ExecStatus(exited=0))
 
     env = _make_sandbox(agent)
 

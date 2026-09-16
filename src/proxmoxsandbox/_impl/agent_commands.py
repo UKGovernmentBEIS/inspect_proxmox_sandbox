@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import time
 from logging import getLogger
 from typing import List, Tuple
 
@@ -11,6 +12,11 @@ from inspect_ai.util import (
 from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
+)
+from proxmoxsandbox._impl.qga_responses import (
+    ExecReturn,
+    ExecStatus,
+    parse_guest,
 )
 
 # Transient failures talking to the QEMU guest agent (QGA), all retried:
@@ -36,6 +42,12 @@ from proxmoxsandbox._impl.async_proxmox import (
 _QGA_MAX_RETRIES = 25
 _QGA_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt, capped below
 _QGA_RETRY_MAX_DELAY = 20.0  # seconds
+# Wall-clock cap on one call's whole retry envelope. 25 fast failures already
+# take ~7.5 min of backoff, so honest flakiness is unaffected. A guest agent
+# that never answers costs ~5s per attempt (PVE's QMP timeout; measured 556s
+# for one exec-status call) and up to 60s (httpx read timeout) on multi-chunk
+# file-reads, which would otherwise stretch one call to ~30 min.
+_QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
 
 
 def _is_pid_gone(exc: httpx.HTTPStatusError) -> bool:
@@ -86,15 +98,23 @@ class AgentCommands:
 
     async def _retry_on_qga_error(self, label: str, coro_fn):
         """Retry a coroutine function on transient QGA / transport errors."""
+        started = time.monotonic()
         for attempt in range(1, _QGA_MAX_RETRIES + 1):
             try:
                 return await coro_fn()
             except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                if attempt < _QGA_MAX_RETRIES and self._is_transient_qga_error(e):
-                    delay = min(
-                        _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
-                        _QGA_RETRY_MAX_DELAY,
-                    )
+                delay = min(
+                    _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
+                    _QGA_RETRY_MAX_DELAY,
+                )
+                out_of_time = (
+                    time.monotonic() - started + delay > _QGA_RETRY_MAX_TOTAL_SECONDS
+                )
+                if (
+                    attempt < _QGA_MAX_RETRIES
+                    and not out_of_time
+                    and self._is_transient_qga_error(e)
+                ):
                     self.logger.warning(
                         f"{label} failed (attempt {attempt}/{_QGA_MAX_RETRIES}), "
                         f"retrying in {delay:.1f}s: {e}"
@@ -103,7 +123,7 @@ class AgentCommands:
                 else:
                     raise
 
-    async def get_agent_exec_status(self, vm_id: int, pid: int):
+    async def get_agent_exec_status(self, vm_id: int, pid: int) -> ExecStatus:
         # The status read is single-shot (the agent discards a finished
         # process's output after one successful read), so a retry whose first
         # attempt's response was lost could find the PID already gone. That is
@@ -111,9 +131,12 @@ class AgentCommands:
         # before exit, so a gone PID just means "finished" - report exited and
         # let exec() read the results from disk. This makes the call idempotent
         # and freely retryable.
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            # Belt and braces: exec_command only hands out validated pids.
+            raise ValueError(f"refusing to query exec-status for pid {pid!r}")
         path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec-status?pid={pid}"
         try:
-            return await self._retry_on_qga_error(
+            raw = await self._retry_on_qga_error(
                 f"exec-status vm={vm_id} pid={pid}",
                 lambda: self.async_proxmox.request("GET", path),
             )
@@ -123,8 +146,9 @@ class AgentCommands:
                     f"exec-status vm={vm_id} pid={pid}: PID gone, assuming the "
                     f"process finished and reading its results from disk"
                 )
-                return {"exited": 1}
+                return ExecStatus(exited=1)
             raise
+        return parse_guest(ExecStatus, vm_id, "exec-status", raw)
 
     async def write_file(self, vm_id: int, content: bytes, filepath: str):
         """Write a file to the VM using QEMU agent."""
@@ -150,8 +174,8 @@ class AgentCommands:
                 lambda: self.async_proxmox.request("POST", path, json=data),
             )
 
-    async def exec_command(self, vm_id: int, command: List[str]):
-        """Execute a command in the VM using QEMU agent.
+    async def exec_command(self, vm_id: int, command: List[str]) -> int:
+        """Execute a command in the VM using QEMU agent; returns its pid.
 
         Every element of `command` MUST be ASCII. A single non-ASCII byte in
         the QMP guest-exec arguments breaks Proxmox's agent bridge: the call
@@ -166,10 +190,11 @@ class AgentCommands:
             # wrapper script's flock guard makes that run the command once.
             path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec"
             data: ProxmoxJsonDataType = {"command": command}
-            return await self._retry_on_qga_error(
+            raw = await self._retry_on_qga_error(
                 f"exec_command vm={vm_id}",
                 lambda: self.async_proxmox.request("POST", path, json=data),
             )
+            return parse_guest(ExecReturn, vm_id, "exec", raw).pid
 
     async def read_file_capped(
         self, vm_id: int, filepath: str, count: int
