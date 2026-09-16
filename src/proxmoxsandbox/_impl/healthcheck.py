@@ -5,9 +5,11 @@ Success latches: once the check passes the VM is ready for the purposes of
 """
 
 import asyncio
+import itertools
 import time
+from dataclasses import dataclass
 from logging import getLogger
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 
 import httpx
 from inspect_ai.util import ExecResult
@@ -29,13 +31,27 @@ class HealthCheckFailed(RuntimeError):
     """A VM's healthcheck did not pass within its retry budget."""
 
 
+@dataclass(frozen=True)
+class Probe:
+    """Result of one healthcheck attempt, with exceptions already classified.
+
+    healthy:     the command exited 0.
+    unhealthy:   it exited non-zero or timed out in the guest (counts as a
+                 failed attempt, as in compose).
+    unreachable: the guest agent could not be reached; the service's state is
+                 unknown, so this does not count as a failed attempt.
+    """
+
+    outcome: Literal["healthy", "unhealthy", "unreachable"]
+    detail: str = ""
+
+
 class HealthCheckRunner:
     """Run one VM's healthcheck to completion.
 
     `execute` runs `spec.test` inside the guest and returns the exec result;
-    it may raise `TimeoutError` (counts as a failed attempt, as in compose) or an
-    httpx error (transport problem; retried without consuming `retries`).
-    `clock` and `sleep` are injectable so tests can run the schedule instantly.
+    it may raise `TimeoutError` or an httpx error. `clock` and `sleep` are
+    injectable so tests can run the schedule instantly.
     """
 
     def __init__(
@@ -55,61 +71,66 @@ class HealthCheckRunner:
 
     async def run(self) -> None:
         start = self.clock()
-        consecutive_failures = 0
-        consecutive_transport_errors = 0
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                result = await self.execute(self.spec)
-            except (httpx.TransportError, httpx.HTTPStatusError) as e:
-                consecutive_transport_errors += 1
+        failures = 0
+        transport_errors = 0
+        for attempt in itertools.count(1):
+            probe = await self._probe()
+
+            if probe.outcome == "healthy":
+                logger.info(f"{self.label}: healthcheck passed on attempt {attempt}")
+                return
+
+            if probe.outcome == "unreachable":
+                transport_errors += 1
                 logger.warning(
                     f"{self.label}: healthcheck attempt {attempt} could not reach "
-                    f"the guest agent ({type(e).__name__}), "
-                    f"{consecutive_transport_errors}/{_TRANSPORT_ERROR_LIMIT}"
+                    f"the guest agent ({probe.detail}), "
+                    f"{transport_errors}/{_TRANSPORT_ERROR_LIMIT}"
                 )
-                if consecutive_transport_errors >= _TRANSPORT_ERROR_LIMIT:
+                if transport_errors >= _TRANSPORT_ERROR_LIMIT:
                     raise HealthCheckFailed(
                         f"{self.label}: healthcheck could not reach the guest agent "
-                        f"in {consecutive_transport_errors} consecutive attempts "
-                        f"(last error: {type(e).__name__})"
-                    ) from e
+                        f"in {transport_errors} consecutive attempts "
+                        f"(last error: {probe.detail})"
+                    )
                 await self.sleep(self.spec.interval)
                 continue
-            except TimeoutError:
-                consecutive_transport_errors = 0
-                detail = f"timed out after {self.spec.timeout}s"
-            else:
-                consecutive_transport_errors = 0
-                if result.success:
-                    logger.info(
-                        f"{self.label}: healthcheck passed on attempt {attempt}"
-                    )
-                    return
-                detail = f"exit code {result.returncode}"
-                # Guest output may contain credentials; keep it out of
-                # exceptions and INFO-level logs.
-                logger.debug(
-                    f"{self.label}: healthcheck stdout={result.stdout!r} "
-                    f"stderr={result.stderr!r}"
-                )
 
-            in_start_period = self.clock() - start < self.spec.start_period
-            if in_start_period:
+            # unhealthy: the guest answered, so the transport streak is over.
+            transport_errors = 0
+            if self.clock() - start < self.spec.start_period:
                 logger.debug(
-                    f"{self.label}: healthcheck attempt {attempt} failed ({detail}) "
-                    f"during start_period; not counted"
+                    f"{self.label}: healthcheck attempt {attempt} failed "
+                    f"({probe.detail}) during start_period; not counted"
                 )
             else:
-                consecutive_failures += 1
+                failures += 1
                 logger.info(
-                    f"{self.label}: healthcheck attempt {attempt} failed ({detail}), "
-                    f"{consecutive_failures}/{self.spec.retries}"
+                    f"{self.label}: healthcheck attempt {attempt} failed "
+                    f"({probe.detail}), {failures}/{self.spec.retries}"
                 )
-                if consecutive_failures >= self.spec.retries:
+                if failures >= self.spec.retries:
                     raise HealthCheckFailed(
-                        f"{self.label}: healthcheck failed {consecutive_failures} "
-                        f"consecutive time(s); last attempt {detail}"
+                        f"{self.label}: healthcheck failed {failures} consecutive "
+                        f"time(s); last attempt {probe.detail}"
                     )
             await self.sleep(self.spec.interval)
+
+    async def _probe(self) -> Probe:
+        """Run the check once and classify what happened."""
+        try:
+            result = await self.execute(self.spec)
+        except (httpx.TransportError, httpx.HTTPStatusError) as e:
+            return Probe("unreachable", type(e).__name__)
+        except TimeoutError:
+            return Probe("unhealthy", f"timed out after {self.spec.timeout}s")
+
+        if result.success:
+            return Probe("healthy")
+        # Guest output may contain credentials; keep it out of exceptions
+        # and INFO-level logs.
+        logger.debug(
+            f"{self.label}: healthcheck stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
+        return Probe("unhealthy", f"exit code {result.returncode}")
