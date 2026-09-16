@@ -101,6 +101,9 @@ class Harness:
         infra._healthcheck_executor = MagicMock(side_effect=executor)
 
         infra.create_sdn_and_vms = InfraCommands.create_sdn_and_vms.__get__(infra)
+        infra._start_vms_in_dependency_order = (
+            InfraCommands._start_vms_in_dependency_order.__get__(infra)
+        )
         infra._create_vm = InfraCommands._create_vm.__get__(infra)
         infra._await_vm_ready = InfraCommands._await_vm_ready.__get__(infra)
         self.infra = infra

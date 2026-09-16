@@ -168,9 +168,26 @@ class InfraCommands(abc.ABC):
             )
             ipam_mappings.extend(per_vm_ipam_mappings)
 
-        # Clone/configure/start stays strictly serial: VM IDs come from an
-        # unreserved /cluster/nextid read, and TaskWrapper waits on cluster-wide
-        # task state. Only the readiness waits for already-started VMs overlap.
+        vm_configs_with_ids = await self._start_vms_in_dependency_order(
+            vms_config, dependency_edges, vnet_aliases, known_builtins
+        )
+
+        return vm_configs_with_ids, sdn_zone_id, tuple(ipam_mappings)
+
+    async def _start_vms_in_dependency_order(
+        self,
+        vms_config: Tuple[VmConfig, ...],
+        dependency_edges: Sequence[DependencyEdge],
+        vnet_aliases: VnetAliases,
+        known_builtins: Dict[str, int],
+    ) -> Tuple[Tuple[int, VmConfig], ...]:
+        """Create every VM once its dependencies are ready; wait for all to be ready.
+
+        Clone/configure/start stays strictly serial: VM IDs come from an
+        unreserved /cluster/nextid read, and TaskWrapper waits on cluster-wide
+        task state. Only the readiness waits for already-started VMs overlap.
+        Returns (vm_id, config) pairs in `vms_config` order.
+        """
         scheduler = VmScheduler(dependency_edges, len(vms_config))
         labels = tuple(
             vm.name if vm.name is not None else f"vms_config[{i}]"
@@ -220,11 +237,7 @@ class InfraCommands(abc.ABC):
             if readiness_tasks:
                 await asyncio.gather(*readiness_tasks, return_exceptions=True)
 
-        return (
-            tuple(created[i] for i in range(len(vms_config))),
-            sdn_zone_id,
-            tuple(ipam_mappings),
-        )
+        return tuple(created[i] for i in range(len(vms_config)))
 
     async def _create_vm(
         self,
