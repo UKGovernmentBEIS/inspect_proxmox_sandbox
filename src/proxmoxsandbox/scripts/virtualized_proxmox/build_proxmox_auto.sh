@@ -233,12 +233,8 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
  
 EOFPATCH
 
-# Stamps the host contract into pvecfg.pm, so a caller can tell what this image provides.
-# Bump when a host-side file something off-host asserts changes — aisi2 is the lockdown
-# rewriting the node's port-53 rules. Both the version_info hash (what GET /version serves)
-# and version_text (what pveversion prints), so neither reads unpatched. sub version() is
-# deliberately left alone: its callers compare it, and a suffix there could break them.
-# Each matches an unsuffixed version only, so a built host can't be bumped in place.
+# Host contract for off-host callers (scripts/ec2/README.md); bump when host-side behaviour
+# they assert changes. sub version() is left unstamped: its callers compare it.
 AISI_CONTRACT=aisi2
 sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.$AISI_CONTRACT',/" /usr/share/perl5/PVE/pvecfg.pm
 sed -i "s|\(return '[0-9]\+\.[0-9]\+\.[0-9]\+\)/|\1.$AISI_CONTRACT/|" /usr/share/perl5/PVE/pvecfg.pm
@@ -278,20 +274,16 @@ cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
 #!/bin/bash
 set -euo pipefail
 
-# Enforce RFC 3927: a router must not forward IPv4 link-local (169.254.0.0/16).
-#
-# Destination drop in raw PREROUTING (interface-agnostic, ahead of any FORWARD
-# ACCEPT; host requests are OUTPUT so unaffected) -- this blocks the metadata vector.
+# RFC 3927: a router must not forward IPv4 link-local. The destination drop goes in raw
+# PREROUTING, ahead of any FORWARD ACCEPT; host requests are OUTPUT so unaffected.
 iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
     || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
-# Source drop in FORWARD, not raw PREROUTING: belt-and-braces for full RFC
-# conformance. FORWARD leaves the host's own on-link replies (IMDS/DNS, at INPUT)
-# intact; a raw PREROUTING -s rule would drop them and break the host.
+# The source drop must be FORWARD, not raw PREROUTING: the latter would also drop the
+# host's own on-link replies (IMDS/DNS) and break it.
 iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
     || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
 
-# Belt-and-braces for the unsupported IPv6 case: drop forwarded guest v6 outright.
-# FORWARD only sees transit traffic, so the host's own v6 (INPUT/OUTPUT) is intact.
+# Guest v6 is unsupported; FORWARD sees only transit, so the host's own v6 is intact.
 if command -v ip6tables >/dev/null; then
     ip6tables -w -C FORWARD -j DROP 2>/dev/null \
         || ip6tables -w -A FORWARD -j DROP
@@ -348,10 +340,8 @@ blank_resolv() {
     reload_dnsmasq
 }
 
-# The node's port-53 rules carry no --iface, so they apply on every SDN gateway and on the
-# management address. Under lockdown dnsmasq has no upstream, so these two are REJECT rather
-# than ACCEPT — the rationale is in scripts/ec2/README.md, "Properly isolating the host".
-# Rewriting is skipped when the rules are already in the wanted state.
+# Port-53 rules carry no --iface, so they cover every SDN gateway and the management address.
+# REJECT under lockdown, because dnsmasq then has no upstream. See scripts/ec2/README.md.
 NODE=$(hostname)
 FW_COMMENT="inspect-proxmox-sandbox: host-isolation"
 dns53_query() { # jq filter over our port-53 rules
@@ -375,13 +365,12 @@ set_dns53() { # ACCEPT|REJECT
         pvesh create "/nodes/$NODE/firewall/rules" --type in --action "$want" \
             --proto "$proto" --dport 53 --enable 1 --comment "$FW_COMMENT" || true
     done
-    # Individual pvesh calls are tolerated; the end state is not. The caller decides what a
-    # failure means, which is asymmetric: see both call sites.
+    # The end state matters, not the individual calls; callers differ on what failure means.
     dns53_is "$want" || { echo "ERROR: port-53 rules not $want after rewrite" >&2; return 1; }
 }
 
 if [ -f "$MARKER" ]; then
-    # Fails the unit if the port cannot be closed, like the iptables calls below.
+    # Fatal, like the iptables calls below: the port must close.
     set_dns53 REJECT
     MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
     if [ -z "$MGMT_NICS" ]; then
@@ -399,8 +388,7 @@ if [ -f "$MARKER" ]; then
     gc_stale_rules
     blank_resolv
 else
-    # Tolerated, unlike the marker path: a port left closed over-restricts guests, and
-    # tripping OnFailure would mask the API on a host that never asked to be locked down.
+    # Tolerated: over-restriction is safe, and OnFailure would mask the API here.
     set_dns53 ACCEPT || true
     gc_stale_rules
     if [ -f "$RESOLV_BACKUP" ]; then
