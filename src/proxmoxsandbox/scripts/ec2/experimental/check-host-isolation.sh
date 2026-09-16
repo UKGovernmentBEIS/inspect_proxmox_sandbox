@@ -47,9 +47,11 @@ sysctl_is() { [ "$(sysctl -n "$1" 2>/dev/null)" = "$2" ]; }
 # why check-guest-isolation.sh is the arbiter of effect.
 has_rule() { iptables -w -t "$1" -S "$2" 2>/dev/null | grep -q -- "$3"; }
 has_rule6() { ip6tables -w -S "$1" 2>/dev/null | grep -q -- "$2"; }
+# 100.64.0.0/10 is in here because AWS allows it as a VPC CIDR, so an endpoint can land there.
 is_private() {
     case "$1" in
         10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 0 ;;
     esac
     return 1
 }
@@ -73,6 +75,7 @@ unresolvable() {
 
 nic=$(ip route show default | awk '{print $5; exit}')
 node=$(hostname)
+marker=/etc/inspect-proxmox-egress-lockdown
 echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev/null | head -1)"
 
 echo
@@ -108,8 +111,9 @@ cluster_rules=$(pvesh get /cluster/firewall/rules --output-format json 2>&1)
 cluster_rules_rc=$?
 fetched() { [ "$1" = 0 ] || { echo "$2"; return 1; }; }
 # Read the .fw files, not /cluster/firewall/options: pvesh cannot GET that path since
-# pve-manager 9.2.7 (https://bugzilla.proxmox.com/show_bug.cgi?id=7942). pmxcfs serves the
-# API from these files anyway, and pve-firewall status above covers the effective state.
+# pve-manager 9.2.7, fixed in 9.2.19 (https://bugzilla.proxmox.com/show_bug.cgi?id=7942).
+# pmxcfs serves the API from these files anyway, and pve-firewall status above covers the
+# effective state.
 fw_enabled() {
     local f=$1 enable
     [ -f "$f" ] || { echo "$f absent, so the firewall is off"; return 1; }
@@ -118,45 +122,68 @@ fw_enabled() {
     echo "enable=${enable:-<unset>} in $f [OPTIONS]"
     return 1
 }
-in_accepts() { jq -c '[.[] | select(.type == "in" and .action == "ACCEPT") | {pos, proto, dport, iface, macro}]' <<<"$1"; }
-have_accept() {
-    jq -e --arg p "$1" --arg d "$2" --arg i "$3" \
-        'any(.[]; .type == "in" and .action == "ACCEPT" and ((.enable // 1) | tonumber) == 1
-             and .proto == $p and ((.dport // "") | tostring) == $d and .iface == $i)' \
-        <<<"$node_rules" >/dev/null && return 0
-    echo "node inbound ACCEPTs: $(in_accepts "$node_rules")"
-    return 1
+# An ACCEPT with no --iface applies on every SDN gateway as well as the management address,
+# so it is open to guests on any vnet; one bound to an SDN bridge is open to that vnet. Both
+# are invisible to a check that only asks whether the wanted rules are there, so the whole
+# inbound ACCEPT set is compared against the set ../userdata.sh creates. pvesh reports .enable
+# only for rules that carry it, and a rule without it is enabled.
+oneline() { printf '%s' "${1:-<none>}" | tr '\n' ' '; }
+inbound_accepts() { # one "proto/dport@iface" per inbound ACCEPT, sorted; macros by name
+    jq -r '[ .[]
+             | select(.type == "in" and .action == "ACCEPT")
+             | (.macro // ((.proto // "any") + "/" + ((.dport // "any") | tostring)))
+               + "@" + (.iface // "")
+               + (if ((.enable // 1) | tonumber) == 1 then "" else "(disabled)" end)
+           ] | sort | .[]' <<<"$1"
 }
-# Anything an inbound ACCEPT opens without an --iface is open on the SDN gateway too, i.e.
-# to guests. Only the SDN DNS/DHCP ports are meant to be. A macro rule can't be resolved to
-# ports here, so it is reported rather than assumed harmless.
-no_unexpected_unbound() {
-    local bad
-    bad=$(jq -r '[ .[]
-                   | select(.type == "in" and .action == "ACCEPT" and ((.iface // "") == ""))
-                   | select((((.proto // "") + "/" + ((.dport // "") | tostring)))
-                            | IN("udp/53", "tcp/53", "udp/67") | not)
-                   | "pos \(.pos) \(.macro // ((.proto // "?") + "/" + ((.dport // "?") | tostring)))"
-                 ] | join("; ")' <<<"$1")
-    [ -z "$bad" ] && return 0
-    echo "open to guests on the SDN gateway: $bad"
+accepts_are() { # rules expected...
+    local got want
+    got=$(inbound_accepts "$1")
+    shift
+    want=$([ $# -eq 0 ] || printf '%s\n' "$@" | LC_ALL=C sort)
+    [ "$got" = "$want" ] && return 0
+    echo "want: $(oneline "$want")"
+    echo "got:  $(oneline "$got")"
     return 1
 }
 chk "node firewall rules readable" fetched "$node_rules_rc" "$node_rules"
 chk "cluster firewall rules readable" fetched "$cluster_rules_rc" "$cluster_rules"
 chk "cluster firewall enabled" fw_enabled /etc/pve/firewall/cluster.fw
 chk "node firewall enabled" fw_enabled "/etc/pve/nodes/$node/host.fw"
-# Both jq helpers parse the fetched rules, so an unreadable fetch would fail them for a
-# reason that has nothing to do with the rules.
+# Under lockdown the resolver has no upstream, so all it can still do for a guest is answer
+# from its own lease table — cross-segment host enumeration, since one dnsmasq serves every
+# vnet in a zone. The port is closed there, leaving DHCP as the only thing guests may reach.
+port53_rejected() { # proto: closed, but answering, so guests fail fast rather than hang
+    # Unbound, like the ACCEPT it replaces: bound to the mgmt NIC it would reach nothing a
+    # guest sends, and the lookups this is meant to fail fast would hang instead.
+    jq -e --arg p "$1" \
+        'any(.[]; .type == "in" and .action == "REJECT" and (.iface // "") == ""
+             and .proto == $p and ((.dport // "") | tostring) == "53")' \
+        <<<"$node_rules" >/dev/null && return 0
+    echo "node port-53 rules: $(jq -c '[.[] | select(((.dport // "") | tostring) == "53")
+                                        | {pos, action, proto, iface}]' <<<"$node_rules")"
+    return 1
+}
+# Guests reach the host only where an ACCEPT is unbound, so the DHCP rule is the one that has
+# to be: udp/67 on every gateway. Port 53 is an ACCEPT only without the lockdown marker; with
+# it, the same two rules are REJECT and port53_rejected is what looks for them.
+node_accepts=("tcp/8006@$nic" "tcp/22@$nic" "udp/67@")
+[ -f "$marker" ] || node_accepts+=("udp/53@" "tcp/53@")
+# Skipped rather than run on an unreadable fetch, which would fail for a reason that has
+# nothing to do with the rules.
 if [ "$node_rules_rc" = 0 ]; then
-    chk "API accepted only on the mgmt NIC: tcp/8006 iface=$nic" have_accept tcp 8006 "$nic"
-    chk "SSH accepted only on the mgmt NIC: tcp/22 iface=$nic" have_accept tcp 22 "$nic"
-    chk "no unbound inbound ACCEPT beyond SDN DNS/DHCP on the node" no_unexpected_unbound "$node_rules"
+    chk "node inbound ACCEPTs are exactly the AMI's, mgmt NIC $nic" \
+        accepts_are "$node_rules" "${node_accepts[@]}"
+    if [ -f "$marker" ]; then
+        chk "DNS rejected rather than dropped, so guests fail fast: udp/53" port53_rejected udp
+        chk "DNS rejected rather than dropped, so guests fail fast: tcp/53" port53_rejected tcp
+    fi
 else
     skip "node inbound ACCEPT checks" "node firewall rules unreadable"
 fi
 if [ "$cluster_rules_rc" = 0 ]; then
-    chk "no unbound inbound ACCEPT beyond SDN DNS/DHCP on the cluster" no_unexpected_unbound "$cluster_rules"
+    # A cluster-level rule applies on every node NIC, and the AMI creates none.
+    chk "no inbound ACCEPT at cluster level" accepts_are "$cluster_rules"
 else
     skip "cluster inbound ACCEPT check" "cluster firewall rules unreadable"
 fi
@@ -164,7 +191,7 @@ fi
 echo
 echo "# guest egress lockdown"
 no_upstream_resolver() { ! grep -q "^nameserver" /run/dnsmasq/resolv.conf; }
-chk "opt-in marker present: /etc/inspect-proxmox-egress-lockdown" test -f /etc/inspect-proxmox-egress-lockdown
+chk "opt-in marker present: $marker" test -f "$marker"
 chk "guest egress dropped: mangle FORWARD -o $nic" has_rule mangle FORWARD "-o $nic .*-j DROP"
 chk "guest ingress dropped: mangle FORWARD -i $nic" has_rule mangle FORWARD "-i $nic .*-j DROP"
 chk "dnsmasq upstream queries dropped: mangle OUTPUT --uid-owner dnsmasq" \
@@ -187,7 +214,7 @@ else
         ip=$(resolves_to "$name")
         chk "interface endpoint $svc: $name resolves" test -n "$ip"
         chk "interface endpoint $svc: $ip private and answering on 443" endpoint_ok "$ip" "$name"
-        endpoints="$endpoints $ip"
+        [ -n "$ip" ] && endpoints="$endpoints $ip"
     done
     # The CloudWatch endpoint is optional, so a public answer here is a VPC without one
     # rather than a leak. Add it to the guest's target list only when it is an endpoint.
@@ -205,11 +232,22 @@ chk "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" un
 chk "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
 
 echo
-if [ -n "$endpoints" ]; then
-    echo "# paste into the guest run (endpoint IPs are per-VPC; do not commit them):"
-    echo "  check-guest-isolation.sh$endpoints"
+# Every IPv4 address this host holds is one a guest must not reach: the management address,
+# the NAT bridge, and one SDN gateway per vnet of whatever sample is running right now. Run
+# this while a sample is up and those gateways are included, which is the only way the guest
+# script gets to probe segments other than its own — it cannot discover them itself.
+args=""
+for ip in $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}' | sort -u); do
+    args="$args --host-addr $ip"
+done
+for ip in $endpoints; do
+    args="$args --unreachable $ip"
+done
+if [ -n "$args" ]; then
+    echo "# paste into the guest run (addresses are per-host and per-VPC; do not commit them):"
+    echo "  check-guest-isolation.sh$args"
 else
-    echo "# no endpoint addresses resolved, so there is no guest command line to print"
+    echo "# no host or endpoint addresses found, so there is no guest command line to print"
 fi
 
 echo

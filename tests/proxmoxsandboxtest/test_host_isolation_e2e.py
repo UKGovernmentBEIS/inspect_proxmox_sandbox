@@ -8,8 +8,9 @@ provisioned correctly (e.g. a hand-rolled Proxmox missing the firewall config).
 
 The fuller probes live in scripts/ec2/experimental/check-{host,guest}-isolation.sh,
 which assume the isolated configuration in scripts/ec2/README.md ("Properly isolating
-the host") — its egress lockdown fails the rest of the suite. What is asserted here is
-the subset that holds on any host.
+the host") — its egress lockdown fails the rest of the suite. Asserted here is only the
+part that survives on a host without that configuration: the AMI's own blocks on guests
+reaching host services and cloud metadata.
 """
 
 import pytest

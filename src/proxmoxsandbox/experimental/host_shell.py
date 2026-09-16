@@ -4,13 +4,18 @@ Use sparingly. This drives the web UI's Shell (termproxy) and scrapes the pty,
 which is the only way to run arbitrary commands through pveproxy. It needs a
 root@pam password login, and the framing below is pve-xtermjs's wire format, not
 the documented REST API. Host configuration belongs in the provisioning scripts;
-this is for checks and one-off diagnostics, not for fixing hosts at runtime.
+this is for checks and one-off diagnostics, not for fixing hosts at runtime. The
+endpoint exists for the web UI's Shell button, so reaching for this in automation
+means either the API call you wanted was missed, or the API has a gap worth filing.
 
 `POST /nodes/{node}/termproxy` starts a login shell on the node and returns a
 one-shot ticket; `/nodes/{node}/vncwebsocket` then relays the pty over a
-websocket. After the newline-terminated ``user:ticket`` handshake the server
-answers ``OK``, the client frames input as ``0:<len>:<bytes>`` and resizes as
-``1:<cols>:<rows>:``, and pty output comes back unframed.
+websocket. That endpoint speaks no protocol of its own despite the name — it
+relays the local port the preceding call opened, so it carries RFB after
+`vncproxy` and the pty after `termproxy`. After the newline-terminated
+``user:ticket`` handshake the server answers ``OK``, the client frames input as
+``0:<len>:<bytes>`` and resizes as ``1:<cols>:<rows>:``, and pty output comes
+back unframed.
 """
 
 import asyncio
@@ -50,8 +55,9 @@ async def run_script_on_host(
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
 
-    # The typed command is echoed back before `stty -echo` takes effect, so the
-    # markers are spelt with a quote break in the command and whole in the output.
+    # The first line is echoed back before `stty -echo` takes effect, so the markers
+    # are spelt with a quote break in the command and whole in the output. The lines
+    # after it are not echoed, so nothing typed lands inside the script's own output.
     token = uuid.uuid4().hex
     marker = f"{token}-"
     typed_marker = f"{token[:8]}''{token[8:]}-"

@@ -16,29 +16,33 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 ## Isolation checks
 
 Both scripts check one configuration, the one the parent README's "Properly
-isolating the host" describes: egress lockdown armed, no route off the VPC.
-They have no options. On an ordinary host they fail by design — that host is
-not isolated.
+isolating the host" describes: egress lockdown armed, no route off the VPC. On
+an ordinary host they fail by design — that host is not isolated.
 
-Run the host script first, then the guest one; the host script ends with a
-ready-to-paste guest command line, so per-VPC addresses are never hand-typed or
-committed.
+Run the host script first, then the guest one; the host script takes no
+arguments and ends with a ready-to-paste guest command line, so per-VPC
+addresses are never hand-typed or committed.
 
 ```bash
 export REGION=eu-west-2
 ./run-script-on-host.sh <instance-id> check-host-isolation.sh
 # then, in a guest console / via the guest agent:
-bash check-guest-isolation.sh <endpoint-ip> ...
+bash check-guest-isolation.sh --host-addr 10.0.1.4 --unreachable 10.0.1.6 ...
 ```
 
 Both print one line per probe — `PASS`, `FAIL`, `SKIP` or `INFO` — run every
 probe, and end with a summary line. The exit status is nonzero if any probe
 failed.
 
-The guest script takes any number of `IP[:PORT]` addresses that must be
-unreachable — VPC interface endpoints, a host across a peering link. Port
-defaults to 443. They're site-specific, so nothing is hardcoded and the probes
-`SKIP` when none are given.
+The guest script's two flags both repeat. `--host-addr IP` is an address the
+host holds, and each one gets the full host-service port battery; passing the
+gateways of vnets the guest is *not* on is the only way it can probe another
+sample's segment, so run the host script while this sample is up.
+`--unreachable IP[:PORT]` is an address that must not be reachable — a VPC
+interface endpoint, a host across a peering link; the port defaults to 443, and
+an IPv6 literal needs brackets to carry one (`[fd00::1]:8443`). Both are
+site-specific, so nothing is hardcoded: with no `--host-addr` the guest's
+default gateway stands in for the host, and the `--unreachable` probes `SKIP`.
 
 For a CVE scan of the baked AMI, get the inventory separately:
 
@@ -50,8 +54,10 @@ Do that over SSH rather than SSM if you want the whole list: SSM
 `send-command` truncates output at 24k and the package list alone exceeds it.
 
 These are operator tools, run by no test. CI runs `pytest -m "not req_proxmox"`,
-and the manual `req_proxmox` suite needs a connected host, so
-`test_host_isolation_e2e.py` asserts only the subset that holds on any host.
+and the manual `req_proxmox` suite needs a host with internet access, so
+`test_host_isolation_e2e.py` asserts only the part that holds without the
+lockdown and the VPC controls: the AMI's own blocks on guests reaching host
+services and cloud metadata.
 
 All scripts honour `REGION` (default `eu-west-2`). `connect.sh` also honours
 `SSH_KEY` (default `~/.ssh/id_ed25519`).
