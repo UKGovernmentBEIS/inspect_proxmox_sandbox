@@ -32,8 +32,27 @@ class VmScheduler:
         self._failure: BaseException | None = None
         self._changed = asyncio.Event()
 
+    def __aiter__(self) -> "VmScheduler":
+        return self
+
+    async def __anext__(self) -> int:
+        """Yield the next creatable index, waiting for readiness as needed.
+
+        The yielded index is marked created as it is handed out. Iteration
+        ends only once every VM is ready, so the same loop that creates VMs
+        also drains the last readiness tasks. Readiness failures (and the
+        no-progress guard) raise out of here.
+        """
+        while not self.all_ready:
+            index = self.next_creatable()
+            if index is not None:
+                self.mark_created(index)
+                return index
+            await self.wait_for_progress()
+        raise StopAsyncIteration
+
     def mark_created(self, index: int) -> None:
-        """Driver: the VM has been cloned and started."""
+        """The VM has been (or is being) cloned and started."""
         self._created.add(index)
 
     def mark_ready(self, index: int) -> None:

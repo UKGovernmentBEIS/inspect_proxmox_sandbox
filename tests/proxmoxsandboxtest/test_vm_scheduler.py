@@ -157,3 +157,39 @@ async def test_wait_for_progress_raises_if_nothing_can_signal():
     await s.wait_for_progress()
     with pytest.raises(RuntimeError, match="nothing can make progress"):
         await s.wait_for_progress()
+
+
+# --- async iteration: yields each index when creatable, stops when all ready -------
+
+
+async def _ready_soon(s: VmScheduler, index: int) -> None:
+    await asyncio.sleep(0)
+    s.mark_ready(index)
+
+
+async def test_async_iteration_yields_in_dependency_order_and_drains():
+    # 0 depends on 2; 1 free; 2 free  ->  1, 2, then 0 once 2 is ready
+    s = VmScheduler(edges=(DependencyEdge(0, 2, "depends_on"),), count=3)
+    order = []
+    async for index in s:
+        order.append(index)
+        asyncio.create_task(_ready_soon(s, index))
+    assert order == [1, 2, 0]
+    assert s.all_ready
+
+
+async def test_async_iteration_raises_readiness_failure():
+    s = VmScheduler(edges=(DependencyEdge(1, 0, "depends_on"),), count=2)
+    seen = []
+    with pytest.raises(RuntimeError, match="VM 100 never came up"):
+        async for index in s:
+            seen.append(index)
+            s.mark_failed(index, RuntimeError("VM 100 never came up"))
+    assert seen == [0]
+
+
+async def test_async_iteration_marks_created_on_yield():
+    s = VmScheduler(edges=(), count=2)
+    it = s.__aiter__()
+    assert await it.__anext__() == 0
+    assert s.pending_indices() == (1,)

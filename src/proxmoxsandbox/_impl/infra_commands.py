@@ -196,30 +196,24 @@ class InfraCommands(abc.ABC):
         created: Dict[int, Tuple[int, VmConfig]] = {}
         readiness_tasks: List[asyncio.Task[None]] = []
         try:
-            while not scheduler.all_ready:
-                index = scheduler.next_creatable()
-                if index is not None:
-                    vm_id = await self._create_vm(
-                        index, vms_config, labels, vnet_aliases, known_builtins
-                    )
-                    created[index] = (vm_id, vms_config[index])
-                    scheduler.mark_created(index)
-                    readiness_tasks.append(
-                        asyncio.create_task(
-                            self._await_vm_ready(
-                                scheduler,
-                                index,
-                                vm_id,
-                                vms_config[index],
-                                f"{labels[index]} (ID={vm_id})",
-                            )
+            # Yields each VM once its dependencies are ready; blocks in between;
+            # ends once every VM is ready. Readiness failures raise out of it.
+            async for index in scheduler:
+                vm_id = await self._create_vm(
+                    index, vms_config, labels, vnet_aliases, known_builtins
+                )
+                created[index] = (vm_id, vms_config[index])
+                readiness_tasks.append(
+                    asyncio.create_task(
+                        self._await_vm_ready(
+                            scheduler,
+                            index,
+                            vm_id,
+                            vms_config[index],
+                            f"{labels[index]} (ID={vm_id})",
                         )
                     )
-                    continue
-
-                # Nothing creatable right now: either blocked on a dependency
-                # that is still booting, or (once all are created) just draining.
-                await scheduler.wait_for_progress()
+                )
         finally:
             for task in readiness_tasks:
                 task.cancel()
