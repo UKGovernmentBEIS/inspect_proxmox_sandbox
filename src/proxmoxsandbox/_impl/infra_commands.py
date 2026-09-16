@@ -196,40 +196,41 @@ class InfraCommands(abc.ABC):
         created: Dict[int, Tuple[int, VmConfig]] = {}
         readiness_tasks: List[asyncio.Task[None]] = []
         try:
-            while not scheduler.all_created:
+            while not scheduler.all_ready:
                 index = scheduler.next_creatable()
-                if index is None:
-                    if all(task.done() for task in readiness_tasks):
-                        # Nothing creatable and nothing in flight: unsatisfiable
-                        # graph, which config validation should have rejected.
-                        pending = ", ".join(
-                            labels[i] for i in scheduler.pending_indices()
-                        )
-                        raise RuntimeError(
-                            f"VM startup cannot make progress; still pending: {pending}"
-                        )
-                    self._log_blocked(scheduler, labels)
-                    await scheduler.wait_for_progress()
-                    continue
-
-                vm_id = await self._create_vm(
-                    index, vms_config, labels, vnet_aliases, known_builtins
-                )
-                created[index] = (vm_id, vms_config[index])
-                scheduler.mark_created(index)
-                readiness_tasks.append(
-                    asyncio.create_task(
-                        self._await_vm_ready(
-                            scheduler,
-                            index,
-                            vm_id,
-                            vms_config[index],
-                            f"{labels[index]} (ID={vm_id})",
+                if index is not None:
+                    vm_id = await self._create_vm(
+                        index, vms_config, labels, vnet_aliases, known_builtins
+                    )
+                    created[index] = (vm_id, vms_config[index])
+                    scheduler.mark_created(index)
+                    readiness_tasks.append(
+                        asyncio.create_task(
+                            self._await_vm_ready(
+                                scheduler,
+                                index,
+                                vm_id,
+                                vms_config[index],
+                                f"{labels[index]} (ID={vm_id})",
+                            )
                         )
                     )
-                )
+                    continue
 
-            while not scheduler.all_ready:
+                # Nothing creatable right now: either blocked on a dependency
+                # that is still booting, or (once all are created) just draining.
+                nothing_in_flight = all(task.done() for task in readiness_tasks)
+                if (
+                    not scheduler.all_created
+                    and nothing_in_flight
+                    and not scheduler.failed
+                ):
+                    # Unsatisfiable graph, which config validation should have rejected.
+                    pending = ", ".join(labels[i] for i in scheduler.pending_indices())
+                    raise RuntimeError(
+                        f"VM startup cannot make progress; still pending: {pending}"
+                    )
+                self._log_blocked(scheduler, labels)
                 await scheduler.wait_for_progress()
         finally:
             for task in readiness_tasks:

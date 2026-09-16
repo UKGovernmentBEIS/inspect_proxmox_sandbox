@@ -54,6 +54,11 @@ class VmScheduler:
             raise self._failure
 
     @property
+    def failed(self) -> bool:
+        """Whether any readiness task has reported a failure."""
+        return self._failure is not None
+
+    @property
     def all_created(self) -> bool:
         return len(self._created) == self._count
 

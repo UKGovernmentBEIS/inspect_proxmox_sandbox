@@ -135,3 +135,10 @@ def test_all_ready():
     assert not s.all_ready
     s.mark_ready(1)
     assert s.all_ready
+
+
+def test_failed_reflects_mark_failed():
+    s = VmScheduler(edges=(), count=1)
+    assert not s.failed
+    s.mark_failed(0, RuntimeError("boom"))
+    assert s.failed
