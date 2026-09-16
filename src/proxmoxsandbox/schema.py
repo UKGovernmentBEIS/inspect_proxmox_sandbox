@@ -13,6 +13,7 @@ from typing import (
     NamedTuple,
     Optional,
     Sequence,
+    Set,
     Tuple,
     TypeAlias,
     Union,
@@ -469,12 +470,16 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
         ]
         edges: List[DependencyEdge] = []
         for i, vm in enumerate(self.vms_config):
-            explicit = {index_of[dep] for dep in vm.depends_on}
-            edges.extend(DependencyEdge(i, j, "depends_on") for j in explicit)
+            # index_of[dep] always resolves: unknown names are rejected by
+            # _validate_dependencies before this is called.
+            explicit_dependencies = {index_of[dep] for dep in vm.depends_on}
+            edges.extend(
+                DependencyEdge(i, j, "depends_on") for j in explicit_dependencies
+            )
             edges.extend(
                 DependencyEdge(i, j, "await_before_next_vm")
                 for j in barriers
-                if j < i and j not in explicit
+                if j < i and j not in explicit_dependencies
             )
         return tuple(edges)
 
@@ -528,25 +533,34 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
         for edge in edges:
             adjacency[edge.dependant].append(edge)
 
-        white, grey, black = 0, 1, 2
-        colour: Dict[int, int] = defaultdict(int)
+        # We have a set of unvisited nodes, a set of on-path nodes, and a stack of
+        # the edges making up the current path. If following an edge leads to a
+        # node already in the on_path set we have found a loop.
+        # Otherwise, visiting a node removes it from unvisited and adds it to
+        # on_path. We then visit all its dependencies. If we haven't found a cycle
+        # we can remove it from on_path. Nodes which are in neither on_path nor
+        # unvisited are confirmed not to be part of a loop so can be skipped.
+        # After one pass, any nodes still in unvisited are from disconnected or
+        # higher parts of the graph, so just need to be iterated through.
+        unvisited = set(range(len(self.vms_config)))
+        on_path: Set[int] = set()
         path: List[DependencyEdge] = []
 
         def visit(node: int) -> None:
-            colour[node] = grey
+            unvisited.discard(node)
+            on_path.add(node)
             for edge in adjacency[node]:
                 path.append(edge)
-                if colour[edge.dependency] == grey:
+                if edge.dependency in on_path:
                     start = next(
                         k for k, e in enumerate(path) if e.dependant == edge.dependency
                     )
                     cycle = " -> ".join(e.describe(labels) for e in path[start:])
                     raise ValueError(f"VM dependency cycle: {cycle}")
-                if colour[edge.dependency] == white:
+                if edge.dependency in unvisited:
                     visit(edge.dependency)
                 path.pop()
-            colour[node] = black
+            on_path.remove(node)
 
-        for node in range(len(self.vms_config)):
-            if colour[node] == white:
-                visit(node)
+        while unvisited:
+            visit(unvisited.pop())
