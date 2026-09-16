@@ -137,8 +137,23 @@ def test_all_ready():
     assert s.all_ready
 
 
-def test_failed_reflects_mark_failed():
-    s = VmScheduler(edges=(), count=1)
-    assert not s.failed
-    s.mark_failed(0, RuntimeError("boom"))
-    assert s.failed
+def test_in_flight_counts_created_but_unresolved_vms():
+    s = VmScheduler(edges=(), count=3)
+    _drain(s)
+    assert s.in_flight == 3
+    s.mark_ready(0)
+    s.mark_failed(1, RuntimeError("boom"))
+    assert s.in_flight == 1
+
+
+async def test_wait_for_progress_raises_if_nothing_can_signal():
+    """Nothing in flight and nothing already signalled means a hang; fail instead."""
+    s = VmScheduler(edges=(DependencyEdge(1, 0, "depends_on"),), count=2)
+    _drain(s)
+    s.mark_ready(0)
+    await s.wait_for_progress()  # consumes the signal
+    _drain(s)
+    s.mark_ready(1)
+    await s.wait_for_progress()
+    with pytest.raises(RuntimeError, match="nothing can make progress"):
+        await s.wait_for_progress()

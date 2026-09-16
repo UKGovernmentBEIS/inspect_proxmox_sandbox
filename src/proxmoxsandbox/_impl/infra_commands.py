@@ -219,17 +219,6 @@ class InfraCommands(abc.ABC):
 
                 # Nothing creatable right now: either blocked on a dependency
                 # that is still booting, or (once all are created) just draining.
-                nothing_in_flight = all(task.done() for task in readiness_tasks)
-                if (
-                    not scheduler.all_created
-                    and nothing_in_flight
-                    and not scheduler.failed
-                ):
-                    # Unsatisfiable graph, which config validation should have rejected.
-                    pending = ", ".join(labels[i] for i in scheduler.pending_indices())
-                    raise RuntimeError(
-                        f"VM startup cannot make progress; still pending: {pending}"
-                    )
                 self._log_blocked(scheduler, labels)
                 await scheduler.wait_for_progress()
         finally:

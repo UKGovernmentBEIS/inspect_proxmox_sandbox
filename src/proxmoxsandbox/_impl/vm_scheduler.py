@@ -28,6 +28,7 @@ class VmScheduler:
             self._dependencies[edge.dependant].add(edge.dependency)
         self._created: Set[int] = set()
         self._ready: Set[int] = set()
+        self._failed: Set[int] = set()
         self._failure: BaseException | None = None
         self._changed = asyncio.Event()
 
@@ -42,21 +43,32 @@ class VmScheduler:
 
     def mark_failed(self, index: int, exc: BaseException) -> None:
         """Readiness task: the VM will never be ready. First failure wins."""
+        self._failed.add(index)
         if self._failure is None:
             self._failure = exc
         self._changed.set()
 
     async def wait_for_progress(self) -> None:
-        """Block until a readiness task reports; re-raise if any VM failed."""
+        """Block until a readiness task reports; re-raise if any VM failed.
+
+        If nothing is in flight and nothing has signalled, no task can ever
+        wake us: that is an unsatisfiable graph (which config validation should
+        have rejected), so raise rather than hang the sample.
+        """
+        if not self._changed.is_set() and not self.in_flight:
+            raise RuntimeError(
+                "VM startup cannot make progress: no VM is in flight, so nothing "
+                f"can make progress; still pending: {self.pending_indices()}"
+            )
         await self._changed.wait()
         self._changed.clear()
         if self._failure is not None:
             raise self._failure
 
     @property
-    def failed(self) -> bool:
-        """Whether any readiness task has reported a failure."""
-        return self._failure is not None
+    def in_flight(self) -> int:
+        """VMs created whose readiness task has not yet reported either way."""
+        return len(self._created - self._ready - self._failed)
 
     @property
     def all_created(self) -> bool:
