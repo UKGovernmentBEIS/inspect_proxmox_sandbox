@@ -10,7 +10,7 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 | `run-on-host.sh`        | Run a single shell command on the host via SSM `send-command`. 60s default timeout.                       |
 | `run-script-on-host.sh` | Upload + run a local script on the host via SSM. 10 min timeout.                                          |
 | `create-test-vm.sh`     | Run *on the host* (via `run-script-on-host.sh`) to bring up an Ubuntu 24.04 cloud VM in an SDN zone and verify DNS + HTTPS. |
-| `check-host-isolation.sh` | Run *on the host* to check the isolation **mechanism** from `userdata.sh`: units installed, enabled and last run OK (guards against stale AMIs), plus the rules they install. |
+| `check-host-isolation.sh` | Run *on the host* to check the isolation **mechanism** from `userdata.sh`: units installed, enabled and last run OK, plus the rules they install. Refuses to run at all against a host older than the `.aisi<N>` contract it expects, rather than reporting the difference as failed checks. |
 | `check-guest-isolation.sh` | Run *inside a Linux guest* to check the **effect**: what the guest can actually reach. |
 
 ## Isolation checks

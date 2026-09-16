@@ -198,8 +198,11 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
 
 EOFPATCH
 
-# Mark version to indicate patching
-sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
+# Stamps the host contract into the version_info hash pvecfg.pm serves on GET /version, so a
+# caller can tell what this image provides. Bump when a host-side file something off-host
+# asserts changes — aisi2 is the lockdown rewriting the node's port-53 rules. Only matches an
+# unsuffixed version, so a built host can't be bumped in place; rebuild the image.
+sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi2',/" /usr/share/perl5/PVE/pvecfg.pm
 
 # --- DNS forwarding for SDN dnsmasq instances ---
 # PVE launches per-zone dnsmasq with -r /run/dnsmasq/resolv.conf for upstream DNS.

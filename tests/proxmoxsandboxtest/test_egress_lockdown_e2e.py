@@ -17,12 +17,13 @@ import re
 
 import pytest
 
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
 
-from .proxmox_sandbox_utils import setup_sandbox
+from .proxmox_sandbox_utils import require_host_contract, setup_sandbox
 
 pytestmark = [
     pytest.mark.req_proxmox,
@@ -93,8 +94,14 @@ async def _dns_probe(env: ProxmoxSandboxEnvironment, server: str, name: str) -> 
     return output
 
 
-async def test_locked_down_host_denies_guest_egress_and_dns() -> None:
+async def test_locked_down_host_denies_guest_egress_and_dns(
+    async_proxmox_api: AsyncProxmoxAPI,
+) -> None:
     """A guest keeps its DHCP lease, has no egress, and DNS fails fast."""
+    # The port-53 rejection below arrived with aisi2, so an older host fails these for a
+    # reason that is not a lapse in isolation.
+    await require_host_contract(async_proxmox_api)
+
     task_name = "test_egress_lockdown_e2e"
     config = ProxmoxSandboxEnvironmentConfig()
 

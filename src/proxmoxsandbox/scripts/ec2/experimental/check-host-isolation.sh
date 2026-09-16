@@ -78,6 +78,23 @@ node=$(hostname)
 marker=/etc/inspect-proxmox-egress-lockdown
 echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev/null | head -1)"
 
+# The contract stamped by ../userdata.sh. Read from the API, not pveversion: the stamp sits in
+# pvecfg.pm's version_info hash, and pveversion prints version_text, which it doesn't touch.
+WANT_CONTRACT=2
+contract=$(pvesh get /version --output-format json 2>/dev/null | jq -r '.version // ""' 2>/dev/null)
+case "$contract" in
+    *.aisi[0-9]*) contract=${contract##*.aisi} ;;
+    *) contract=0 ;;
+esac
+if ! [ "$contract" -ge "$WANT_CONTRACT" ] 2>/dev/null; then
+    echo
+    echo "host contract aisi${contract:-0}, need aisi$WANT_CONTRACT: the checks below assert"
+    echo "behaviour this host does not have. Rebuild the AMI from scripts/ec2/userdata.sh."
+    echo "An upgrade of pve-manager replaces pvecfg.pm, so a host built from this commit and"
+    echo "upgraded since reports aisi0 too."
+    exit 2
+fi
+
 echo
 echo "# units (stale-AMI guard)"
 chk "host firewall unit: proxmox-ami-fixup-firewall.service" unit_ok proxmox-ami-fixup-firewall.service
