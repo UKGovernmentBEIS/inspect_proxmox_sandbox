@@ -8,7 +8,7 @@ until one of them does. The scheduler does no I/O of its own.
 """
 
 import asyncio
-from typing import Dict, Sequence, Set, Tuple
+from typing import AsyncIterator, Dict, Sequence, Set, Tuple
 
 from proxmoxsandbox.schema import DependencyEdge
 
@@ -32,11 +32,8 @@ class VmScheduler:
         self._failure: BaseException | None = None
         self._changed = asyncio.Event()
 
-    def __aiter__(self) -> "VmScheduler":
-        return self
-
-    async def __anext__(self) -> int:
-        """Yield the next creatable index, waiting for readiness as needed.
+    async def __aiter__(self) -> AsyncIterator[int]:
+        """Yield each index as it becomes creatable, waiting in between.
 
         The yielded index is marked created as it is handed out. Iteration
         ends only once every VM is ready, so the same loop that creates VMs
@@ -45,11 +42,11 @@ class VmScheduler:
         """
         while not self.all_ready:
             index = self.next_creatable()
-            if index is not None:
+            if index is None:
+                await self.wait_for_progress()
+            else:
                 self.mark_created(index)
-                return index
-            await self.wait_for_progress()
-        raise StopAsyncIteration
+                yield index
 
     def mark_created(self, index: int) -> None:
         """The VM has been (or is being) cloned and started."""
