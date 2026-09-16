@@ -219,7 +219,6 @@ class InfraCommands(abc.ABC):
 
                 # Nothing creatable right now: either blocked on a dependency
                 # that is still booting, or (once all are created) just draining.
-                self._log_blocked(scheduler, labels)
                 await scheduler.wait_for_progress()
         finally:
             for task in readiness_tasks:
@@ -251,14 +250,6 @@ class InfraCommands(abc.ABC):
             )
             self.qemu_commands.register_vm(vm_id)
         return vm_id
-
-    def _log_blocked(self, scheduler: VmScheduler, labels: Sequence[str]) -> None:
-        for index in scheduler.pending_indices():
-            blocking = scheduler.blocking_dependencies(index)
-            self.logger.debug(
-                f"VM {labels[index]} waiting for: "
-                f"{', '.join(labels[b] for b in blocking)}"
-            )
 
     async def _await_vm_ready(
         self,
