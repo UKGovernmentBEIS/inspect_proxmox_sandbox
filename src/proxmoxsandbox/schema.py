@@ -425,46 +425,6 @@ def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
     return ()
 
 
-def vm_labels(vms_config: Sequence[VmConfig]) -> Tuple[str, ...]:
-    """Labels for error messages; unnamed VMs are identified by position."""
-    return tuple(
-        repr(vm.name) if vm.name is not None else f"vms_config[{i}]"
-        for i, vm in enumerate(vms_config)
-    )
-
-
-def _name_index(vms_config: Sequence[VmConfig]) -> Dict[str, int]:
-    """Index of each named VM. Names are validated (unique, non-empty) first."""
-    return {vm.name: i for i, vm in enumerate(vms_config) if vm.name is not None}
-
-
-def dependency_edges(vms_config: Sequence[VmConfig]) -> Tuple[DependencyEdge, ...]:
-    """Collect all dependency edges.
-
-    This is explicit depends_on edges unioned with those implied by
-    await_before_next_vm. We collect an origin (named edge or await_before_next_vm)
-    for use in reporting errors (like cycles).
-
-    Deduplicated on (dependant, dependency), preferring the explicit origin so
-    error messages quote what the user actually wrote. Assumes names have
-    already been validated as unique and resolvable.
-    """
-    index_of = _name_index(vms_config)
-    barriers = [i for i, vm in enumerate(vms_config) if vm.await_before_next_vm]
-    edges: List[DependencyEdge] = []
-    for i, vm in enumerate(vms_config):
-        # index_of[dep] always resolves: unknown names are rejected by
-        # _validate_dependencies before this is called.
-        explicit_dependencies = {index_of[dep] for dep in vm.depends_on}
-        edges.extend(DependencyEdge(i, j, "depends_on") for j in explicit_dependencies)
-        edges.extend(
-            DependencyEdge(i, j, "await_before_next_vm")
-            for j in barriers
-            if j < i and j not in explicit_dependencies
-        )
-    return tuple(edges)
-
-
 class ProxmoxSandboxEnvironmentConfig(BaseModel):
     """
     Configuration for a Proxmox sandbox environment.
@@ -488,12 +448,46 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     )
 
     def vm_labels(self) -> Tuple[str, ...]:
-        """See `vm_labels`."""
-        return vm_labels(self.vms_config)
+        """Labels for error messages; unnamed VMs are identified by position."""
+        return tuple(
+            repr(vm.name) if vm.name is not None else f"vms_config[{i}]"
+            for i, vm in enumerate(self.vms_config)
+        )
 
     def dependency_edges(self) -> Tuple[DependencyEdge, ...]:
-        """See `dependency_edges`."""
-        return dependency_edges(self.vms_config)
+        """Collect all dependency edges.
+
+        This is explicit depends_on edges unioned with those implied by
+        await_before_next_vm. We collect an origin (named edge or await_before_next_vm)
+        for use in reporting errors (like cycles).
+
+        Deduplicated on (dependant, dependency), preferring the explicit origin so
+        error messages quote what the user actually wrote. Assumes names have
+        already been validated as unique and resolvable.
+        """
+        index_of = self._name_index()
+        barriers = [
+            i for i, vm in enumerate(self.vms_config) if vm.await_before_next_vm
+        ]
+        edges: List[DependencyEdge] = []
+        for i, vm in enumerate(self.vms_config):
+            # index_of[dep] always resolves: unknown names are rejected by
+            # _validate_dependencies before this is called.
+            explicit_dependencies = {index_of[dep] for dep in vm.depends_on}
+            edges.extend(
+                DependencyEdge(i, j, "depends_on") for j in explicit_dependencies
+            )
+            edges.extend(
+                DependencyEdge(i, j, "await_before_next_vm")
+                for j in barriers
+                if j < i and j not in explicit_dependencies
+            )
+        return tuple(edges)
+
+    def _name_index(self) -> Dict[str, int]:
+        return {
+            vm.name: i for i, vm in enumerate(self.vms_config) if vm.name is not None
+        }
 
     @model_validator(mode="after")
     def _validate_vm_names(self) -> "ProxmoxSandboxEnvironmentConfig":
@@ -523,7 +517,7 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_dependencies(self) -> "ProxmoxSandboxEnvironmentConfig":
         labels = self.vm_labels()
-        named = _name_index(self.vms_config)
+        named = self._name_index()
         unnamed = len(self.vms_config) - len(named)
 
         for i, vm in enumerate(self.vms_config):
@@ -555,6 +549,15 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
         for edge in edges:
             adjacency[edge.dependant].append(edge)
 
+        # We have a set of unvisited nodes, a set of on-path nodes, and a stack of
+        # the edges making up the current path. If following an edge leads to a
+        # node already in the on_path set we have found a loop.
+        # Otherwise, visiting a node removes it from unvisited and adds it to
+        # on_path. We then visit all its dependencies. If we haven't found a cycle
+        # we can remove it from on_path. Nodes which are in neither on_path nor
+        # unvisited are confirmed not to be part of a loop so can be skipped.
+        # After one pass, any nodes still in unvisited are from disconnected or
+        # higher parts of the graph, so just need to be iterated through.
         unvisited = set(range(len(self.vms_config)))
         on_path: Set[int] = set()
         path: List[DependencyEdge] = []

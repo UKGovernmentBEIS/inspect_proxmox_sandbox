@@ -106,10 +106,15 @@ class Harness:
         self.infra = infra
 
     def start(self) -> "asyncio.Task":
-        # Validates names/dependencies the way sample_init would.
-        ProxmoxSandboxEnvironmentConfig(vms_config=self.vms)
+        config = ProxmoxSandboxEnvironmentConfig(vms_config=self.vms)
         return asyncio.create_task(
-            self.infra.create_sdn_and_vms("abc", sdn_config=None, vms_config=self.vms)
+            self.infra.create_sdn_and_vms(
+                "abc",
+                sdn_config=None,
+                vms_config=self.vms,
+                dependency_edges=config.dependency_edges(),
+                labels=config.vm_labels(),
+            )
         )
 
     def created(self) -> List[str]:

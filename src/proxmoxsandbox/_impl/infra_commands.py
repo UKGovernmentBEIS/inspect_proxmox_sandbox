@@ -25,11 +25,10 @@ from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._impl.vm_scheduler import VmScheduler
 from proxmoxsandbox.schema import (
+    DependencyEdge,
     HealthCheck,
     SdnConfigType,
     VmConfig,
-    dependency_edges,
-    vm_labels,
 )
 
 
@@ -142,10 +141,15 @@ class InfraCommands(abc.ABC):
         proxmox_ids_start: str,
         sdn_config: SdnConfigType,
         vms_config: Tuple[VmConfig, ...],
+        dependency_edges: Sequence[DependencyEdge],
+        labels: Sequence[str],
     ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
         """Create the SDN, then create/start VMs in dependency order.
 
-        Results are in `vms_config` order regardless of the order VMs were created in.
+        `dependency_edges` and `labels` normally come from
+        `ProxmoxSandboxEnvironmentConfig.dependency_edges()` / `vm_labels()`.
+        Results are in `vms_config` order regardless of the order VMs were
+        created in.
         """
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config
@@ -167,7 +171,7 @@ class InfraCommands(abc.ABC):
             ipam_mappings.extend(per_vm_ipam_mappings)
 
         vm_configs_with_ids = await self._start_vms_in_dependency_order(
-            vms_config, vnet_aliases, known_builtins
+            vms_config, dependency_edges, labels, vnet_aliases, known_builtins
         )
 
         return vm_configs_with_ids, sdn_zone_id, tuple(ipam_mappings)
@@ -175,6 +179,8 @@ class InfraCommands(abc.ABC):
     async def _start_vms_in_dependency_order(
         self,
         vms_config: Tuple[VmConfig, ...],
+        dependency_edges: Sequence[DependencyEdge],
+        labels: Sequence[str],
         vnet_aliases: VnetAliases,
         known_builtins: Dict[str, int],
     ) -> Tuple[Tuple[int, VmConfig], ...]:
@@ -185,8 +191,7 @@ class InfraCommands(abc.ABC):
         task state. Only the readiness waits for already-started VMs overlap.
         Returns (vm_id, config) pairs in `vms_config` order.
         """
-        scheduler = VmScheduler(dependency_edges(vms_config), len(vms_config))
-        labels = vm_labels(vms_config)
+        scheduler = VmScheduler(dependency_edges, len(vms_config))
         created: Dict[int, Tuple[int, VmConfig]] = {}
         readiness_tasks: List[asyncio.Task[None]] = []
         try:
