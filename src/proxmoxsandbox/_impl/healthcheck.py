@@ -21,8 +21,7 @@ logger = getLogger(__name__)
 # Consecutive guest-agent transport failures tolerated before giving up. These
 # do not count towards `HealthCheck.retries`: a flaky QGA channel (Windows
 # drops a few percent of calls) must not masquerade as a failing service.
-# This is the only transport retry budget: the executor's AgentCommands is built
-# with qga_max_retries=1, so each probe costs one round trip plus `interval`.
+# The only transport retry budget: the executor's AgentCommands does not retry.
 _TRANSPORT_ERROR_LIMIT = 25
 
 HealthCheckExecutor = Callable[[HealthCheck], Awaitable[ExecResult[str]]]
@@ -37,9 +36,8 @@ class Probe:
     """Result of one healthcheck attempt, with exceptions already classified.
 
     healthy:     the command exited 0.
-    unhealthy:   it exited non-zero, timed out in the guest, was not
-                 executable, or produced too much output (counts as a failed
-                 attempt, as in compose).
+    unhealthy:   it exited non-zero or timed out in the guest (counts as a
+                 failed attempt, as in compose).
     unreachable: the guest agent could not be reached; the service's state is
                  unknown, so this does not count as a failed attempt.
     """
@@ -101,8 +99,6 @@ class HealthCheckRunner:
 
             # unhealthy: the guest answered, so the transport streak is over.
             transport_errors = 0
-            # Measured from when the probe started, as compose does, so a slow
-            # probe cannot push its own attempt out of the grace window.
             if probe_started - start < self.spec.start_period:
                 logger.debug(
                     f"{self.label}: healthcheck attempt {attempt} failed "

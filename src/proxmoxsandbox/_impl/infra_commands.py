@@ -145,8 +145,7 @@ class InfraCommands(abc.ABC):
     ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
         """Create the SDN, then create/start VMs in dependency order.
 
-        Results are in `vms_config` order regardless of the order VMs were
-        created in.
+        Results are in `vms_config` order regardless of the order VMs were created in.
         """
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, sdn_config
@@ -276,12 +275,11 @@ class InfraCommands(abc.ABC):
         """Run healthcheck commands through the sandbox's exec wrapper.
 
         This reuses the Linux/Windows command scripts (guest-side timeout,
-        result files) rather than raw agent/exec, so a healthcheck behaves like
-        sandbox().exec() would for the same command. QGA retry is left to
-        HealthCheckRunner, hence qga_max_retries=1.
+        result files) rather than raw agent/exec, so a healthcheck behaves
+        exactly like sandbox().exec() would for the same command. QGA retry is
+        HealthCheckRunner's job, hence qga_max_retries=1.
         """
-        # Imported here: the environment module imports this one. The exec
-        # wrapper should move out of the environment class; see
+        # Imported here: the environment module imports this one.
         # https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/issues/132
         from proxmoxsandbox._impl.agent_commands import AgentCommands
         from proxmoxsandbox._proxmox_sandbox_environment import (

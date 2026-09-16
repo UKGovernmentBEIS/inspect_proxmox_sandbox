@@ -65,8 +65,6 @@ class AgentCommands:
         *,
         qga_max_retries: int = _QGA_MAX_RETRIES,
     ):
-        # qga_max_retries=1 disables retrying; the healthcheck runner passes 1
-        # so its own retry budget and this one don't multiply.
         self.async_proxmox = async_proxmox
         self.node = node
         self._qga_max_retries = qga_max_retries

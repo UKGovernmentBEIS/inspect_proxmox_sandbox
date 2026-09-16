@@ -426,7 +426,7 @@ def _load_instances_from_env_or_file() -> Tuple[ProxmoxInstanceConfig, ...]:
 
 
 def vm_labels(vms_config: Sequence[VmConfig]) -> Tuple[str, ...]:
-    """Labels for log lines and errors; unnamed VMs are identified by position."""
+    """Labels for error messages; unnamed VMs are identified by position."""
     return tuple(
         repr(vm.name) if vm.name is not None else f"vms_config[{i}]"
         for i, vm in enumerate(vms_config)

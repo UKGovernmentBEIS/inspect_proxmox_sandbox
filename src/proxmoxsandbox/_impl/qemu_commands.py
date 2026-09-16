@@ -20,10 +20,8 @@ from proxmoxsandbox.schema import VmConfig
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
-# Uncapped, the backoff reaches 30-50 s gaps after ~70 s, which is what a slow
-# (Windows) guest pays on top of its boot time. agent/ping blocks ~3 s in PVE
-# while the agent is down and returns as soon as it connects, so a short cap
-# costs little on the host side.
+# Uncapped, the backoff reaches 30-50 s gaps after ~70 s; slow (Windows) guests
+# paid that on top of their boot time.
 _POLL_MAX_WAIT = 5.0
 _POLL_WAIT = tenacity.wait_exponential(min=0.1, max=_POLL_MAX_WAIT, exp_base=1.3)
 
@@ -340,7 +338,6 @@ class QemuCommands(abc.ABC):
         vm_config: VmConfig,
         built_in_vm_ids: Dict[str, int],
     ) -> int:
-        """Clone, configure and start a VM; the caller awaits its readiness."""
         if (
             vm_config.os_type != "l26"
             and vm_config.vm_source_config.ova is None
