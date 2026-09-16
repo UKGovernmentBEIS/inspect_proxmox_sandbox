@@ -405,10 +405,12 @@ chmod +x /usr/local/bin/inspect-proxmox-egress-lockdown.sh
 cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.service << 'EGRESS_LOCKDOWN_UNIT'
 [Unit]
 Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-proxmox-egress-lockdown)
-# pvedaemon serves the API that pvesh calls; without it the port-53 rewrite fails, and its
-# failure is fatal under the marker.
-After=network-online.target pve-firewall.service proxmox-firewall.service pvedaemon.service
-Wants=network-online.target pvedaemon.service
+# pvesh talks to pmxcfs, not pvedaemon: without pve-cluster every rule read is ipcc_send_rec.
+# After the firewall fixup because both rewrite the node rules, and a delete renumbers the
+# positions the other is midway through using ("no rule at position 2").
+After=network-online.target pve-firewall.service proxmox-firewall.service pve-cluster.service
+After=proxmox-ami-fixup-firewall.service
+Wants=network-online.target pve-cluster.service
 OnFailure=inspect-proxmox-egress-lockdown-halt.service
 # OnFailure masks the API, so only the script's own verdict may fire it. Without the two
 # settings below, a concurrent restart (TERM mid-run) or 5 starts in 10s masks a locked host.
