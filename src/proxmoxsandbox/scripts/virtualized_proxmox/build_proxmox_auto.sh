@@ -410,10 +410,14 @@ Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-p
 After=network-online.target pve-firewall.service proxmox-firewall.service pvedaemon.service
 Wants=network-online.target pvedaemon.service
 OnFailure=inspect-proxmox-egress-lockdown-halt.service
+# OnFailure masks the API, so only the script's own verdict may fire it. Without the two
+# settings below, a concurrent restart (TERM mid-run) or 5 starts in 10s masks a locked host.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
+SuccessExitStatus=SIGTERM
 
 [Install]
 WantedBy=multi-user.target

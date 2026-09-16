@@ -35,6 +35,15 @@ skip() { echo "SKIP  $1 ($2)"; }
 unit_ok() { systemctl is-enabled -q "$1" && [ "$(systemctl show -p Result --value "$1")" = success ]; }
 pvefw_running() { pve-firewall status | grep -q enabled/running; }
 on_failure_is() { [ "$(systemctl show -p OnFailure --value "$1")" = "$2" ]; }
+unit_prop_is() { # unit, then property/value pairs
+    local unit=$1 got
+    shift
+    while [ $# -ge 2 ]; do
+        got=$(systemctl show -p "$1" --value "$unit")
+        [ "$got" = "$2" ] || { echo "$1 is ${got:-<unset>}, want $2"; return 1; }
+        shift 2
+    done
+}
 not_masked() {
     local unit
     for unit in "$@"; do
@@ -108,6 +117,11 @@ chk "egress lockdown fails deadly: OnFailure=inspect-proxmox-egress-lockdown-hal
 # Masked means the halt unit fired at some point, so the rules can look right now even
 # though a lockdown run failed earlier.
 chk "Proxmox API not masked by the halt unit: pveproxy, pvedaemon" not_masked pveproxy.service pvedaemon.service
+# Without these two, systemd scores a concurrent restart or a burst of starts as a unit
+# failure, and the halt unit masks the API on a host whose lockdown is applied correctly.
+chk "halt unit fires only on the lockdown's own verdict: SuccessExitStatus, StartLimitIntervalUSec" \
+    unit_prop_is inspect-proxmox-egress-lockdown.service SuccessExitStatus TERM \
+    StartLimitIntervalUSec 0
 
 echo
 echo "# forwarding rules and kernel state"
