@@ -48,6 +48,22 @@ class VmScheduler:
                 self._mark_created(index)
                 yield index
 
+    # Called from each VM's readiness task, concurrently with the iteration above.
+
+    def mark_ready(self, index: int) -> None:
+        """Readiness task: the VM passed its preconditions and healthcheck."""
+        self._ready.add(index)
+        self._changed.set()
+
+    def mark_failed(self, index: int, exc: BaseException) -> None:
+        """Readiness task: the VM will never be ready. First failure wins."""
+        self._failed.add(index)
+        if self._failure is None:
+            self._failure = exc
+        self._changed.set()
+
+    # Internals, in the order __aiter__ calls them.
+
     @property
     def _all_ready(self) -> bool:
         return len(self._ready) == self._count
@@ -92,17 +108,3 @@ class VmScheduler:
     def _pending_indices(self) -> Tuple[int, ...]:
         """VMs not yet created, in tuple order."""
         return tuple(i for i in range(self._count) if i not in self._created)
-
-    # Called from each VM's readiness task, concurrently with the iteration above.
-
-    def mark_ready(self, index: int) -> None:
-        """Readiness task: the VM passed its preconditions and healthcheck."""
-        self._ready.add(index)
-        self._changed.set()
-
-    def mark_failed(self, index: int, exc: BaseException) -> None:
-        """Readiness task: the VM will never be ready. First failure wins."""
-        self._failed.add(index)
-        if self._failure is None:
-            self._failure = exc
-        self._changed.set()
