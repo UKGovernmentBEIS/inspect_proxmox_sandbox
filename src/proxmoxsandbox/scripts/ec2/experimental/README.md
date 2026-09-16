@@ -12,6 +12,7 @@ needed for the build-AMI / launch-from-AMI workflow in the parent README.
 | `create-test-vm.sh`     | Run *on the host* (via `run-script-on-host.sh`) to bring up an Ubuntu 24.04 cloud VM in an SDN zone and verify DNS + HTTPS. |
 | `check-host-isolation.sh` | Run *on the host* to check the isolation **mechanism** from `userdata.sh`: units installed, enabled and last run OK, plus the rules they install. Refuses to run at all against a host older than the `.aisi<N>` contract it expects, rather than reporting the difference as failed checks. |
 | `check-guest-isolation.sh` | Run *inside a Linux guest* to check the **effect**: what the guest can actually reach. |
+| `scenarios-host-isolation.sh` | Run *on the host* to drive it **between** states — arm and disarm the marker, re-run the unit, unstamp the contract — and check what it does on the way. |
 
 ## Isolation checks
 
@@ -43,6 +44,29 @@ interface endpoint, a host across a peering link; the port defaults to 443, and
 an IPv6 literal needs brackets to carry one (`[fd00::1]:8443`). Both are
 site-specific, so nothing is hardcoded: with no `--host-addr` the guest's
 default gateway stands in for the host, and the `--unreachable` probes `SKIP`.
+
+## Transition scenarios
+
+`check-host-isolation.sh` asserts a state. `scenarios-host-isolation.sh` changes
+the state and asserts the behaviour: that removing the marker reopens port 53
+within the timer's minute, that re-running the unit is a no-op, that an
+unstamped `pvecfg.pm` makes the check script refuse to run. It picks its
+scenarios from the host's current marker state, so run it on a host launched
+locked down *and* on one launched open — each is the other's negative control.
+It restores the marker, the stamp and any masked unit on exit.
+
+```bash
+./run-script-on-host.sh <instance-id> scenarios-host-isolation.sh
+```
+
+Two scenarios are opt-in because they break the host. `--fail-deadly` stops
+`pve-cluster`, so every `pvesh` call fails, and starts the lockdown with and
+without the marker: only the marked run trips `OnFailure` and masks the API. It
+then checks the other direction — that a run killed mid-flight, or a burst of
+restarts, does *not* trip it. Everything is unmasked afterwards.
+`--arm-ordering-test` delays `pve-cluster` by 45s, arms the marker and reboots —
+the only way to exercise `After=pve-cluster.service`, since that ordering does
+nothing outside boot. Re-run with `--check-ordering-test` once it is back.
 
 For a CVE scan of the baked AMI, get the inventory separately:
 
