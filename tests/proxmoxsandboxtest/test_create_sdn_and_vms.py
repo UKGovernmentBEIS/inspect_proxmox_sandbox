@@ -148,8 +148,8 @@ async def test_ipam_mappings_created_for_all_vms_before_first_create():
     await task
 
 
-async def test_await_before_next_vm_blocks_later_creates():
-    h = _harness(_vm("a", await_before_next_vm=True), _vm("b"), _vm("c"))
+async def test_shared_dependency_blocks_later_creates():
+    h = _harness(_vm("a"), _vm("b", depends_on=("a",)), _vm("c", depends_on=("a",)))
     task = h.start()
     await _settle()
     assert h.created() == ["a"]

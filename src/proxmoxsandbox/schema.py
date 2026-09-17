@@ -8,7 +8,7 @@ from typing import (
     Annotated,
     Any,
     Dict,
-    List,
+    FrozenSet,
     Literal,
     Optional,
     Tuple,
@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
 
-from proxmoxsandbox._impl.dependency_graph import DependencyEdge, reject_cycles
+from proxmoxsandbox._impl.dependency_graph import reject_cycles
 
 
 class DhcpRange(BaseModel, frozen=True):
@@ -252,17 +252,13 @@ class VmConfig(BaseModel, frozen=True):
         cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
             defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
             panic on nested virtualization with "host"; use "qemu64" for those.
-        await_before_next_vm: if True, every later VM in vms_config waits for this
-            VM to be ready before it is created. Equivalent to each later VM
-            listing this one in depends_on. Defaults to False. Prefer depends_on
-            for new configs; this is kept for backwards compatibility.
         depends_on: names of VMs that must be ready before this VM is created.
             Ready means the dependency's healthcheck passed if it has one,
             otherwise that Proxmox reports it running (and, if it needs a guest
             agent, that the agent answers). May name a VM later in vms_config; that
             VM is simply created first.
         healthcheck: optional guest command polled until it exits 0. Gates this
-            VM's readiness for depends_on and await_before_next_vm. Requires
+            VM's readiness for depends_on. Requires
             qemu-guest-agent even when is_sandbox is False.
 
     Note on nics configuration:
@@ -287,7 +283,6 @@ class VmConfig(BaseModel, frozen=True):
     firewall: bool = False
     os_type: Optional[OsType] = "l26"
     cpu: Optional[str] = None
-    await_before_next_vm: bool = False
     depends_on: Tuple[str, ...] = ()
     healthcheck: Optional[HealthCheck] = None
 
@@ -469,35 +464,15 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
         )
         return {**data, "vms_config": tuple(vms)}
 
-    def _dependency_edges(self) -> Tuple[DependencyEdge, ...]:
-        """Collect all dependency edges.
+    def _dependency_indices(self) -> Tuple[FrozenSet[int], ...]:
+        """For each VM, the vms_config indices of its depends_on.
 
-        This is explicit depends_on edges unioned with those implied by
-        await_before_next_vm. We collect an origin (named edge or await_before_next_vm)
-        for use in reporting errors (like cycles).
-
-        Deduplicated on (dependant, dependency), preferring the explicit origin so
-        error messages quote what the user actually wrote. Assumes names have
-        already been validated as unique and resolvable.
+        Assumes names have been validated as unique and resolvable.
         """
         index_of = self._name_index()
-        barriers = [
-            i for i, vm in enumerate(self.vms_config) if vm.await_before_next_vm
-        ]
-        edges: List[DependencyEdge] = []
-        for i, vm in enumerate(self.vms_config):
-            # index_of[dep] always resolves: unknown names are rejected by
-            # _validate_dependencies before this is called.
-            explicit_dependencies = {index_of[dep] for dep in vm.depends_on}
-            edges.extend(
-                DependencyEdge(i, j, "depends_on") for j in explicit_dependencies
-            )
-            edges.extend(
-                DependencyEdge(i, j, "await_before_next_vm")
-                for j in barriers
-                if j < i and j not in explicit_dependencies
-            )
-        return tuple(edges)
+        return tuple(
+            frozenset(index_of[dep] for dep in vm.depends_on) for vm in self.vms_config
+        )
 
     def _name_index(self) -> Dict[str, int]:
         return {
@@ -558,5 +533,5 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
                         f"Known names: {sorted(names)}"
                     )
 
-        reject_cycles(self._dependency_edges(), names)
+        reject_cycles(self._dependency_indices(), names)
         return self

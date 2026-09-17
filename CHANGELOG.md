@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Dependency-ordered VM startup: `VmConfig.depends_on` names other VMs that must be ready before this one is created. VMs are created in `vms_config` order except that a VM whose dependencies are not yet ready is deferred; cloning stays serial but readiness waits overlap. `await_before_next_vm` is kept and is now equivalent to every later VM depending on it
+- Dependency-ordered VM startup: `VmConfig.depends_on` names other VMs that must be ready before this one is created. VMs are created in `vms_config` order except that a VM whose dependencies are not yet ready is deferred; cloning stays serial but readiness waits overlap
 - Compose-style `VmConfig.healthcheck` (`test`, `interval`, `timeout`, `retries`, `start_period`): a guest command polled until it exits 0, gating the VM's readiness for `depends_on`. Enables the QEMU guest agent for non-sandbox VMs that declare one. A VM whose guest agent stops answering fails after 25 consecutive unreachable attempts rather than after ~3.5 h
 - **Breaking:** every VM except the first `is_sandbox` VM must be named; that one defaults to `default`. See "VM Names" in the README
 - Shorter gaps between VM readiness polls (capped at 5 s) so slow-booting guests are noticed sooner
@@ -21,7 +21,7 @@
 - Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 - Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
-- Don't wait for a VM to reach "running" before starting the next one (just wait for all of them together at the end). Set `await_before_next_vm=True` on a `VmConfig` if later VMs depend on it having booted first
+- Don't wait for a VM to reach "running" before starting the next one; use `depends_on` where ordering matters
 
 ## 0.11.0 - 2026-06-01
 

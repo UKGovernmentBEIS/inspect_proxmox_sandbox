@@ -1,4 +1,4 @@
-"""Decide which VM to create next given dependency edges and readiness so far.
+"""Decide which VM to create next given each VM's dependencies and readiness so far.
 
 `InfraCommands.create_sdn_and_vms` drives it: clone and start stay strictly
 serial (Proxmox VM ID allocation is not safe to race), while readiness waits
@@ -8,9 +8,7 @@ The scheduler does no I/O of its own.
 """
 
 import asyncio
-from typing import AsyncIterator, Dict, Sequence, Set, Tuple
-
-from proxmoxsandbox._impl.dependency_graph import DependencyEdge
+from typing import AsyncIterator, Collection, Dict, Sequence, Set, Tuple
 
 
 class VmScheduler:
@@ -21,11 +19,12 @@ class VmScheduler:
     dependency is skipped until that dependency is up.
     """
 
-    def __init__(self, edges: Sequence[DependencyEdge], count: int) -> None:
-        self._count = count
-        self._dependencies: Dict[int, Set[int]] = {i: set() for i in range(count)}
-        for edge in edges:
-            self._dependencies[edge.dependant].add(edge.dependency)
+    def __init__(self, dependencies: Sequence[Collection[int]]) -> None:
+        """`dependencies[i]` is the set of indices VM i waits for."""
+        self._count = len(dependencies)
+        self._dependencies: Dict[int, Set[int]] = {
+            i: set(deps) for i, deps in enumerate(dependencies)
+        }
         self._created: Set[int] = set()
         self._ready: Set[int] = set()
         self._failed: Set[int] = set()

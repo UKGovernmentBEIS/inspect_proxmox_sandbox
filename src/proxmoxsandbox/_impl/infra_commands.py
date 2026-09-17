@@ -5,7 +5,17 @@ import sys
 from dataclasses import dataclass
 from logging import getLogger
 from random import randint
-from typing import ClassVar, Collection, Dict, List, NamedTuple, Sequence, Set, Tuple
+from typing import (
+    ClassVar,
+    Collection,
+    Dict,
+    FrozenSet,
+    List,
+    NamedTuple,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from inspect_ai.util import trace_action
 from rich import box, print
@@ -14,7 +24,6 @@ from rich.table import Table
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
-from proxmoxsandbox._impl.dependency_graph import DependencyEdge
 from proxmoxsandbox._impl.healthcheck import HealthCheckExecutor, HealthCheckRunner
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import (
@@ -37,7 +46,7 @@ from proxmoxsandbox.schema import (
 class PlannedVm:
     """One entry of vms_config together with what its position implies.
 
-    `index` is the position in vms_config, which is how DependencyEdge and
+    `index` is the position in vms_config, which is how `dependencies` and
     VmScheduler refer to VMs. `name` is `config.name` typed as always present,
     which ProxmoxSandboxEnvironmentConfig guarantees after validation.
     """
@@ -45,12 +54,15 @@ class PlannedVm:
     index: int
     name: str
     config: VmConfig
+    dependencies: FrozenSet[int]
 
     @staticmethod
     def from_config(config: ProxmoxSandboxEnvironmentConfig) -> Tuple["PlannedVm", ...]:
         return tuple(
-            PlannedVm(i, name, vm)
-            for i, (name, vm) in enumerate(zip(config.vm_names(), config.vms_config))
+            PlannedVm(i, name, vm, deps)
+            for i, (name, vm, deps) in enumerate(
+                zip(config.vm_names(), config.vms_config, config._dependency_indices())
+            )
         )
 
 
@@ -186,10 +198,7 @@ class InfraCommands(abc.ABC):
             ipam_mappings.extend(per_vm_ipam_mappings)
 
         vm_configs_with_ids = await self._start_vms_in_dependency_order(
-            PlannedVm.from_config(config),
-            config._dependency_edges(),
-            vnet_aliases,
-            known_builtins,
+            PlannedVm.from_config(config), vnet_aliases, known_builtins
         )
 
         return vm_configs_with_ids, sdn_zone_id, tuple(ipam_mappings)
@@ -197,7 +206,6 @@ class InfraCommands(abc.ABC):
     async def _start_vms_in_dependency_order(
         self,
         vms: Tuple[PlannedVm, ...],
-        dependency_edges: Sequence[DependencyEdge],
         vnet_aliases: VnetAliases,
         known_builtins: Dict[str, int],
     ) -> Tuple[Tuple[int, VmConfig], ...]:
@@ -208,7 +216,7 @@ class InfraCommands(abc.ABC):
         task state. Only the readiness waits for already-started VMs overlap.
         Returns (vm_id, config) pairs in `vms_config` order.
         """
-        scheduler = VmScheduler(dependency_edges, len(vms))
+        scheduler = VmScheduler([vm.dependencies for vm in vms])
         created: Dict[int, Tuple[int, VmConfig]] = {}
         readiness_tasks: List[asyncio.Task[None]] = []
         try:

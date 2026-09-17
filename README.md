@@ -270,7 +270,6 @@ sandbox=SandboxEnvironmentSpec(
                 firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
                 depends_on=("router",), # optional. Names of VMs that must be ready before this one is created. See "Dependency-based VM startup" below.
                 healthcheck=HealthCheck(test=("systemctl", "is-active", "nginx")), # optional. Guest command polled until it exits 0 before this VM counts as ready. See "Healthchecks" below.
-                await_before_next_vm=False, # optional, legacy. True means every later VM depends on this one; prefer depends_on.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
                 # You can assign more than one, to give the VM more than one network interface.
                 # If you leave this blank, your VM will be assigned to the first VNet.
@@ -391,8 +390,6 @@ Here `router` and `db` are created and start booting straight away; `web` is cre
 - if the VM has a healthcheck, that healthcheck has passed.
 
 So a VM with no guest agent at all (a router appliance, pfSense) is a valid dependency: dependants wait for it to be running. If a dependency fails to become ready, the sample fails.
-
-The older `await_before_next_vm=True` is still supported and now means exactly "every later VM in the tuple depends on this one". It can be mixed with `depends_on`; if the combination forms a cycle, the error message says which edge was implied.
 
 ### Healthchecks
 
