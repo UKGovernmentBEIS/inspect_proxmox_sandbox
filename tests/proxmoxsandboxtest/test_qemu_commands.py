@@ -318,7 +318,7 @@ async def test_from_ova_local(qemu_commands: QemuCommands):
         built_in_vm_ids={},
     )
     # ping_qemu_agent below is a single call with no retry
-    await qemu_commands.await_vm(new_vm_id, needs_agent=True)
+    await qemu_commands.await_vm(new_vm_id, requires_guest_agent=True)
 
     await qemu_commands.ping_qemu_agent(new_vm_id)
 
@@ -346,7 +346,7 @@ async def test_from_ova_uefi_sandbox(qemu_commands: QemuCommands):
         built_in_vm_ids={},
     )
     # ping_qemu_agent below is a single call with no retry
-    await qemu_commands.await_vm(new_vm_id, needs_agent=True)
+    await qemu_commands.await_vm(new_vm_id, requires_guest_agent=True)
 
     await qemu_commands.ping_qemu_agent(new_vm_id)
 
@@ -372,7 +372,7 @@ async def test_uefi(
         built_in_vm_ids=await built_in_vm.known_builtins(),
     )
     # ping_qemu_agent below is a single call with no retry
-    await qemu_commands.await_vm(new_vm_id, needs_agent=True)
+    await qemu_commands.await_vm(new_vm_id, requires_guest_agent=True)
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
     assert new_vm["agent"] == "enabled=1"

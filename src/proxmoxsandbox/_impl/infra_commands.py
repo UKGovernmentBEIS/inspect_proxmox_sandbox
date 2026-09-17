@@ -228,7 +228,7 @@ class InfraCommands(abc.ABC):
         self.logger.info(f"Waiting for VM {label}")
         try:
             await self.qemu_commands.await_vm(
-                vm_id, needs_agent=vm_config.requires_guest_agent
+                vm_id, requires_guest_agent=vm_config.requires_guest_agent
             )
             if vm_config.healthcheck is not None:
                 await HealthCheckRunner(

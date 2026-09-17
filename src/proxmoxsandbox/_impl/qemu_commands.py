@@ -93,12 +93,12 @@ class QemuCommands(abc.ABC):
     async def await_vm(
         self,
         vm_id: int,
-        needs_agent: bool,
+        requires_guest_agent: bool,
         status_for_wait: str = "running",
     ) -> None:
-        """Wait for the VM's status and, if `needs_agent`, a guest-agent ping."""
+        """Wait for the VM's status and, if required, a guest-agent ping."""
         await self.await_running(vm_id, status_for_wait=status_for_wait)
-        if needs_agent and status_for_wait == "running":
+        if requires_guest_agent and status_for_wait == "running":
             await self.await_agent(vm_id)
 
     async def await_running(
@@ -244,9 +244,9 @@ class QemuCommands(abc.ABC):
 
         await self.task_wrapper.do_action_and_wait_for_tasks(do_start)
 
-    async def start_and_await(self, vm_id: int, needs_agent: bool) -> None:
+    async def start_and_await(self, vm_id: int, requires_guest_agent: bool) -> None:
         await self.start(vm_id=vm_id)
-        await self.await_vm(vm_id=vm_id, needs_agent=needs_agent)
+        await self.await_vm(vm_id=vm_id, requires_guest_agent=requires_guest_agent)
 
     def _convert_sdn_vnet_aliases(
         self, sdn_vnet_aliases: VnetAliases

@@ -125,7 +125,7 @@ async def test_await_vm_with_agent_runs_both_preconditions():
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
-    await qemu.await_vm(100, needs_agent=True)
+    await qemu.await_vm(100, requires_guest_agent=True)
     qemu.await_running.assert_awaited_once()
     qemu.await_agent.assert_awaited_once()
 
@@ -134,7 +134,7 @@ async def test_await_vm_without_agent_skips_ping():
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
-    await qemu.await_vm(100, needs_agent=False)
+    await qemu.await_vm(100, requires_guest_agent=False)
     qemu.await_running.assert_awaited_once()
     qemu.await_agent.assert_not_awaited()
 
@@ -144,7 +144,7 @@ async def test_await_vm_stopped_never_pings_agent():
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
-    await qemu.await_vm(100, needs_agent=True, status_for_wait="stopped")
+    await qemu.await_vm(100, requires_guest_agent=True, status_for_wait="stopped")
     qemu.await_running.assert_awaited_once_with(100, status_for_wait="stopped")
     qemu.await_agent.assert_not_awaited()
 
