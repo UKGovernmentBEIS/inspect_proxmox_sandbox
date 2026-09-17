@@ -68,7 +68,6 @@ class Harness:
             return vm_id
 
         infra.qemu_commands.create_and_start_vm = AsyncMock(side_effect=create)
-        infra.qemu_commands.register_vm = MagicMock()
 
         async def await_running(vm_id, **kwargs):
             name = self._names[vm_id]
@@ -101,7 +100,6 @@ class Harness:
         infra._start_vms_in_dependency_order = (
             InfraCommands._start_vms_in_dependency_order.__get__(infra)
         )
-        infra._create_vm = InfraCommands._create_vm.__get__(infra)
         infra._await_vm_ready = InfraCommands._await_vm_ready.__get__(infra)
         self.infra = infra
 
@@ -130,11 +128,6 @@ async def test_no_dependencies_creates_all_before_any_readiness():
     result, zone, ipam = await task
     assert [cfg.name for _, cfg in result] == ["a", "b", "c"]
     assert [vm_id for vm_id, _ in result] == [100, 101, 102]
-    assert [c.args[0] for c in h.infra.qemu_commands.register_vm.call_args_list] == [
-        100,
-        101,
-        102,
-    ]
 
 
 async def test_ipam_mappings_created_for_all_vms_before_first_create():

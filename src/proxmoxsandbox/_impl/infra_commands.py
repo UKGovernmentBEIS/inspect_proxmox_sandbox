@@ -15,7 +15,6 @@ from typing import (
     Tuple,
 )
 
-from inspect_ai.util import trace_action
 from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
@@ -202,7 +201,11 @@ class InfraCommands(abc.ABC):
                 self.logger.info(
                     f"Creating VM {name} ({len(created) + 1}/{len(vms_config)})"
                 )
-                vm_id = await self._create_vm(vm_config, vnet_aliases, known_builtins)
+                vm_id = await self.qemu_commands.create_and_start_vm(
+                    sdn_vnet_aliases=vnet_aliases,
+                    vm_config=vm_config,
+                    built_in_vm_ids=known_builtins,
+                )
                 created[name] = (vm_id, vm_config)
                 readiness_tasks.append(
                     asyncio.create_task(
@@ -216,22 +219,6 @@ class InfraCommands(abc.ABC):
                 await asyncio.gather(*readiness_tasks, return_exceptions=True)
 
         return tuple(created[vm.name] for vm in vms_config)
-
-    async def _create_vm(
-        self,
-        vm_config: VmConfig,
-        vnet_aliases: VnetAliases,
-        known_builtins: Dict[str, int],
-    ) -> int:
-        """Clone, configure and start one VM; register it for cleanup."""
-        with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
-            vm_id = await self.qemu_commands.create_and_start_vm(
-                sdn_vnet_aliases=vnet_aliases,
-                vm_config=vm_config,
-                built_in_vm_ids=known_builtins,
-            )
-            self.qemu_commands.register_vm(vm_id)
-        return vm_id
 
     async def _await_vm_ready(
         self, scheduler: VmScheduler, vm_config: VmConfig, vm_id: int

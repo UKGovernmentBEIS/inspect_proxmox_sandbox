@@ -2,7 +2,7 @@ import abc
 import re
 import tarfile
 from logging import getLogger
-from typing import Collection, Dict, List, Literal, Set
+from typing import Collection, Dict, List, Literal, Set, Tuple
 
 import httpx
 import tenacity
@@ -347,6 +347,28 @@ class QemuCommands(abc.ABC):
                 "os_type is only supported for OVA or existing_vm_template_tag"
             )
 
+        vm_id_to_clone, preserve_tags = await self._resolve_source_template(
+            vm_config, sdn_vnet_aliases, built_in_vm_ids
+        )
+        return await self.clone_vm_and_start(
+            vm_config=vm_config,
+            vm_id_to_clone=vm_id_to_clone,
+            sdn_vnet_aliases=sdn_vnet_aliases,
+            preserve_tags=preserve_tags,
+        )
+
+    async def _resolve_source_template(
+        self,
+        vm_config: VmConfig,
+        sdn_vnet_aliases: VnetAliases,
+        built_in_vm_ids: Dict[str, int],
+    ) -> Tuple[int, bool]:
+        """Find or make the template this VmConfig clones from.
+
+        Returns (template_id, preserve_tags). An OVA is imported and baked into
+        an inspect-tagged template on first use; the tag encodes the file name
+        and size so later runs reuse it.
+        """
         vm_id_to_clone: int
         preserve_tags: bool
 
@@ -464,16 +486,7 @@ class QemuCommands(abc.ABC):
         else:
             raise NotImplementedError(f"Not supported: {vm_config.vm_source_config=}")
 
-        new_vm_id = await self.clone_vm_and_start(
-            vm_config=vm_config,
-            vm_id_to_clone=vm_id_to_clone,
-            sdn_vnet_aliases=sdn_vnet_aliases,
-            preserve_tags=preserve_tags,
-        )
-
-        if new_vm_id is None:
-            raise ValueError("No VM ID?")
-        return new_vm_id
+        return vm_id_to_clone, preserve_tags
 
     async def remove_existing_nics(self, vm_id):
         existing_config = await self.read_vm(vm_id)
@@ -594,6 +607,7 @@ class QemuCommands(abc.ABC):
         sdn_vnet_aliases: VnetAliases,
         preserve_tags: bool,
     ) -> int:
+        """Clone, configure and start a VM; it is tracked for cleanup once cloned."""
         new_vm_id = await self.find_next_available_vm_id()
 
         async def create_clone() -> None:
@@ -603,7 +617,13 @@ class QemuCommands(abc.ABC):
                 json={"newid": new_vm_id, "full": 0, "name": vm_config.name},
             )
 
-        await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
+        with trace_action(
+            self.logger, self.TRACE_NAME, f"clone VM {vm_id_to_clone} -> {new_vm_id}"
+        ):
+            await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
+        # Registered before configure/start so a failure there still gets it
+        # destroyed by task_cleanup.
+        self.register_vm(new_vm_id)
 
         extra_tags = []
         if preserve_tags:
