@@ -227,9 +227,9 @@ class InfraCommands(abc.ABC):
         label = f"{vm_config.name} (ID={vm_id})"
         self.logger.info(f"Waiting for VM {label}")
         try:
-            await self.qemu_commands.await_running(vm_id)
-            if vm_config.requires_guest_agent:
-                await self.qemu_commands.await_agent(vm_id)
+            await self.qemu_commands.await_vm(
+                vm_id, needs_agent=vm_config.requires_guest_agent
+            )
             if vm_config.healthcheck is not None:
                 await HealthCheckRunner(
                     vm_config.healthcheck,
@@ -366,12 +366,7 @@ class InfraCommands(abc.ABC):
 
         for vm in await self.qemu_commands.list_vms():
             if self.qemu_commands.vm_is_inspect(vm, template=False):
-                existing_vm = await self.qemu_commands.read_vm(vm["vmid"])
-                for key in existing_vm.keys():
-                    if key.startswith("net"):
-                        # 'virtio=BC:24:11:3E:C3:BA,bridge=tcc919v0'
-                        bridge = existing_vm[key].split(",")[1].split("=")[1]
-                        noticed_vnets.add(bridge)
+                noticed_vnets |= await self.qemu_commands.vm_bridges(vm["vmid"])
                 noticed_vms.append(vm)
 
         # Only zones matching the provider's ephemeral-zone naming convention

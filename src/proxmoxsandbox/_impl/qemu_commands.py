@@ -93,12 +93,12 @@ class QemuCommands(abc.ABC):
     async def await_vm(
         self,
         vm_id: int,
-        is_sandbox: bool,
+        needs_agent: bool,
         status_for_wait: str = "running",
     ) -> None:
-        """Wait for the VM's status and, for sandboxes, a guest-agent ping."""
+        """Wait for the VM's status and, if `needs_agent`, a guest-agent ping."""
         await self.await_running(vm_id, status_for_wait=status_for_wait)
-        if is_sandbox and status_for_wait == "running":
+        if needs_agent and status_for_wait == "running":
             await self.await_agent(vm_id)
 
     async def await_running(
@@ -218,6 +218,17 @@ class QemuCommands(abc.ABC):
             "GET", f"/nodes/{self.node}/qemu/{vm_id}/config"
         )
 
+    async def vm_bridges(self, vm_id: int) -> Set[str]:
+        """Bridges (VNet IDs) the VM's NICs are attached to."""
+        bridges: Set[str] = set()
+        for key, value in (await self.read_vm(vm_id)).items():
+            if re.fullmatch(r"net\d+", key):
+                # 'virtio=BC:24:11:3E:C3:BA,bridge=tcc919v0'
+                for part in str(value).split(","):
+                    if part.startswith("bridge="):
+                        bridges.add(part.removeprefix("bridge="))
+        return bridges
+
     async def find_next_available_vm_id(self) -> int:
         return await self.async_proxmox.request("GET", "/cluster/nextid")
 
@@ -233,17 +244,9 @@ class QemuCommands(abc.ABC):
 
         await self.task_wrapper.do_action_and_wait_for_tasks(do_start)
 
-    async def start_and_await(
-        self,
-        vm_id: int,
-        is_sandbox: bool,
-    ) -> None:
+    async def start_and_await(self, vm_id: int, needs_agent: bool) -> None:
         await self.start(vm_id=vm_id)
-
-        await self.await_vm(
-            vm_id=vm_id,
-            is_sandbox=is_sandbox,
-        )
+        await self.await_vm(vm_id=vm_id, needs_agent=needs_agent)
 
     def _convert_sdn_vnet_aliases(
         self, sdn_vnet_aliases: VnetAliases

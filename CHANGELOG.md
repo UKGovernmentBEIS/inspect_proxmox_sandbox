@@ -2,11 +2,10 @@
 
 ## Unreleased
 
-- Dependency-ordered VM startup: `VmConfig.depends_on` names other VMs that must be ready before this one is created. VMs are created in `vms_config` order except that a VM whose dependencies are not yet ready is deferred; cloning stays serial but readiness waits overlap
-- Compose-style `VmConfig.healthcheck` (`test`, `interval`, `timeout`, `retries`, `start_period`): a guest command polled until it exits 0, gating the VM's readiness for `depends_on`. Enables the QEMU guest agent for non-sandbox VMs that declare one. A VM whose guest agent stops answering fails after 25 consecutive unreachable attempts rather than after ~3.5 h
+- `VmConfig.depends_on`: a VM is created only once the named VMs are ready. See "Dependency-based VM startup" in the README
+- `VmConfig.healthcheck`: compose-style guest command that gates a VM's readiness. See "Healthchecks" in the README
 - **Breaking:** every VM except the first `is_sandbox` VM must be named; that one defaults to `default`. See "VM Names" in the README
-- Shorter gaps between VM readiness polls (capped at 5 s) so slow-booting guests are noticed sooner
-- Clearer errors when a VM never reaches `running` or its guest agent never answers (`VmNotRunningError`, `GuestAgentUnavailableError`, both `TimeoutError` subclasses)
+- VM readiness polls are at most 5 s apart, and a VM that never runs or whose guest agent never answers fails with `VmNotRunningError` / `GuestAgentUnavailableError`
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
@@ -21,7 +20,7 @@
 - Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 - Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
-- Don't wait for a VM to reach "running" before starting the next one; use `depends_on` where ordering matters
+- VMs boot concurrently rather than one after another
 
 ## 0.11.0 - 2026-06-01
 

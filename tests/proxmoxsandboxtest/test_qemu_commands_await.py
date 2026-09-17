@@ -121,20 +121,20 @@ async def test_await_agent_raises_actionable_error_on_timeout():
     assert isinstance(exc_info.value, TimeoutError)
 
 
-async def test_await_vm_sandbox_runs_both_preconditions():
+async def test_await_vm_with_agent_runs_both_preconditions():
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
-    await qemu.await_vm(100, is_sandbox=True)
+    await qemu.await_vm(100, needs_agent=True)
     qemu.await_running.assert_awaited_once()
     qemu.await_agent.assert_awaited_once()
 
 
-async def test_await_vm_non_sandbox_skips_agent():
+async def test_await_vm_without_agent_skips_ping():
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
-    await qemu.await_vm(100, is_sandbox=False)
+    await qemu.await_vm(100, needs_agent=False)
     qemu.await_running.assert_awaited_once()
     qemu.await_agent.assert_not_awaited()
 
@@ -144,7 +144,7 @@ async def test_await_vm_stopped_never_pings_agent():
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
-    await qemu.await_vm(100, is_sandbox=True, status_for_wait="stopped")
+    await qemu.await_vm(100, needs_agent=True, status_for_wait="stopped")
     qemu.await_running.assert_awaited_once_with(100, status_for_wait="stopped")
     qemu.await_agent.assert_not_awaited()
 
@@ -181,3 +181,16 @@ def test_agent_enabled_for_non_sandbox_with_healthcheck():
     )
     assert json["agent"] == "enabled=1"
     assert "sata5" not in json
+
+
+async def test_vm_bridges_reads_every_nic_regardless_of_option_order():
+    qemu = _qemu()
+    qemu.async_proxmox.request = AsyncMock(
+        return_value={
+            "net0": "virtio=BC:24:11:3E:C3:BA,bridge=tcc919v0",
+            "net1": "bridge=tcc919v1,virtio=BC:24:11:3E:C3:BB,firewall=1",
+            "scsi0": "local:100/vm-100-disk-0.qcow2,size=32G",
+            "netmask": "unrelated",
+        }
+    )
+    assert await qemu.vm_bridges(100) == {"tcc919v0", "tcc919v1"}

@@ -15,7 +15,7 @@ import pytest
 from inspect_ai.util import ExecResult
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
-from proxmoxsandbox._impl.qemu_commands import VmNotRunningError
+from proxmoxsandbox._impl.qemu_commands import QemuCommands, VmNotRunningError
 from proxmoxsandbox.schema import (
     HealthCheck,
     ProxmoxSandboxEnvironmentConfig,
@@ -85,6 +85,9 @@ class Harness:
 
         infra.qemu_commands.await_running = AsyncMock(side_effect=await_running)
         infra.qemu_commands.await_agent = AsyncMock(side_effect=await_agent)
+        infra.qemu_commands.await_vm = QemuCommands.await_vm.__get__(
+            infra.qemu_commands
+        )
 
         def executor(vm_id, vm_config):
             async def execute(spec: HealthCheck) -> ExecResult[str]:
