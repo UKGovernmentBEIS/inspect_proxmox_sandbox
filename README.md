@@ -254,16 +254,6 @@ sandbox=SandboxEnvironmentSpec(
         # instance_pool_id="ubuntu-ami-123",
 
         vms_config=(
-            # A virtual machine that is not a sandbox: the agent can't exec on it and
-            # the qemu-guest-agent need not be installed.
-            VmConfig(
-                name="router",
-                vm_source_config=VmSourceConfig(built_in="debian13"),
-                is_sandbox=False, # optional, default is True.
-                # optional. Guest command polled until it exits 0 before this VM counts
-                # as ready (for depends_on). See "Healthchecks" below.
-                healthcheck=HealthCheck(test=("systemctl", "is-system-running", "--wait")),
-            ),
             VmConfig(
                 # A virtual machine that this provider will install and configure automatically.
                 vm_source_config=VmSourceConfig(
@@ -333,6 +323,12 @@ sandbox=SandboxEnvironmentSpec(
                         vnet_alias="existing vnet alias",
                     ),
                 )
+            ),
+            # A virtual machine that is not a sandbox.
+            VmConfig(
+                name="router",
+                vm_source_config=VmSourceConfig(built_in="debian13"),
+                is_sandbox=False, 
             ),
             # A virtual machine with no network access.
             VmConfig(
@@ -552,7 +548,6 @@ Two things worth knowing:
 
 - Proxmox server health and config check
 - Normalize having a pfSense VM as the default route for networking
-- Firewall off the SDN from the Proxmox server and from other SDNs
 - Support cloud-init for VM definition
 - Escape hatch for Proxmox API so you can specify arbitrary parameters during VM / SDN creation 
 
