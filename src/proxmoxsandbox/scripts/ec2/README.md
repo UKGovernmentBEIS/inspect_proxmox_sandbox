@@ -220,7 +220,10 @@ reaches one is off the host. Nothing in the AMI knows those addresses; pass them
 - CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
 - A `.aisi<N>` contract stamp on the version `pveversion` prints and the API serves, so a
   caller can tell what a host provides before asserting it. Bumped when a host-side file
-  something off-host asserts changes; an upgrade of `pve-manager` drops it.
+  something off-host asserts changes. A `pve-manager` upgrade replaces the stamped file, so an
+  apt hook re-applies it after every dpkg run. Only the API's `version` field and
+  `pveversion`'s text carry it; pvecfg.pm's `sub version()` is left alone because Proxmox
+  compares it internally.
 
 ## Other scripts
 

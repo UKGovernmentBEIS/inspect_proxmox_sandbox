@@ -233,11 +233,24 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
  
 EOFPATCH
 
-# Host contract for off-host callers (scripts/ec2/README.md); bump when host-side behaviour
-# they assert changes. sub version() is left unstamped: its callers compare it.
-AISI_CONTRACT=aisi2
-sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.$AISI_CONTRACT',/" /usr/share/perl5/PVE/pvecfg.pm
-sed -i "s|\(return '[0-9]\+\.[0-9]\+\.[0-9]\+\)/|\1.$AISI_CONTRACT/|" /usr/share/perl5/PVE/pvecfg.pm
+# Host contract for off-host callers (scripts/ec2/README.md); bump when host-side behaviour they
+# assert changes. Re-applied by the apt hook because a pve-manager upgrade replaces pvecfg.pm.
+cat > /usr/local/bin/inspect-proxmox-stamp-contract.sh << 'STAMP_CONTRACT'
+#!/bin/bash
+set -euo pipefail
+C=aisi2
+F=/usr/share/perl5/PVE/pvecfg.pm
+before=$(md5sum < "$F")
+sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)\(\.aisi[0-9]\+\)\?',/\1.$C',/
+        s|\(return '[0-9]\+\.[0-9]\+\.[0-9]\+\)\(\.aisi[0-9]\+\)\?/|\1.$C/|" "$F"
+grep -q "'version' => '[0-9.]*\.$C'," "$F" || { echo "ERROR: $F not stamped $C" >&2; exit 1; }
+[ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
+STAMP_CONTRACT
+chmod +x /usr/local/bin/inspect-proxmox-stamp-contract.sh
+cat > /etc/apt/apt.conf.d/80inspect-proxmox-contract << 'APT_HOOK'
+DPkg::Post-Invoke { "/usr/local/bin/inspect-proxmox-stamp-contract.sh || true"; };
+APT_HOOK
+/usr/local/bin/inspect-proxmox-stamp-contract.sh
 
 # Host isolation - see README
 # Delete our own rules (matched by comment) then recreate, so the rule set

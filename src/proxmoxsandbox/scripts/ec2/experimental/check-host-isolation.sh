@@ -124,6 +124,8 @@ chk "egress lockdown fails deadly: OnFailure=inspect-proxmox-egress-lockdown-hal
 # Masked means the halt unit fired at some point, so the rules can look right now even
 # though a lockdown run failed earlier.
 chk "Proxmox API not masked by the halt unit: pveproxy, pvedaemon" not_masked pveproxy.service pvedaemon.service
+chk "contract re-stamped after apt runs: /etc/apt/apt.conf.d/80inspect-proxmox-contract" \
+    grep -qF /usr/local/bin/inspect-proxmox-stamp-contract.sh /etc/apt/apt.conf.d/80inspect-proxmox-contract
 # Without these two, systemd scores a concurrent restart or a burst of starts as a unit
 # failure, and the halt unit masks the API on a host whose lockdown is applied correctly.
 chk "halt unit fires only on the lockdown's own verdict: SuccessExitStatus, StartLimitIntervalUSec" \
