@@ -254,6 +254,16 @@ sandbox=SandboxEnvironmentSpec(
         # instance_pool_id="ubuntu-ami-123",
 
         vms_config=(
+            # A virtual machine that is not a sandbox: the agent can't exec on it and
+            # the qemu-guest-agent need not be installed.
+            VmConfig(
+                name="router",
+                vm_source_config=VmSourceConfig(built_in="debian13"),
+                is_sandbox=False, # optional, default is True.
+                # optional. Guest command polled until it exits 0 before this VM counts
+                # as ready (for depends_on). See "Healthchecks" below.
+                healthcheck=HealthCheck(test=("systemctl", "is-system-running", "--wait")),
+            ),
             VmConfig(
                 # A virtual machine that this provider will install and configure automatically.
                 vm_source_config=VmSourceConfig(
@@ -263,13 +273,11 @@ sandbox=SandboxEnvironmentSpec(
                 ram_mb=512, # optional, default is 2048 MB
                 vcpus=4, # optional, default is 2. No attempt is made to check that this will fit in the Proxmox host.
                 uefi_boot=True, # optional, default is False. Generally only needed for Windows VMs.
-                is_sandbox=False, # optional, default is True. A virtual machine that is not a sandbox; the qemu-guest-agent need not be installed.
                 disk_controller="scsi", # optional, default will be SCSI. Can also use "ide" for older VM images.
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
                 cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
                 firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
                 depends_on=("router",), # optional. Names of VMs that must be ready before this one is created. See "Dependency-based VM startup" below.
-                healthcheck=HealthCheck(test=("systemctl", "is-active", "nginx")), # optional. Guest command polled until it exits 0 before this VM counts as ready. See "Healthchecks" below.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
                 # You can assign more than one, to give the VM more than one network interface.
                 # If you leave this blank, your VM will be assigned to the first VNet.
@@ -292,6 +300,7 @@ sandbox=SandboxEnvironmentSpec(
             ),
             # A virtual machine from a local OVA, which will be uploaded from here to the Proxmox server.
             VmConfig(
+                name="tinycore",
                 vm_source_config=VmSourceConfig(
                     ova=Path("./tests/oVirtTinyCore64-13.11.ova")
                 ),
@@ -302,6 +311,7 @@ sandbox=SandboxEnvironmentSpec(
             # customised Proxmox instance that contains the template VM before
             # the eval start.
             VmConfig(
+                name="java-server",
                 vm_source_config=VmSourceConfig(
                     existing_vm_template_tag="java_server"
                 ),
@@ -311,6 +321,7 @@ sandbox=SandboxEnvironmentSpec(
             # customised Proxmox instance that contains SDN configurations before
             # the eval start.
             VmConfig(
+                name="legacy-net",
                 vm_source_config=VmSourceConfig(
                     built_in="ubuntu24.04"
                 ),
@@ -325,7 +336,8 @@ sandbox=SandboxEnvironmentSpec(
             ),
             # A virtual machine with no network access.
             VmConfig(
-                # ... snip ...           
+                name="airgapped",
+                # ... snip ...
                 nics=()
             ),
         ),
@@ -372,40 +384,11 @@ The first `is_sandbox=True` VM is Inspect's `default` sandbox, so you can always
 
 ### Dependency-based VM startup
 
-VMs are created and started in `vms_config` order, one at a time, and then all boot concurrently. To make one VM wait for another to be ready before it is created, name the dependency in `depends_on`:
-
-```python
-vms_config=(
-    VmConfig(name="router", is_sandbox=False, vm_source_config=...),
-    VmConfig(name="db", vm_source_config=..., healthcheck=HealthCheck(test=("pg_isready",))),
-    VmConfig(name="web", vm_source_config=..., depends_on=("router", "db")),
-)
-```
-
-Here `router` and `db` are created and start booting straight away; `web` is created only once both are ready. Tuple order is a preference, not a guarantee: a VM whose dependencies are not yet ready is skipped, and the next creatable VM takes its slot. A VM may depend on one that appears later in the tuple. Unknown names, self-dependencies and cycles are rejected at configuration time.
-
-"Ready" means:
-- Proxmox reports the VM `running`;
-- if the VM is a sandbox or has a healthcheck, its QEMU guest agent answers a ping;
-- if the VM has a healthcheck, that healthcheck has passed.
-
-So a VM with no guest agent at all (a router appliance, pfSense) is a valid dependency: dependants wait for it to be running. If a dependency fails to become ready, the sample fails.
+Without `depends_on`, VMs are created in `vms_config` order and all boot concurrently. A VM with `depends_on` is created only once those VMs are ready: Proxmox reports them running, their guest agent answers if they have one, and their `healthcheck` has passed if they have one. A VM with no guest agent at all (a router appliance) is therefore a valid dependency. Tuple order is otherwise only a preference, so a dependency may appear later in the tuple than the VMs that wait for it. If a dependency never becomes ready, the sample fails.
 
 ### Healthchecks
 
-A `HealthCheck` is a command run inside the guest, repeated until it exits 0. The field names follow docker compose so they are guessable, but the defaults are sized for a booting VM rather than a container:
-
-| field | meaning | default |
-|---|---|---|
-| `test` | argument vector to run in the guest | required |
-| `interval` | seconds between attempts | `5` |
-| `timeout` | per-attempt limit, enforced inside the guest | `30` |
-| `retries` | consecutive failures tolerated before the sample fails | `60` |
-| `start_period` | grace window in seconds; an attempt that *starts* within it does not count as a failure | `0` |
-
-Deliberate differences from compose: durations are plain seconds, not strings like `"30s"`; there is no `CMD`/`CMD-SHELL` prefix — `test` is always an argument vector, so use `("sh", "-c", "...")` or an explicit PowerShell invocation when you need a shell; and success is exit code 0 only.
-
-Healthchecks run through the same command wrapper as `sandbox().exec()`, so they need a working QEMU guest agent. Declaring a healthcheck on an `is_sandbox=False` VM enables the guest agent device in Proxmox for that VM (the agent must still be installed in the image). A failed attempt is a non-zero exit, a guest-side timeout, a `test` that is not executable, or output over the exec size limit; each consumes one of `retries`. Attempts that cannot reach the guest agent at all do not count toward `retries`, but 25 of them in a row fail the VM (so a guest whose agent dies is reported after roughly 25 × (`interval` + a few seconds)). Once a healthcheck passes the VM is considered ready for the rest of the sample; it is not re-run.
+`HealthCheck` uses docker compose's field names (`test`, `interval`, `timeout`, `retries`, `start_period`) with defaults sized for a booting VM; see the `HealthCheck` docstring in `schema.py` for the details. The non-obvious parts: durations are plain seconds, not `"30s"`; `test` is always an argument vector, so use `("sh", "-c", "...")` when you need a shell; a healthcheck needs the QEMU guest agent even on an `is_sandbox=False` VM (declaring one enables the agent device, but the image must still have the agent installed); and it runs only during startup, never again.
 
 
 ### Static IP Address Assignment

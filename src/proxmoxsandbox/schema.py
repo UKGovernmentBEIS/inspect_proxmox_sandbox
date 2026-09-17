@@ -199,7 +199,15 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     Success is exit code 0. `test` is an argument vector with no CMD/CMD-SHELL
     sentinel; use ("sh", "-c", script) or an explicit PowerShell invocation when
     a shell is needed. Requires a running qemu-guest-agent in the guest, even when
-    is_sandbox is False.
+    is_sandbox is False; declaring a healthcheck enables the agent device.
+
+    Attempts run through the same command wrapper as sandbox().exec(). A failed
+    attempt is a non-zero exit, a guest-side timeout, a `test` that is not
+    executable, or output over the exec size limit; each consumes one of
+    `retries`. Attempts that cannot reach the guest agent at all do not count
+    toward `retries`, but 25 in a row fail the VM, so a guest whose agent dies
+    is reported after roughly 25 * (interval + a few seconds). Once passed, the
+    healthcheck is not re-run for the rest of the sample.
 
     Attributes:
         test: Command to run inside the guest.
