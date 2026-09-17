@@ -58,9 +58,16 @@ class AgentCommands:
     async_proxmox: AsyncProxmoxAPI
     node: str
 
-    def __init__(self, async_proxmox: AsyncProxmoxAPI, node: str):
+    def __init__(
+        self,
+        async_proxmox: AsyncProxmoxAPI,
+        node: str,
+        *,
+        qga_max_retries: int = _QGA_MAX_RETRIES,
+    ):
         self.async_proxmox = async_proxmox
         self.node = node
+        self._qga_max_retries = qga_max_retries
 
     @staticmethod
     def _is_transient_qga_error(exc: Exception) -> bool:
@@ -86,17 +93,18 @@ class AgentCommands:
 
     async def _retry_on_qga_error(self, label: str, coro_fn):
         """Retry a coroutine function on transient QGA / transport errors."""
-        for attempt in range(1, _QGA_MAX_RETRIES + 1):
+        max_retries = self._qga_max_retries
+        for attempt in range(1, max_retries + 1):
             try:
                 return await coro_fn()
             except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                if attempt < _QGA_MAX_RETRIES and self._is_transient_qga_error(e):
+                if attempt < max_retries and self._is_transient_qga_error(e):
                     delay = min(
                         _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
                         _QGA_RETRY_MAX_DELAY,
                     )
                     self.logger.warning(
-                        f"{label} failed (attempt {attempt}/{_QGA_MAX_RETRIES}), "
+                        f"{label} failed (attempt {attempt}/{max_retries}), "
                         f"retrying in {delay:.1f}s: {e}"
                     )
                     await asyncio.sleep(delay)

@@ -259,16 +259,15 @@ sandbox=SandboxEnvironmentSpec(
                 vm_source_config=VmSourceConfig(
                     built_in="ubuntu24.04" # currently supported: "ubuntu24.04", "debian13", "kali2025.4"; see schema.py
                 ),
-                name="romeo", # name is optional, but recommended - it will be shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name.
+                name="romeo", # shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name. Optional only for the first is_sandbox VM, which is otherwise named "default". See "VM Names" below.
                 ram_mb=512, # optional, default is 2048 MB
                 vcpus=4, # optional, default is 2. No attempt is made to check that this will fit in the Proxmox host.
                 uefi_boot=True, # optional, default is False. Generally only needed for Windows VMs.
-                is_sandbox=False, # optional, default is True. A virtual machine that is not a sandbox; the qemu-guest-agent need not be installed.
                 disk_controller="scsi", # optional, default will be SCSI. Can also use "ide" for older VM images.
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
                 cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
                 firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
-                await_before_next_vm=False, # optional, default is False, i.e. all VMs boot concurrently. Set to True if the VMs listed after this one need it to have booted first.
+                depends_on=("router",), # optional. Names of VMs that must be ready before this one is created. See "Dependency-based VM startup" below.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
                 # You can assign more than one, to give the VM more than one network interface.
                 # If you leave this blank, your VM will be assigned to the first VNet.
@@ -291,6 +290,7 @@ sandbox=SandboxEnvironmentSpec(
             ),
             # A virtual machine from a local OVA, which will be uploaded from here to the Proxmox server.
             VmConfig(
+                name="tinycore",
                 vm_source_config=VmSourceConfig(
                     ova=Path("./tests/oVirtTinyCore64-13.11.ova")
                 ),
@@ -301,6 +301,7 @@ sandbox=SandboxEnvironmentSpec(
             # customised Proxmox instance that contains the template VM before
             # the eval start.
             VmConfig(
+                name="java-server",
                 vm_source_config=VmSourceConfig(
                     existing_vm_template_tag="java_server"
                 ),
@@ -310,6 +311,7 @@ sandbox=SandboxEnvironmentSpec(
             # customised Proxmox instance that contains SDN configurations before
             # the eval start.
             VmConfig(
+                name="legacy-net",
                 vm_source_config=VmSourceConfig(
                     built_in="ubuntu24.04"
                 ),
@@ -322,9 +324,16 @@ sandbox=SandboxEnvironmentSpec(
                     ),
                 )
             ),
+            # A virtual machine that is not a sandbox.
+            VmConfig(
+                name="router",
+                vm_source_config=VmSourceConfig(built_in="debian13"),
+                is_sandbox=False, 
+            ),
             # A virtual machine with no network access.
             VmConfig(
-                # ... snip ...           
+                name="airgapped",
+                # ... snip ...
                 nics=()
             ),
         ),
@@ -362,13 +371,20 @@ sandbox=SandboxEnvironmentSpec(
 
 ### VM Names
 
-It is recommended that you set the `name=` parameter for your defined VMs. This name serves two purposes:
-- It will be displayed in the Proxmox web interface
-- It will be the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
+Every VM has a name, which serves three purposes:
+- It is displayed in the Proxmox web interface
+- It is the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
+- It is the identifier other VMs use in `depends_on`
 
-You should avoid setting the same name for multiple VMs as this will cause conflicts in how Inspect references your VMs; later VMs with the same name will overwrite earlier ones in the sandbox name mapping. While both VMs would still be created in Proxmox, only the last one would be accessible through its name in Inspect. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`.
+The first `is_sandbox=True` VM is Inspect's `default` sandbox, so you can always access it with `sandbox("default")`. If you give it a name, it is reachable under that name too; if you don't, it is simply named `default`, in Proxmox as well. Every other VM must be given a `name=`. Names must be unique within a sample and non-empty, and `default` is reserved: naming any other VM `default` is a configuration error.
 
-> Note: The (first) sandbox VM is automatically named `default` internally, so you can always access it with `sandbox("default")`, regardless of any custom name you might set for it.
+### Dependency-based VM startup
+
+Without `depends_on`, VMs are created in `vms_config` order and all boot concurrently. A VM with `depends_on` is created only once those VMs are ready: Proxmox reports them running, their guest agent answers if they have one, and their `healthcheck` has passed if they have one. A VM with no guest agent at all (a router appliance) is therefore a valid dependency. Tuple order is otherwise only a preference, so a dependency may appear later in the tuple than the VMs that wait for it. If a dependency never becomes ready, the sample fails.
+
+### Healthchecks
+
+`HealthCheck` uses docker compose's field names (`test`, `interval`, `timeout`, `retries`, `start_period`) with defaults sized for a booting VM; see the `HealthCheck` docstring in `schema.py` for the details. The non-obvious parts: durations are plain seconds, not `"30s"`; `test` is always an argument vector, so use `("sh", "-c", "...")` when you need a shell; a healthcheck needs the QEMU guest agent even on an `is_sandbox=False` VM (declaring one enables the agent device, but the image must still have the agent installed); and it runs only during startup, never again.
 
 
 ### Static IP Address Assignment
@@ -532,7 +548,6 @@ Two things worth knowing:
 
 - Proxmox server health and config check
 - Normalize having a pfSense VM as the default route for networking
-- Firewall off the SDN from the Proxmox server and from other SDNs
 - Support cloud-init for VM definition
 - Escape hatch for Proxmox API so you can specify arbitrary parameters during VM / SDN creation 
 

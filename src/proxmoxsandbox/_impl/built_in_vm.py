@@ -526,7 +526,7 @@ runcmd:
             await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
 
             await self.qemu_commands.start_and_await(
-                vm_id=next_available_vm_id, is_sandbox=True
+                vm_id=next_available_vm_id, requires_guest_agent=True
             )
 
             # now wait for cloud-init to finish
@@ -568,7 +568,7 @@ runcmd:
 
             await self.qemu_commands.await_vm(
                 vm_id=next_available_vm_id,
-                is_sandbox=True,
+                requires_guest_agent=True,
                 status_for_wait="stopped",
             )
 

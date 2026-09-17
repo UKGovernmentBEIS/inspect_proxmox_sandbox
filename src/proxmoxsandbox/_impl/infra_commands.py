@@ -1,17 +1,27 @@
 import abc
+import asyncio
 import os
 import sys
 from logging import getLogger
 from random import randint
-from typing import ClassVar, Collection, Dict, List, NamedTuple, Sequence, Set, Tuple
+from typing import (
+    ClassVar,
+    Collection,
+    Dict,
+    List,
+    NamedTuple,
+    Sequence,
+    Set,
+    Tuple,
+)
 
-from inspect_ai.util import trace_action
 from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
+from proxmoxsandbox._impl.healthcheck import HealthCheckExecutor, HealthCheckRunner
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import (
     IpamMapping,
@@ -21,8 +31,10 @@ from proxmoxsandbox._impl.sdn_commands import (
 )
 from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
+from proxmoxsandbox._impl.vm_scheduler import VmScheduler
 from proxmoxsandbox.schema import (
-    SdnConfigType,
+    HealthCheck,
+    ProxmoxSandboxEnvironmentConfig,
     VmConfig,
 )
 
@@ -132,14 +144,15 @@ class InfraCommands(abc.ABC):
         )
 
     async def create_sdn_and_vms(
-        self,
-        proxmox_ids_start: str,
-        sdn_config: SdnConfigType,
-        vms_config: Tuple[VmConfig, ...],
+        self, proxmox_ids_start: str, config: ProxmoxSandboxEnvironmentConfig
     ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
-        vm_configs_with_ids = []
+        """Create the SDN, then create/start VMs in dependency order.
+
+        Results are in `vms_config` order regardless of the order VMs were
+        created in.
+        """
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
-            proxmox_ids_start, sdn_config
+            proxmox_ids_start, config.sdn_config
         )
         if sdn_zone_id:
             self.sdn_commands.register_sdn_zone(sdn_zone_id)
@@ -151,33 +164,117 @@ class InfraCommands(abc.ABC):
         # Create ALL IPAM mappings FIRST, before creating/starting any VMs.
         # This prevents race conditions where a booting VM's DHCP request
         # causes Proxmox to auto-allocate IPs that we wanted to reserve.
-        for vm_config in vms_config:
+        for vm_config in config.vms_config:
             per_vm_ipam_mappings = await self.create_ipam_mappings(
                 vnet_aliases, vm_config, sdn_zone_id
             )
             ipam_mappings.extend(per_vm_ipam_mappings)
 
-        # Now create and start VMs
-        for i, vm_config in enumerate(vms_config):
-            self.logger.info(f"Creating VM {i + 1}/{len(vms_config)}: {vm_config.name}")
-            with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
+        vm_configs_with_ids = await self._start_vms_in_dependency_order(
+            config.vms_config, vnet_aliases, known_builtins
+        )
+
+        return vm_configs_with_ids, sdn_zone_id, tuple(ipam_mappings)
+
+    async def _start_vms_in_dependency_order(
+        self,
+        vms_config: Tuple[VmConfig, ...],
+        vnet_aliases: VnetAliases,
+        known_builtins: Dict[str, int],
+    ) -> Tuple[Tuple[int, VmConfig], ...]:
+        """Create every VM once its dependencies are ready; wait for all to be ready.
+
+        Clone/configure/start stays strictly serial: VM IDs come from an
+        unreserved /cluster/nextid read, and TaskWrapper waits on cluster-wide
+        task state. Only the readiness waits for already-started VMs overlap.
+        Returns (vm_id, config) pairs in `vms_config` order.
+        """
+        by_name = {vm.name: vm for vm in vms_config}
+        scheduler = VmScheduler({vm.name: vm.depends_on for vm in vms_config})
+        created: Dict[str, Tuple[int, VmConfig]] = {}
+        readiness_tasks: List[asyncio.Task[None]] = []
+        try:
+            # Yields each VM once its dependencies are ready; blocks in between;
+            # ends once every VM is ready. Readiness failures raise out of it.
+            async for name in scheduler:
+                vm_config = by_name[name]
+                self.logger.info(
+                    f"Creating VM {name} ({len(created) + 1}/{len(vms_config)})"
+                )
                 vm_id = await self.qemu_commands.create_and_start_vm(
                     sdn_vnet_aliases=vnet_aliases,
                     vm_config=vm_config,
                     built_in_vm_ids=known_builtins,
-                    wait_until_ready=vm_config.await_before_next_vm,
                 )
-                self.qemu_commands.register_vm(vm_id)
-                vm_configs_with_ids.append((vm_id, vm_config))
+                created[name] = (vm_id, vm_config)
+                readiness_tasks.append(
+                    asyncio.create_task(
+                        self._await_vm_ready(scheduler, vm_config, vm_id)
+                    )
+                )
+        finally:
+            for task in readiness_tasks:
+                task.cancel()
+            if readiness_tasks:
+                await asyncio.gather(*readiness_tasks, return_exceptions=True)
 
-        # TODO check for failed starts in the log somehow
+        return tuple(created[vm.name] for vm in vms_config)
 
-        for vm_id, vm_config in vm_configs_with_ids:
-            self.logger.info(f"Waiting for VM {vm_config.name} (ID={vm_id})")
-            await self.qemu_commands.await_vm(vm_id, vm_config.is_sandbox)
-            self.logger.info(f"VM {vm_config.name} (ID={vm_id}) is ready")
+    async def _await_vm_ready(
+        self, scheduler: VmScheduler, vm_config: VmConfig, vm_id: int
+    ) -> None:
+        """Wait for a VM's preconditions and healthcheck, then tell the scheduler."""
+        label = f"{vm_config.name} (ID={vm_id})"
+        self.logger.info(f"Waiting for VM {label}")
+        try:
+            await self.qemu_commands.await_vm(
+                vm_id, requires_guest_agent=vm_config.requires_guest_agent
+            )
+            if vm_config.healthcheck is not None:
+                await HealthCheckRunner(
+                    vm_config.healthcheck,
+                    self._healthcheck_executor(vm_id, vm_config),
+                    label=label,
+                ).run()
+        except Exception as exc:
+            scheduler.mark_failed(vm_config.name, exc)
+            raise
+        self.logger.info(f"VM {label} is ready")
+        scheduler.mark_ready(vm_config.name)
 
-        return tuple(vm_configs_with_ids), sdn_zone_id, tuple(ipam_mappings)
+    def _healthcheck_executor(
+        self, vm_id: int, vm_config: VmConfig
+    ) -> HealthCheckExecutor:
+        """Run healthcheck commands through the sandbox's exec wrapper.
+
+        This reuses the Linux/Windows command scripts (guest-side timeout,
+        result files) rather than raw agent/exec, so a healthcheck behaves
+        exactly like sandbox().exec() would for the same command. QGA retry is
+        HealthCheckRunner's job, hence qga_max_retries=1.
+        """
+        # Imported here: the environment module imports this one.
+        # https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/issues/132
+        from proxmoxsandbox._impl.agent_commands import AgentCommands
+        from proxmoxsandbox._proxmox_sandbox_environment import (
+            ProxmoxSandboxEnvironment,
+        )
+
+        sandbox = ProxmoxSandboxEnvironment(
+            infra_commands=self,
+            agent_commands=AgentCommands(
+                self.async_proxmox, self.node, qga_max_retries=1
+            ),
+            ipam_mappings=(),
+            vm_id=vm_id,
+            all_vm_ids=(vm_id,),
+            sdn_zone_id=None,
+            os_type=vm_config.os_type,
+        )
+
+        async def execute(spec: HealthCheck):
+            return await sandbox.exec(list(spec.test), timeout=spec.timeout)
+
+        return execute
 
     async def delete_sdn_and_vms(
         self,
@@ -269,12 +366,7 @@ class InfraCommands(abc.ABC):
 
         for vm in await self.qemu_commands.list_vms():
             if self.qemu_commands.vm_is_inspect(vm, template=False):
-                existing_vm = await self.qemu_commands.read_vm(vm["vmid"])
-                for key in existing_vm.keys():
-                    if key.startswith("net"):
-                        # 'virtio=BC:24:11:3E:C3:BA,bridge=tcc919v0'
-                        bridge = existing_vm[key].split(",")[1].split("=")[1]
-                        noticed_vnets.add(bridge)
+                noticed_vnets |= await self.qemu_commands.vm_bridges(vm["vmid"])
                 noticed_vms.append(vm)
 
         # Only zones matching the provider's ephemeral-zone naming convention

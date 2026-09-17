@@ -4,11 +4,29 @@ import json
 import os
 from os import getenv
 from pathlib import Path
-from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
+from typing import (
+    Annotated,
+    Any,
+    Dict,
+    Literal,
+    Optional,
+    Tuple,
+    TypeAlias,
+    Union,
+)
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
+
+from proxmoxsandbox._impl.dependency_graph import reject_cycles
 
 
 class DhcpRange(BaseModel, frozen=True):
@@ -169,13 +187,64 @@ OsType: TypeAlias = Literal[
 ]
 
 
+class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
+    """
+    Guest healthcheck evaluated during sample startup, gating this VM's readiness.
+
+    Field names follow docker compose's `healthcheck` so the semantics are
+    guessable, but the defaults do not: compose's 30s/3-retries gives up after
+    ~90s, far too short for a booting VM. Durations are seconds (floats), not
+    compose duration strings.
+
+    Success is exit code 0. `test` is an argument vector with no CMD/CMD-SHELL
+    sentinel; use ("sh", "-c", script) or an explicit PowerShell invocation when
+    a shell is needed. Requires a running qemu-guest-agent in the guest, even when
+    is_sandbox is False; declaring a healthcheck enables the agent device.
+
+    Attempts run through the same command wrapper as sandbox().exec(). A failed
+    attempt is a non-zero exit, a guest-side timeout, a `test` that is not
+    executable, or output over the exec size limit; each consumes one of
+    `retries`. Attempts that cannot reach the guest agent at all do not count
+    toward `retries`, but 25 in a row fail the VM, so a guest whose agent dies
+    is reported after roughly 25 * (interval + a few seconds). Once passed, the
+    healthcheck is not re-run for the rest of the sample.
+
+    Attributes:
+        test: Command to run inside the guest.
+        interval: Seconds between attempts.
+        timeout: Per-attempt limit in seconds, enforced inside the guest.
+        retries: Consecutive failures tolerated before the sample fails.
+        start_period: Grace window in seconds after the first attempt during which
+            failures do not count towards retries.
+    """
+
+    test: Tuple[str, ...] = Field(min_length=1)
+    interval: float = Field(default=5, gt=0)
+    timeout: int = Field(default=30, gt=0)
+    retries: int = Field(default=60, gt=0)
+    start_period: float = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_test(self) -> "HealthCheck":
+        if not self.test[0]:
+            raise ValueError("test needs an executable as its first element")
+        if any("\x00" in arg for arg in self.test):
+            raise ValueError("test arguments must not contain NUL")
+        return self
+
+
 class VmConfig(BaseModel, frozen=True):
     """
     Configuration for a virtual machine.
 
     Attributes:
         vm_source_config: The source configuration for the VM
-        name: The name of the VM (optional). Must be a valid DNS name.
+        name: The name of the VM. Must be a valid DNS name and unique within a
+            sample: it is the Proxmox VM name, the key used with Inspect's
+            sandbox(), and the identifier other VMs use in depends_on. Defaults
+            to "default", which is only allowed on the first is_sandbox VM (it is
+            always reachable as sandbox("default") anyway), so every other VM
+            must be given a name.
         ram_mb: RAM allocation in megabytes (default: 2048)
         vcpus: Number of virtual CPUs (default: 2)
         nics: Network interface configurations (optional)
@@ -197,10 +266,14 @@ class VmConfig(BaseModel, frozen=True):
         cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
             defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
             panic on nested virtualization with "host"; use "qemu64" for those.
-        await_before_next_vm: if True, wait for this VM to finish booting (and, when
-            is_sandbox, to answer a guest-agent ping) before creating the next VM in
-            vms_config. Defaults to False, so VMs boot concurrently. Set this on a VM
-            that later ones depend on at boot time, e.g. a router or DHCP server.
+        depends_on: names of VMs that must be ready before this VM is created.
+            Ready means the dependency's healthcheck passed if it has one,
+            otherwise that Proxmox reports it running (and, if it needs a guest
+            agent, that the agent answers). May name a VM later in vms_config; that
+            VM is simply created first.
+        healthcheck: optional guest command polled until it exits 0. Gates this
+            VM's readiness for depends_on. Requires
+            qemu-guest-agent even when is_sandbox is False.
 
     Note on nics configuration:
     - If set, the VM will be connected to these VNets (one interface per VNet)
@@ -213,7 +286,7 @@ class VmConfig(BaseModel, frozen=True):
     """
 
     vm_source_config: VmSourceConfig
-    name: Optional[str] = None
+    name: str = "default"
     ram_mb: Optional[int] = 2048
     vcpus: Optional[int] = 2
     nics: Optional[Tuple[VmNicConfig, ...]] = None
@@ -224,7 +297,19 @@ class VmConfig(BaseModel, frozen=True):
     firewall: bool = False
     os_type: Optional[OsType] = "l26"
     cpu: Optional[str] = None
-    await_before_next_vm: bool = False
+    depends_on: Tuple[str, ...] = ()
+    healthcheck: Optional[HealthCheck] = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _none_means_default(cls, value: Any) -> Any:
+        # Configs recorded before name had a default serialised it as null.
+        return "default" if value is None else value
+
+    @property
+    def requires_guest_agent(self) -> bool:
+        """Whether sandbox access or a healthcheck needs QGA enabled in Proxmox."""
+        return self.is_sandbox or self.healthcheck is not None
 
 
 class HttpHeader(BaseModel):
@@ -354,3 +439,54 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     vms_config: Tuple[VmConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
+
+    def vm_names(self) -> Tuple[str, ...]:
+        """Names in vms_config order."""
+        return tuple(vm.name for vm in self.vms_config)
+
+    @model_validator(mode="after")
+    def _validate_vm_names(self) -> "ProxmoxSandboxEnvironmentConfig":
+        first_sandbox = next(
+            (i for i, vm in enumerate(self.vms_config) if vm.is_sandbox), None
+        )
+        if first_sandbox is None:
+            raise ValueError(
+                "No default sandbox found: at least one VM must have is_sandbox=True"
+            )
+        seen: Dict[str, int] = {}
+        for i, vm in enumerate(self.vms_config):
+            if vm.name == "":
+                raise ValueError(f"vms_config[{i}] has an empty name")
+            if vm.name == "default" and i != first_sandbox:
+                raise ValueError(
+                    f"vms_config[{i}] is named 'default' (the default when no name "
+                    f"is given), which is reserved for the first is_sandbox=True VM "
+                    f"(Inspect's default sandbox); give it a name"
+                )
+            if vm.name in seen:
+                raise ValueError(
+                    f"Duplicate VM name {vm.name!r} at vms_config[{seen[vm.name]}] "
+                    f"and vms_config[{i}]; names identify VMs to Inspect and to "
+                    f"depends_on, so they must be unique within a sample"
+                )
+            seen[vm.name] = i
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dependencies(self) -> "ProxmoxSandboxEnvironmentConfig":
+        names = self.vm_names()
+
+        for name, vm in zip(names, self.vms_config):
+            if len(vm.depends_on) != len(set(vm.depends_on)):
+                raise ValueError(f"{name!r} lists a duplicate dependency")
+            if name in vm.depends_on:
+                raise ValueError(f"{name!r} depends on itself")
+            for dep in vm.depends_on:
+                if dep not in names:
+                    raise ValueError(
+                        f"{name!r} depends on unknown VM {dep!r}. "
+                        f"Known names: {sorted(names)}"
+                    )
+
+        reject_cycles({name: vm.depends_on for name, vm in zip(names, self.vms_config)})
+        return self
