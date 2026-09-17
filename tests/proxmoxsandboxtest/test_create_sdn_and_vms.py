@@ -107,15 +107,7 @@ class Harness:
 
     def start(self) -> "asyncio.Task":
         config = ProxmoxSandboxEnvironmentConfig(vms_config=self.vms)
-        return asyncio.create_task(
-            self.infra.create_sdn_and_vms(
-                "abc",
-                sdn_config=None,
-                vms_config=self.vms,
-                dependency_edges=config.dependency_edges(),
-                labels=config.vm_names(),
-            )
-        )
+        return asyncio.create_task(self.infra.create_sdn_and_vms("abc", config))
 
     def created(self) -> List[str]:
         return [name for kind, name in self.events if kind == "create"]

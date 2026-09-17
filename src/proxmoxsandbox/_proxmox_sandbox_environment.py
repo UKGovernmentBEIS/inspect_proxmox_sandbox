@@ -390,13 +390,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     vm_configs_with_ids,
                     sdn_zone_id,
                     ipam_mappings,
-                ) = await infra_commands.create_sdn_and_vms(
-                    proxmox_ids_start,
-                    sdn_config=config.sdn_config,
-                    vms_config=config.vms_config,
-                    dependency_edges=config.dependency_edges(),
-                    labels=config.vm_names(),
-                )
+                ) = await infra_commands.create_sdn_and_vms(proxmox_ids_start, config)
 
             sandboxes: Dict[str, SandboxEnvironment] = {}
 
