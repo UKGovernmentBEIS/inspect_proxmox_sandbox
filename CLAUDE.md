@@ -71,6 +71,7 @@ The QEMU guest agent channel on Windows drops ~5-7% of calls. `agent_commands.py
 
 - References to implementation conversations or PRs
 - Descriptions of changes you just made ("Added logging here")
+- Who calls this, or what it calls ("`InfraCommands.create_sdn_and_vms` drives it"); grep answers that
 - Vague TODOs ("Refactor this later")
 - Obvious code narration ("Loop through all instances")
 

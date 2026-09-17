@@ -223,12 +223,7 @@ class InfraCommands(abc.ABC):
     async def _await_vm_ready(
         self, scheduler: VmScheduler, vm_config: VmConfig, vm_id: int
     ) -> None:
-        """Wait for a VM's preconditions and healthcheck, then tell the scheduler.
-
-        Runs as its own task, concurrently with other VMs' waits and with the
-        driver's cloning. Reports success or the first failure to `scheduler`,
-        which is where the driver is blocked.
-        """
+        """Wait for a VM's preconditions and healthcheck, then tell the scheduler."""
         label = f"{vm_config.name} (ID={vm_id})"
         self.logger.info(f"Waiting for VM {label}")
         try:

@@ -1,10 +1,8 @@
 """Decide which VM to create next given each VM's dependencies and readiness so far.
 
-`InfraCommands.create_sdn_and_vms` drives it: clone and start stay strictly
-serial (Proxmox VM ID allocation is not safe to race), while readiness waits
-for already-created VMs overlap. Those readiness tasks report back here via
-`mark_ready` / `mark_failed`, and iteration blocks until one of them does.
-The scheduler does no I/O of its own.
+VMs are handed out one at a time (Proxmox VM ID allocation is not safe to
+race); readiness arrives concurrently via mark_ready / mark_failed and
+iteration blocks until it does. No I/O.
 """
 
 import asyncio
@@ -49,15 +47,13 @@ class VmScheduler:
                 self._mark_created(name)
                 yield name
 
-    # Called from each VM's readiness task, concurrently with the iteration above.
-
     def mark_ready(self, name: str) -> None:
-        """Readiness task: the VM passed its preconditions and healthcheck."""
+        """The VM passed its preconditions and healthcheck."""
         self._ready.add(name)
         self._changed.set()
 
     def mark_failed(self, name: str, exc: BaseException) -> None:
-        """Readiness task: the VM will never be ready. First failure wins."""
+        """The VM will never be ready. First failure wins."""
         self._failed.add(name)
         if self._failure is None:
             self._failure = exc
