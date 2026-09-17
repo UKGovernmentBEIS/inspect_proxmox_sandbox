@@ -232,8 +232,10 @@ no_upstream_resolver() { ! grep -q "^nameserver" /run/dnsmasq/resolv.conf; }
 chk "opt-in marker present: $marker" test -f "$marker"
 chk "guest egress dropped: mangle FORWARD -o $nic" has_rule mangle FORWARD "-o $nic " "-j DROP"
 chk "guest ingress dropped: mangle FORWARD -i $nic" has_rule mangle FORWARD "-i $nic " "-j DROP"
-chk "dnsmasq upstream queries dropped: mangle OUTPUT --uid-owner dnsmasq" \
-    has_rule mangle OUTPUT "-o $nic " "--uid-owner dnsmasq" "-j DROP"
+# iptables -S prints the owner as a number
+dnsmasq_uid=$(id -u dnsmasq 2>/dev/null)
+chk "dnsmasq upstream queries dropped: mangle OUTPUT --uid-owner dnsmasq (${dnsmasq_uid:-no such user})" \
+    has_rule mangle OUTPUT "-o $nic " "--uid-owner ${dnsmasq_uid:-dnsmasq} " "-j DROP"
 chk "no upstream resolver for SDN dnsmasq: /run/dnsmasq/resolv.conf" no_upstream_resolver
 
 echo
