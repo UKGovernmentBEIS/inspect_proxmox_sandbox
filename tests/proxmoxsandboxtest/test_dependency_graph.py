@@ -1,4 +1,4 @@
-"""reject_cycles on bare dependency sets, independent of the config model.
+"""reject_cycles on bare name->dependencies maps, independent of the config model.
 
 test_schema covers the wiring (a cyclic config is a ValidationError); this
 covers the algorithm.
@@ -8,38 +8,36 @@ import pytest
 
 from proxmoxsandbox._impl.dependency_graph import reject_cycles
 
-NAMES = ("a", "b", "c", "d")
-
 
 @pytest.mark.parametrize(
     "dependencies",
     [
-        [],
-        [(), (), ()],
-        [(), (0,), (1,)],  # chain
-        [(1,), ()],  # forward reference
-        [(), (), (0, 1), (2,)],  # diamond
-        [(), (0,), (0,), (1, 2)],  # a visited twice, never while on the path
+        {},
+        {"a": (), "b": (), "c": ()},
+        {"a": (), "b": ("a",), "c": ("b",)},  # chain
+        {"a": ("b",), "b": ()},  # forward reference
+        {"a": (), "b": (), "c": ("a", "b"), "d": ("c",)},  # diamond
+        {"a": (), "b": ("a",), "c": ("a",), "d": ("b", "c")},  # a visited twice
     ],
     ids=["empty", "none", "chain", "forward", "diamond", "shared"],
 )
 def test_acyclic(dependencies):
-    reject_cycles(dependencies, NAMES)
+    reject_cycles(dependencies)
 
 
 @pytest.mark.parametrize(
     ("dependencies", "cycle"),
     [
-        ([(0,)], "'a' -> 'a'"),
-        ([(1,), (0,)], "'a' -> 'b' -> 'a'"),
-        ([(1,), (2,), (0,)], "'a' -> 'b' -> 'c' -> 'a'"),
+        ({"a": ("a",)}, "'a' -> 'a'"),
+        ({"a": ("b",), "b": ("a",)}, "'a' -> 'b' -> 'a'"),
+        ({"a": ("b",), "b": ("c",), "c": ("a",)}, "'a' -> 'b' -> 'c' -> 'a'"),
         # a leads into the loop but is not part of it
-        ([(1,), (2,), (1,)], "'b' -> 'c' -> 'b'"),
-        # a stands alone; the loop is in a component not reachable from it
-        ([(), (), (3,), (2,)], "'c' -> 'd' -> 'c'"),
+        ({"a": ("b",), "b": ("c",), "c": ("b",)}, "'b' -> 'c' -> 'b'"),
+        # the loop is in a component not reachable from the first VM
+        ({"a": (), "b": (), "c": ("d",), "d": ("c",)}, "'c' -> 'd' -> 'c'"),
     ],
     ids=["self", "two", "three", "entered-from-outside", "unreachable-from-first"],
 )
 def test_cyclic(dependencies, cycle):
     with pytest.raises(ValueError, match=f"^VM dependency cycle: {cycle}$"):
-        reject_cycles(dependencies, NAMES)
+        reject_cycles(dependencies)

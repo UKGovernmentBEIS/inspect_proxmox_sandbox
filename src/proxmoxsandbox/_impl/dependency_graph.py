@@ -1,40 +1,35 @@
 """Cycle detection for VM startup dependencies.
 
-`dependencies[i]` holds the vms_config indices VM i waits for, as built by
-`ProxmoxSandboxEnvironmentConfig._dependency_indices()`. Not part of the public
-schema.
+`dependencies` maps each VM name to the names it waits for, in vms_config
+order. Not part of the public schema.
 """
 
-from typing import Collection, List, Sequence, Set
+from typing import Collection, List, Mapping, Set
 
 
-def reject_cycles(
-    dependencies: Sequence[Collection[int]], names: Sequence[str]
-) -> None:
+def reject_cycles(dependencies: Mapping[str, Collection[str]]) -> None:
     """Raise ValueError naming the first cycle found, e.g. 'a' -> 'b' -> 'a'."""
-    # We have a set of unvisited nodes, a set of on-path nodes, and the current
-    # path as a stack. Following an edge to a node already on the path is a
-    # loop. Visiting a node removes it from unvisited and adds it to on_path;
-    # once all its dependencies are visited without finding a cycle it leaves
-    # on_path. Nodes in neither set are known not to be part of a loop.
-    unvisited = set(range(len(dependencies)))
-    on_path: Set[int] = set()
-    path: List[int] = []
+    # DFS in config order. Following an edge to a node already on the path is a
+    # loop; a node that has left the path without one is known to be clean.
+    visited: Set[str] = set()
+    on_path: Set[str] = set()
+    path: List[str] = []
 
-    def visit(node: int) -> None:
-        unvisited.discard(node)
+    def visit(node: str) -> None:
+        visited.add(node)
         on_path.add(node)
         path.append(node)
-        for dep in sorted(dependencies[node]):
+        for dep in dependencies[node]:
             if dep in on_path:
                 cycle = path[path.index(dep) :] + [dep]
                 raise ValueError(
-                    "VM dependency cycle: " + " -> ".join(repr(names[i]) for i in cycle)
+                    "VM dependency cycle: " + " -> ".join(repr(n) for n in cycle)
                 )
-            if dep in unvisited:
+            if dep not in visited:
                 visit(dep)
         path.pop()
         on_path.remove(node)
 
-    while unvisited:
-        visit(unvisited.pop())
+    for node in dependencies:
+        if node not in visited:
+            visit(node)

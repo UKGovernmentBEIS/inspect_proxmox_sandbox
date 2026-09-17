@@ -8,7 +8,6 @@ from typing import (
     Annotated,
     Any,
     Dict,
-    FrozenSet,
     Literal,
     Optional,
     Tuple,
@@ -464,21 +463,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
         )
         return {**data, "vms_config": tuple(vms)}
 
-    def _dependency_indices(self) -> Tuple[FrozenSet[int], ...]:
-        """For each VM, the vms_config indices of its depends_on.
-
-        Assumes names have been validated as unique and resolvable.
-        """
-        index_of = self._name_index()
-        return tuple(
-            frozenset(index_of[dep] for dep in vm.depends_on) for vm in self.vms_config
-        )
-
-    def _name_index(self) -> Dict[str, int]:
-        return {
-            vm.name: i for i, vm in enumerate(self.vms_config) if vm.name is not None
-        }
-
     @model_validator(mode="after")
     def _validate_vm_names(self) -> "ProxmoxSandboxEnvironmentConfig":
         first_sandbox = next(
@@ -533,5 +517,5 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
                         f"Known names: {sorted(names)}"
                     )
 
-        reject_cycles(self._dependency_indices(), names)
+        reject_cycles({name: vm.depends_on for name, vm in zip(names, self.vms_config)})
         return self

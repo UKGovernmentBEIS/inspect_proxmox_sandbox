@@ -9,7 +9,6 @@ from typing import (
     ClassVar,
     Collection,
     Dict,
-    FrozenSet,
     List,
     NamedTuple,
     Sequence,
@@ -44,25 +43,20 @@ from proxmoxsandbox.schema import (
 
 @dataclass(frozen=True)
 class PlannedVm:
-    """One entry of vms_config together with what its position implies.
+    """One entry of vms_config with its name typed as always present.
 
-    `index` is the position in vms_config, which is how `dependencies` and
-    VmScheduler refer to VMs. `name` is `config.name` typed as always present,
-    which ProxmoxSandboxEnvironmentConfig guarantees after validation.
+    ProxmoxSandboxEnvironmentConfig guarantees the name after validation; the
+    scheduler and depends_on refer to VMs by it.
     """
 
-    index: int
     name: str
     config: VmConfig
-    dependencies: FrozenSet[int]
 
     @staticmethod
     def from_config(config: ProxmoxSandboxEnvironmentConfig) -> Tuple["PlannedVm", ...]:
         return tuple(
-            PlannedVm(i, name, vm, deps)
-            for i, (name, vm, deps) in enumerate(
-                zip(config.vm_names(), config.vms_config, config._dependency_indices())
-            )
+            PlannedVm(name, vm)
+            for name, vm in zip(config.vm_names(), config.vms_config)
         )
 
 
@@ -216,19 +210,20 @@ class InfraCommands(abc.ABC):
         task state. Only the readiness waits for already-started VMs overlap.
         Returns (vm_id, config) pairs in `vms_config` order.
         """
-        scheduler = VmScheduler([vm.dependencies for vm in vms])
-        created: Dict[int, Tuple[int, VmConfig]] = {}
+        by_name = {vm.name: vm for vm in vms}
+        scheduler = VmScheduler({vm.name: vm.config.depends_on for vm in vms})
+        created: Dict[str, Tuple[int, VmConfig]] = {}
         readiness_tasks: List[asyncio.Task[None]] = []
         try:
             # Yields each VM once its dependencies are ready; blocks in between;
             # ends once every VM is ready. Readiness failures raise out of it.
-            async for index in scheduler:
-                vm = vms[index]
+            async for name in scheduler:
+                vm = by_name[name]
                 self.logger.info(
-                    f"Creating VM {vm.name} ({vm.index + 1}/{len(vms)} in config)"
+                    f"Creating VM {vm.name} ({len(created) + 1}/{len(vms)})"
                 )
                 vm_id = await self._create_vm(vm, vnet_aliases, known_builtins)
-                created[index] = (vm_id, vm.config)
+                created[name] = (vm_id, vm.config)
                 readiness_tasks.append(
                     asyncio.create_task(self._await_vm_ready(scheduler, vm, vm_id))
                 )
@@ -238,7 +233,7 @@ class InfraCommands(abc.ABC):
             if readiness_tasks:
                 await asyncio.gather(*readiness_tasks, return_exceptions=True)
 
-        return tuple(created[i] for i in range(len(vms)))
+        return tuple(created[vm.name] for vm in vms)
 
     async def _create_vm(
         self, vm: PlannedVm, vnet_aliases: VnetAliases, known_builtins: Dict[str, int]
@@ -275,10 +270,10 @@ class InfraCommands(abc.ABC):
                     label=label,
                 ).run()
         except Exception as exc:
-            scheduler.mark_failed(vm.index, exc)
+            scheduler.mark_failed(vm.name, exc)
             raise
         self.logger.info(f"VM {label} is ready")
-        scheduler.mark_ready(vm.index)
+        scheduler.mark_ready(vm.name)
 
     def _healthcheck_executor(
         self, vm_id: int, vm_config: VmConfig

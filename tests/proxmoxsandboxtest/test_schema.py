@@ -189,7 +189,7 @@ def test_depends_on_unknown_name():
 
 def test_depends_on_default_vm_by_its_implicit_name():
     cfg = _config(_vm(), _vm("web", depends_on=("default",)))
-    assert cfg._dependency_indices() == (frozenset(), frozenset({0}))
+    assert cfg.vm_names() == ("default", "web")
 
 
 def test_depends_on_duplicate_entry():
@@ -203,8 +203,7 @@ def test_depends_on_self():
 
 
 def test_depends_on_forward_reference_is_legal():
-    cfg = _config(_vm("a", depends_on=("b",)), _vm("b"))
-    assert cfg._dependency_indices() == (frozenset({1}), frozenset())
+    _config(_vm("a", depends_on=("b",)), _vm("b"))
 
 
 def test_dependency_cycle_rejected():
@@ -213,8 +212,3 @@ def test_dependency_cycle_rejected():
         match="VM dependency cycle: 'a' -> 'b' -> 'a'",
     ):
         _config(_vm("a", depends_on=("b",)), _vm("b", depends_on=("a",)))
-
-
-def test_no_dependencies():
-    cfg = _config(_vm("a"), _vm("b"))
-    assert cfg._dependency_indices() == (frozenset(), frozenset())
