@@ -10,7 +10,7 @@ The scheduler does no I/O of its own.
 import asyncio
 from typing import AsyncIterator, Dict, Sequence, Set, Tuple
 
-from proxmoxsandbox.schema import DependencyEdge
+from proxmoxsandbox._impl.dependency_graph import DependencyEdge
 
 
 class VmScheduler:

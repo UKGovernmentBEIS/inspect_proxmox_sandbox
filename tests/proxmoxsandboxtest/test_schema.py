@@ -4,8 +4,8 @@ import pytest
 from pydantic import ValidationError
 from pydantic_extra_types.mac_address import MacAddress
 
+from proxmoxsandbox._impl.dependency_graph import DependencyEdge
 from proxmoxsandbox.schema import (
-    DependencyEdge,
     HealthCheck,
     ProxmoxSandboxEnvironmentConfig,
     VmConfig,
@@ -190,7 +190,7 @@ def test_depends_on_unknown_name():
 
 def test_depends_on_default_vm_by_its_implicit_name():
     cfg = _config(_vm(), _vm("web", depends_on=("default",)))
-    assert cfg.dependency_edges() == (DependencyEdge(1, 0, "depends_on"),)
+    assert cfg._dependency_edges() == (DependencyEdge(1, 0, "depends_on"),)
 
 
 def test_depends_on_duplicate_entry():
@@ -205,7 +205,7 @@ def test_depends_on_self():
 
 def test_depends_on_forward_reference_is_legal():
     cfg = _config(_vm("a", depends_on=("b",)), _vm("b"))
-    assert cfg.dependency_edges() == (DependencyEdge(0, 1, "depends_on"),)
+    assert cfg._dependency_edges() == (DependencyEdge(0, 1, "depends_on"),)
 
 
 def test_dependency_cycle_rejected():
@@ -227,7 +227,7 @@ def test_dependency_cycle_through_await_before_next_vm_is_attributed():
 
 def test_await_before_next_vm_implies_edges_from_every_later_vm():
     cfg = _config(_vm("vm0", await_before_next_vm=True), _vm("vm1"), _vm("vm2"))
-    assert set(cfg.dependency_edges()) == {
+    assert set(cfg._dependency_edges()) == {
         DependencyEdge(1, 0, "await_before_next_vm"),
         DependencyEdge(2, 0, "await_before_next_vm"),
     }
@@ -239,13 +239,13 @@ def test_explicit_edge_wins_over_implied_on_dedupe():
         _vm("vm1", depends_on=("vm0",)),
         _vm("vm2"),
     )
-    edges = {(e.dependant, e.dependency): e.origin for e in cfg.dependency_edges()}
+    edges = {(e.dependant, e.dependency): e.origin for e in cfg._dependency_edges()}
     assert edges == {(1, 0): "depends_on", (2, 0): "await_before_next_vm"}
 
 
 def test_no_dependencies_yields_no_edges():
     cfg = _config(_vm("a"), _vm("b"))
-    assert cfg.dependency_edges() == ()
+    assert cfg._dependency_edges() == ()
 
 
 def test_dependency_edge_describe():

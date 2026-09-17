@@ -8,8 +8,8 @@ import asyncio
 
 import pytest
 
+from proxmoxsandbox._impl.dependency_graph import DependencyEdge
 from proxmoxsandbox._impl.vm_scheduler import VmScheduler
-from proxmoxsandbox.schema import DependencyEdge
 
 
 def _drain(scheduler: VmScheduler) -> list[int]:

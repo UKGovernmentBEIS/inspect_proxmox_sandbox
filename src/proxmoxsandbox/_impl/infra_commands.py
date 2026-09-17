@@ -14,6 +14,7 @@ from rich.table import Table
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
+from proxmoxsandbox._impl.dependency_graph import DependencyEdge
 from proxmoxsandbox._impl.healthcheck import HealthCheckExecutor, HealthCheckRunner
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import (
@@ -26,7 +27,6 @@ from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._impl.vm_scheduler import VmScheduler
 from proxmoxsandbox.schema import (
-    DependencyEdge,
     HealthCheck,
     ProxmoxSandboxEnvironmentConfig,
     VmConfig,
@@ -187,7 +187,7 @@ class InfraCommands(abc.ABC):
 
         vm_configs_with_ids = await self._start_vms_in_dependency_order(
             PlannedVm.from_config(config),
-            config.dependency_edges(),
+            config._dependency_edges(),
             vnet_aliases,
             known_builtins,
         )
