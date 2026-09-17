@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 from pydantic_extra_types.mac_address import MacAddress
 
-from proxmoxsandbox.schema import VmNicConfig
+from proxmoxsandbox.schema import VmConfig, VmNicConfig, VmSourceConfig
 
 
 def test_vmnicconfig_ipv4_requires_mac():
@@ -36,3 +36,21 @@ def test_vmnicconfig_minimal():
     nic = VmNicConfig(vnet_alias="test")
     assert nic.mac is None
     assert nic.ipv4 is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["romeo", "web-1", "Kali2025", "a.b.c", "x", "0pointer", "x" * 100],
+)
+def test_vmconfig_name_valid_dns_name(name):
+    vm = VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04"), name=name)
+    assert vm.name == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["bad_name", "has space", "", "-leading", "trailing-", "a..b", "a.", ".a", "é"],
+)
+def test_vmconfig_name_invalid_dns_name(name):
+    with pytest.raises(ValidationError, match="is not a valid DNS name"):
+        VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04"), name=name)
