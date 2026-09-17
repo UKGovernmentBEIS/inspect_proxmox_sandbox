@@ -100,7 +100,6 @@ dns_state() { # server type name
     esac
 }
 
-names=(deb.debian.org download.proxmox.com pypi.org)
 gw=$(ip route show default | awk '{print $3; exit}')
 addr=$(ip -4 addr show scope global | awk '/inet /{print $2; exit}')
 resolver=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null)
@@ -170,6 +169,7 @@ echo "# internet egress"
 for target in 1.1.1.1:443 8.8.8.8:53; do
     want blocked "TCP ${target/:/ port }" "$(tcp_state "${target%:*}" "${target##*:}")"
 done
+names=(deb.debian.org download.proxmox.com pypi.org)
 for name in "${names[@]}"; do
     want blocked "package registry https://$name/" "$(http_state "https://$name/")"
 done
