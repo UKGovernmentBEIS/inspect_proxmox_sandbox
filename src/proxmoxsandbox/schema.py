@@ -2,11 +2,19 @@
 
 import json
 import os
+import re
 from os import getenv
 from pathlib import Path
 from typing import Annotated, Literal, Optional, Tuple, TypeAlias, Union
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
 
@@ -169,6 +177,13 @@ OsType: TypeAlias = Literal[
 ]
 
 
+# Same regex as pve_verify_dns_name in PVE's JSONSchema.pm
+PVE_DNS_NAME_RE = re.compile(
+    r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)*"
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$"
+)
+
+
 class VmConfig(BaseModel, frozen=True):
     """
     Configuration for a virtual machine.
@@ -225,6 +240,17 @@ class VmConfig(BaseModel, frozen=True):
     os_type: Optional[OsType] = "l26"
     cpu: Optional[str] = None
     await_before_next_vm: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_is_dns_name(cls, name: Optional[str]) -> Optional[str]:
+        if name is not None and not PVE_DNS_NAME_RE.match(name):
+            raise ValueError(
+                f"VM name {name!r} is not a valid DNS name (Proxmox requires "
+                + "dot-separated labels of letters, digits and hyphens, not "
+                + "starting or ending with a hyphen)"
+            )
+        return name
 
 
 class HttpHeader(BaseModel):
