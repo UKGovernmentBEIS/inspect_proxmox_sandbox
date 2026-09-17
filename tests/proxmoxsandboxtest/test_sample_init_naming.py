@@ -70,9 +70,8 @@ async def test_named_default_sandbox_is_registered_under_both_keys(
 async def test_unnamed_default_sandbox_is_only_default(
     config_file_env, mock_proxmox_api
 ):
-    """No vm_<id> alias for the default VM; that fallback is for other VMs."""
-    sandboxes = await _sample_init(_vm(None), _vm(None))
-    assert list(sandboxes) == ["default", "vm_101"]
+    sandboxes = await _sample_init(_vm(None), _vm("web"))
+    assert list(sandboxes) == ["default", "web"]
 
 
 async def test_default_named_default_has_no_duplicate_key(

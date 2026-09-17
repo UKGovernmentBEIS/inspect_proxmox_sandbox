@@ -147,7 +147,7 @@ class InfraCommands(abc.ABC):
         """Create the SDN, then create/start VMs in dependency order.
 
         `dependency_edges` and `labels` normally come from
-        `ProxmoxSandboxEnvironmentConfig.dependency_edges()` / `vm_labels()`.
+        `ProxmoxSandboxEnvironmentConfig.dependency_edges()` / `vm_names()`.
         Results are in `vms_config` order regardless of the order VMs were
         created in.
         """

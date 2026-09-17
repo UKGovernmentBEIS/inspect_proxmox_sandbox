@@ -111,14 +111,42 @@ def test_duplicate_vm_names_rejected():
         _config(_vm("x"), _vm("x"))
 
 
-def test_unnamed_vms_do_not_collide():
-    cfg = _config(_vm(), _vm())
-    assert len(cfg.vms_config) == 2
+def test_unnamed_first_sandbox_vm_is_named_default():
+    cfg = _config(_vm())
+    assert cfg.vm_names() == ("default",)
+    cfg = _config(_vm("router", is_sandbox=False), _vm(), _vm("web"))
+    assert cfg.vm_names() == ("router", "default", "web")
 
 
-def test_vm_labels_fall_back_to_position():
-    cfg = _config(_vm("a"), _vm())
-    assert cfg.vm_labels() == ("'a'", "vms_config[1]")
+def test_default_config_vm_is_named_default():
+    assert ProxmoxSandboxEnvironmentConfig().vm_names() == ("default",)
+
+
+def test_unnamed_vm_named_default_from_dict_input():
+    cfg = ProxmoxSandboxEnvironmentConfig(
+        vms_config=[{"vm_source_config": {"built_in": "ubuntu24.04"}}]
+    )
+    assert cfg.vm_names() == ("default",)
+
+
+def test_second_unnamed_vm_rejected():
+    with pytest.raises(ValidationError, match=r"vms_config\[1\] has no name"):
+        _config(_vm(), _vm())
+
+
+def test_unnamed_non_sandbox_vm_rejected_even_before_the_default():
+    with pytest.raises(ValidationError, match=r"vms_config\[0\] has no name"):
+        _config(_vm(is_sandbox=False), _vm("web"))
+
+
+def test_no_sandbox_vm_rejected():
+    with pytest.raises(ValidationError, match="No default sandbox found"):
+        _config(_vm("a", is_sandbox=False), _vm("b", is_sandbox=False))
+
+
+def test_unnamed_first_sandbox_with_default_taken_elsewhere_is_reserved_error():
+    with pytest.raises(ValidationError, match="reserved for the first is_sandbox"):
+        _config(_vm(), _vm("default"))
 
 
 def test_empty_vm_name_rejected():
@@ -160,11 +188,9 @@ def test_depends_on_unknown_name():
         _config(_vm("a", depends_on=("nope",)), _vm("b"))
 
 
-def test_depends_on_unknown_name_hints_about_unnamed_vms():
-    with pytest.raises(
-        ValidationError, match=r"1 VM\(s\) have no name and cannot be depended on"
-    ):
-        _config(_vm("a", depends_on=("nope",)), _vm())
+def test_depends_on_default_vm_by_its_implicit_name():
+    cfg = _config(_vm(), _vm("web", depends_on=("default",)))
+    assert cfg.dependency_edges() == (DependencyEdge(1, 0, "depends_on"),)
 
 
 def test_depends_on_duplicate_entry():
@@ -223,9 +249,9 @@ def test_no_dependencies_yields_no_edges():
 
 
 def test_dependency_edge_describe():
-    labels = ("'a'", "'b'")
-    assert DependencyEdge(0, 1, "depends_on").describe(labels) == "'a' waits for 'b'"
+    names = ("a", "b")
+    assert DependencyEdge(0, 1, "depends_on").describe(names) == "'a' waits for 'b'"
     assert (
-        DependencyEdge(0, 1, "await_before_next_vm").describe(labels)
+        DependencyEdge(0, 1, "await_before_next_vm").describe(names)
         == "'a' waits for 'b' (implied by await_before_next_vm on 'b')"
     )

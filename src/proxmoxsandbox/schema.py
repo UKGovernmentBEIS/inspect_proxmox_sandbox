@@ -7,6 +7,7 @@ from os import getenv
 from pathlib import Path
 from typing import (
     Annotated,
+    Any,
     Dict,
     List,
     Literal,
@@ -233,11 +234,12 @@ class DependencyEdge(NamedTuple):
     dependency: int
     origin: DependencyOrigin
 
-    def describe(self, labels: Sequence[str]) -> str:
+    def describe(self, names: Sequence[str]) -> str:
         """Human-readable edge, attributing implied edges to their source."""
-        text = f"{labels[self.dependant]} waits for {labels[self.dependency]}"
+        dependant, dependency = names[self.dependant], names[self.dependency]
+        text = f"{dependant!r} waits for {dependency!r}"
         if self.origin == "await_before_next_vm":
-            text += f" (implied by await_before_next_vm on {labels[self.dependency]})"
+            text += f" (implied by await_before_next_vm on {dependency!r})"
         return text
 
 
@@ -247,12 +249,12 @@ class VmConfig(BaseModel, frozen=True):
 
     Attributes:
         vm_source_config: The source configuration for the VM
-        name: The name of the VM (optional). Must be a valid DNS name; the empty
-            string is rejected. Names that are set must be unique within a
-            sample: the name is the Proxmox VM name, the key used with Inspect's
+        name: The name of the VM. Must be a valid DNS name and unique within a
+            sample: it is the Proxmox VM name, the key used with Inspect's
             sandbox(), and the identifier other VMs use in depends_on. The first
-            is_sandbox VM is also always reachable as sandbox("default"), so
-            "default" is reserved: only that VM may be named "default".
+            is_sandbox VM is always reachable as sandbox("default") and is named
+            "default" if no name is given; every other VM must be named. Only
+            that VM may be named "default".
         ram_mb: RAM allocation in megabytes (default: 2048)
         vcpus: Number of virtual CPUs (default: 2)
         nics: Network interface configurations (optional)
@@ -282,7 +284,7 @@ class VmConfig(BaseModel, frozen=True):
             Ready means the dependency's healthcheck passed if it has one,
             otherwise that Proxmox reports it running (and, if it needs a guest
             agent, that the agent answers). May name a VM later in vms_config; that
-            VM is simply created first. Unnamed VMs cannot be depended on.
+            VM is simply created first.
         healthcheck: optional guest command polled until it exits 0. Gates this
             VM's readiness for depends_on and await_before_next_vm. Requires
             qemu-guest-agent even when is_sandbox is False.
@@ -444,15 +446,52 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     # Eval-specific configuration
     sdn_config: SdnConfigType = "auto"
     vms_config: Tuple[VmConfig, ...] = (
-        VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
+        VmConfig(
+            name="default", vm_source_config=VmSourceConfig(built_in="ubuntu24.04")
+        ),
     )
 
-    def vm_labels(self) -> Tuple[str, ...]:
-        """Labels for error messages; unnamed VMs are identified by position."""
-        return tuple(
-            repr(vm.name) if vm.name is not None else f"vms_config[{i}]"
-            for i, vm in enumerate(self.vms_config)
+    def vm_names(self) -> Tuple[str, ...]:
+        """Names in vms_config order. Every VM has one once the config has validated."""
+        return tuple(name for vm in self.vms_config if (name := vm.name) is not None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _name_default_vm(cls, data: Any) -> Any:
+        """Name the first is_sandbox VM "default" if the user left it unnamed.
+
+        That VM is registered as sandbox("default") whatever it is called, so this
+        just records the name it already answers to. Any other unnamed VM is
+        rejected by _validate_vm_names. Runs before VmConfig validation, so the
+        entries may be dicts or VmConfig instances.
+        """
+        if not isinstance(data, dict) or not isinstance(
+            data.get("vms_config"), (list, tuple)
+        ):
+            return data
+        vms = list(data["vms_config"])
+        if not all(isinstance(vm, (dict, VmConfig)) for vm in vms):
+            return data
+
+        def field(vm: Any, key: str, default: Any) -> Any:
+            return vm.get(key, default) if isinstance(vm, dict) else getattr(vm, key)
+
+        # If some VM is already called "default", leave it to _validate_vm_names
+        # to say whether that was allowed, rather than reporting a duplicate.
+        if any(field(vm, "name", None) == "default" for vm in vms):
+            return data
+        first_sandbox = next(
+            (i for i, vm in enumerate(vms) if field(vm, "is_sandbox", True)), None
         )
+        if first_sandbox is None or field(vms[first_sandbox], "name", None) is not None:
+            return data
+        vm = vms[first_sandbox]
+        vms[first_sandbox] = (
+            {**vm, "name": "default"}
+            if isinstance(vm, dict)
+            else vm.model_copy(update={"name": "default"})
+        )
+        return {**data, "vms_config": tuple(vms)}
 
     def dependency_edges(self) -> Tuple[DependencyEdge, ...]:
         """Collect all dependency edges.
@@ -494,6 +533,10 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
         first_sandbox = next(
             (i for i, vm in enumerate(self.vms_config) if vm.is_sandbox), None
         )
+        if first_sandbox is None:
+            raise ValueError(
+                "No default sandbox found: at least one VM must have is_sandbox=True"
+            )
         seen: Dict[str, int] = {}
         for i, vm in enumerate(self.vms_config):
             if vm.name is None:
@@ -512,36 +555,38 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
                     f"depends_on, so they must be unique within a sample"
                 )
             seen[vm.name] = i
+        # Checked after the named VMs so that an unnamed first sandbox VM next to
+        # a misplaced "default" reports the reservation, not the missing name.
+        for i, vm in enumerate(self.vms_config):
+            if vm.name is None:
+                raise ValueError(
+                    f"vms_config[{i}] has no name. Only the first is_sandbox VM may "
+                    f"be left unnamed (it is then named 'default'); every other VM "
+                    f"needs a name so it can be identified in Inspect and Proxmox"
+                )
         return self
 
     @model_validator(mode="after")
     def _validate_dependencies(self) -> "ProxmoxSandboxEnvironmentConfig":
-        labels = self.vm_labels()
-        named = self._name_index()
-        unnamed = len(self.vms_config) - len(named)
+        names = self.vm_names()
 
-        for i, vm in enumerate(self.vms_config):
+        for name, vm in zip(names, self.vms_config):
             if len(vm.depends_on) != len(set(vm.depends_on)):
-                raise ValueError(f"{labels[i]} lists a duplicate dependency")
-            if vm.name is not None and vm.name in vm.depends_on:
-                raise ValueError(f"{labels[i]} depends on itself")
+                raise ValueError(f"{name!r} lists a duplicate dependency")
+            if name in vm.depends_on:
+                raise ValueError(f"{name!r} depends on itself")
             for dep in vm.depends_on:
-                if dep not in named:
-                    hint = (
-                        f"; {unnamed} VM(s) have no name and cannot be depended on"
-                        if unnamed
-                        else ""
-                    )
+                if dep not in names:
                     raise ValueError(
-                        f"{labels[i]} depends on unknown VM {dep!r}. "
-                        f"Known names: {sorted(named)}{hint}"
+                        f"{name!r} depends on unknown VM {dep!r}. "
+                        f"Known names: {sorted(names)}"
                     )
 
-        self._reject_cycles(self.dependency_edges(), labels)
+        self._reject_cycles(self.dependency_edges(), names)
         return self
 
     def _reject_cycles(
-        self, edges: Sequence[DependencyEdge], labels: Sequence[str]
+        self, edges: Sequence[DependencyEdge], names: Sequence[str]
     ) -> None:
         # DFS that tracks the edge path, so a cycle through an implied
         # await_before_next_vm edge is reported with its origin attached.
@@ -571,7 +616,7 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
                     start = next(
                         k for k, e in enumerate(path) if e.dependant == edge.dependency
                     )
-                    cycle = " -> ".join(e.describe(labels) for e in path[start:])
+                    cycle = " -> ".join(e.describe(names) for e in path[start:])
                     raise ValueError(f"VM dependency cycle: {cycle}")
                 if edge.dependency in unvisited:
                     visit(edge.dependency)

@@ -259,7 +259,7 @@ sandbox=SandboxEnvironmentSpec(
                 vm_source_config=VmSourceConfig(
                     built_in="ubuntu24.04" # currently supported: "ubuntu24.04", "debian13", "kali2025.4"; see schema.py
                 ),
-                name="romeo", # name is optional, but recommended - it will be shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name.
+                name="romeo", # shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name. Optional only for the first is_sandbox VM, which is otherwise named "default". See "VM Names" below.
                 ram_mb=512, # optional, default is 2048 MB
                 vcpus=4, # optional, default is 2. No attempt is made to check that this will fit in the Proxmox host.
                 uefi_boot=True, # optional, default is False. Generally only needed for Windows VMs.
@@ -364,14 +364,12 @@ sandbox=SandboxEnvironmentSpec(
 
 ### VM Names
 
-It is recommended that you set the `name=` parameter for your defined VMs. This name serves three purposes:
-- It will be displayed in the Proxmox web interface
-- It will be the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
+Every VM has a name, which serves three purposes:
+- It is displayed in the Proxmox web interface
+- It is the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
 - It is the identifier other VMs use in `depends_on`
 
-Names that are set must be unique within a sample and non-empty; configuration validation rejects duplicates and `""`. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`, and cannot be named in another VM's `depends_on`.
-
-> Note: The first `is_sandbox=True` VM is Inspect's `default` sandbox, so you can always access it with `sandbox("default")`. If you also give it a name, it is reachable under that name too. Because of this, `default` is reserved: naming any other VM `default` is a configuration error.
+The first `is_sandbox=True` VM is Inspect's `default` sandbox, so you can always access it with `sandbox("default")`. If you give it a name, it is reachable under that name too; if you don't, it is simply named `default`, in Proxmox as well. Every other VM must be given a `name=`. Names must be unique within a sample and non-empty, and `default` is reserved: naming any other VM `default` is a configuration error.
 
 ### Dependency-based VM startup
 

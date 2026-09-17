@@ -4,7 +4,7 @@
 
 - Dependency-ordered VM startup: `VmConfig.depends_on` names other VMs that must be ready before this one is created. VMs are created in `vms_config` order except that a VM whose dependencies are not yet ready is deferred; cloning stays serial but readiness waits overlap. `await_before_next_vm` is kept and is now equivalent to every later VM depending on it
 - Compose-style `VmConfig.healthcheck` (`test`, `interval`, `timeout`, `retries`, `start_period`): a guest command polled until it exits 0, gating the VM's readiness for `depends_on`. Enables the QEMU guest agent for non-sandbox VMs that declare one. A VM whose guest agent stops answering fails after 25 consecutive unreachable attempts rather than after ~3.5 h
-- VM names that are set must now be unique and non-empty within a sample, and only the first `is_sandbox` VM may be named `default`; that VM is now registered under both `default` and its own name
+- **Breaking:** every VM except the first `is_sandbox` VM must be named; that one defaults to `default`. See "VM Names" in the README
 - Shorter gaps between VM readiness polls (capped at 5 s) so slow-booting guests are noticed sooner
 - Clearer errors when a VM never reaches `running` or its guest agent never answers (`VmNotRunningError`, `GuestAgentUnavailableError`, both `TimeoutError` subclasses)
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work

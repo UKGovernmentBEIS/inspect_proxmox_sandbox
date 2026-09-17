@@ -113,7 +113,7 @@ class Harness:
                 sdn_config=None,
                 vms_config=self.vms,
                 dependency_edges=config.dependency_edges(),
-                labels=config.vm_labels(),
+                labels=config.vm_names(),
             )
         )
 
@@ -258,11 +258,13 @@ async def test_agentless_non_sandbox_dependency_only_needs_running():
 async def test_non_sandbox_with_healthcheck_waits_for_agent_then_check():
     h = _harness(
         _vm("svc", is_sandbox=False, healthcheck=HealthCheck(test=("true",))),
+        _vm("web"),
     )
     task = h.start()
     await _settle()
     h.ready["svc"].set()
     h.healthy["svc"].set()
+    h.ready["web"].set()
     await task
     assert h.index(("running", "svc")) < h.index(("agent", "svc"))
     assert h.index(("agent", "svc")) < h.index(("healthy", "svc"))
