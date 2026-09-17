@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bundled provisioning scripts: under the egress lockdown the node firewall now REJECTs guest DNS to port 53 instead of accepting it; the lockdown unit orders after pmxcfs and the firewall fixup and only halts the API on its own verdict; hosts carry a `.aisi<N>` contract stamp in the API version that survives `pve-manager` upgrades
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.

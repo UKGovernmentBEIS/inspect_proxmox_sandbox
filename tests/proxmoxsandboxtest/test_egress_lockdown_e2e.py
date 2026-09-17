@@ -4,9 +4,12 @@ Skipped unless `PROXMOX_EGRESS_LOCKDOWN_ENABLED` is set: it needs a host with
 the lockdown active, which fails the rest of the integration suite. See
 CONTRIBUTING.md for the setup and teardown sequence.
 
-Only forwarded traffic is dropped, so host-bound traffic — the guest's DHCP
-lease, queries to the SDN resolver — keeps working. That resolver loses its
-upstream, so it answers but cannot recurse.
+Forwarded traffic is dropped, so the guest has no egress. Its DHCP lease still
+works, but the SDN resolver does not: with no upstream all it could serve is its
+own lease table, so the node firewall rejects port 53 outright. Rejects, not
+drops, because dnsmasq advertises itself as the DHCP-supplied resolver and there
+is no way to point guests elsewhere — a drop would hang every lookup in the
+guest until its resolver timed out.
 """
 
 import os
@@ -14,12 +17,13 @@ import re
 
 import pytest
 
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
 )
 
-from .proxmox_sandbox_utils import setup_sandbox
+from .proxmox_sandbox_utils import require_host_contract, setup_sandbox
 
 pytestmark = [
     pytest.mark.req_proxmox,
@@ -51,9 +55,15 @@ query += struct.pack("!HH", 1, 1)
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.settimeout(5)
-sock.sendto(query, (server, 53))
+# connect(), not sendto(): an unconnected UDP socket is never told about the ICMP
+# port-unreachable the node's REJECT rule sends back.
+sock.connect((server, 53))
+sock.send(query)
 try:
     reply = sock.recv(4096)
+except ConnectionRefusedError:
+    print("REFUSED")
+    sys.exit(0)
 except socket.timeout:
     print("NO_REPLY")
     sys.exit(0)
@@ -63,10 +73,12 @@ print(f"rcode={flags & 0xF} answers={answer_count}")
 """
 
 
-async def _dns_probe(
-    env: ProxmoxSandboxEnvironment, server: str, name: str
-) -> tuple[int, int] | None:
-    """Query `server` for `name` from the guest; None if nothing replied."""
+async def _dns_probe(env: ProxmoxSandboxEnvironment, server: str, name: str) -> str:
+    """Query `server` for `name` from the guest.
+
+    Returns "REFUSED" (ICMP port-unreachable), "NO_REPLY" (silence), or
+    "rcode=N answers=M" if the resolver answered.
+    """
     result = await env.exec(
         ["python3", "-c", DNS_PROBE_SCRIPT, server, name],
         timeout=30,
@@ -76,16 +88,20 @@ async def _dns_probe(
     )
 
     output = result.stdout.strip()
-    if output == "NO_REPLY":
-        return None
-
-    match = re.fullmatch(r"rcode=(\d+) answers=(\d+)", output)
-    assert match, f"unexpected DNS probe output: {output!r}"
-    return int(match.group(1)), int(match.group(2))
+    assert output in ("REFUSED", "NO_REPLY") or re.fullmatch(
+        r"rcode=\d+ answers=\d+", output
+    ), f"unexpected DNS probe output: {output!r}"
+    return output
 
 
-async def test_locked_down_host_denies_guest_egress_but_keeps_sdn_services() -> None:
-    """A guest on a locked-down host has no egress, but DHCP and SDN DNS work."""
+async def test_locked_down_host_denies_guest_egress_and_dns(
+    async_proxmox_api: AsyncProxmoxAPI,
+) -> None:
+    """A guest keeps its DHCP lease, has no egress, and DNS fails fast."""
+    # The port-53 rejection below arrived with aisi2, so an older host fails these for a
+    # reason that is not a lapse in isolation.
+    await require_host_contract(async_proxmox_api)
+
     task_name = "test_egress_lockdown_e2e"
     config = ProxmoxSandboxEnvironmentConfig()
 
@@ -146,14 +162,27 @@ async def test_locked_down_host_denies_guest_egress_but_keeps_sdn_services() -> 
             f"{EXTERNAL_NAME} resolved: {getent_res.stdout!r}. {NOT_LOCKED_DOWN_HINT}"
         )
 
-        external_probe = await _dns_probe(env, gateway, EXTERNAL_NAME)
-        assert external_probe is not None, (
-            f"SDN resolver on {gateway} stopped answering guests entirely"
+        # REFUSED rather than NO_REPLY is the point: the node rule rejects, so the
+        # guest learns the port is shut in one round trip.
+        udp_probe = await _dns_probe(env, gateway, EXTERNAL_NAME)
+        assert udp_probe == "REFUSED", (
+            f"SDN resolver on {gateway}:53/udp gave {udp_probe!r}, want REFUSED. "
+            f"{NOT_LOCKED_DOWN_HINT}"
         )
-        rcode, answer_count = external_probe
-        assert not (rcode == 0 and answer_count > 0), (
-            f"SDN resolver on {gateway} recursed upstream for {EXTERNAL_NAME} "
-            f"(rcode={rcode}, answers={answer_count}). {NOT_LOCKED_DOWN_HINT}"
+
+        dns_tcp_res = await env.exec(
+            [
+                "sh",
+                "-c",
+                f'timeout 5 bash -c "exec 3<>/dev/tcp/{gateway}/53" '
+                "2>/dev/null; echo $?",
+            ],
+            timeout=15,
+        )
+        dns_tcp_rc = dns_tcp_res.stdout.strip()
+        assert dns_tcp_rc not in ("0", "124"), (
+            f"{gateway}:53/tcp {'reachable' if dns_tcp_rc == '0' else 'dropped'} "
+            f"(exit {dns_tcp_rc}), want a rejection. {NOT_LOCKED_DOWN_HINT}"
         )
 
     finally:

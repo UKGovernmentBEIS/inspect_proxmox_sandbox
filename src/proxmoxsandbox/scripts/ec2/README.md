@@ -157,6 +157,12 @@ instance-id only.
 - AMI fixup services for hostname + SSL cert + root password regeneration on every boot.
 - A boot-time firewall rule blocking sandbox forwarding to EC2 instance metadata.
 - CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
+- A `.aisi<N>` contract stamp on the version `pveversion` prints and the API serves, so a
+  caller can tell what a host provides before asserting it. Bumped when a host-side file
+  something off-host asserts changes. A `pve-manager` upgrade replaces the stamped file, so an
+  apt hook re-applies it after every dpkg run. Only the API's `version` field and
+  `pveversion`'s text carry it; pvecfg.pm's `sub version()` is left alone because Proxmox
+  compares it internally.
 
 ## Other scripts
 
