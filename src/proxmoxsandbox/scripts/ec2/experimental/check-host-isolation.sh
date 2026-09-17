@@ -54,8 +54,15 @@ not_masked() {
 sysctl_is() { [ "$(sysctl -n "$1" 2>/dev/null)" = "$2" ]; }
 # Presence only. Ordering against a -j PVEFW-FORWARD jump is not decidable here, which is
 # why check-guest-isolation.sh is the arbiter of effect.
-has_rule() { iptables -w -t "$1" -S "$2" 2>/dev/null | grep -q -- "$3"; }
-has_rule6() { ip6tables -w -S "$1" 2>/dev/null | grep -q -- "$2"; }
+# Fragments are literals, and every one must sit on the same rule line; the ones a comment
+# match separates are passed as separate fragments.
+has_rule() { # table chain fragment...
+    local rules frag
+    rules=$(iptables -w -t "$1" -S "$2" 2>/dev/null) || return 1
+    shift 2
+    for frag; do rules=$(grep -F -- "$frag" <<<"$rules") || return 1; done
+}
+has_rule6() { ip6tables -w -S "$1" 2>/dev/null | grep -qF -- "$2"; }
 # 100.64.0.0/10 is in here because AWS allows it as a VPC CIDR, so an endpoint can land there.
 is_private() {
     case "$1" in
@@ -223,10 +230,10 @@ echo
 echo "# guest egress lockdown"
 no_upstream_resolver() { ! grep -q "^nameserver" /run/dnsmasq/resolv.conf; }
 chk "opt-in marker present: $marker" test -f "$marker"
-chk "guest egress dropped: mangle FORWARD -o $nic" has_rule mangle FORWARD "-o $nic .*-j DROP"
-chk "guest ingress dropped: mangle FORWARD -i $nic" has_rule mangle FORWARD "-i $nic .*-j DROP"
+chk "guest egress dropped: mangle FORWARD -o $nic" has_rule mangle FORWARD "-o $nic " "-j DROP"
+chk "guest ingress dropped: mangle FORWARD -i $nic" has_rule mangle FORWARD "-i $nic " "-j DROP"
 chk "dnsmasq upstream queries dropped: mangle OUTPUT --uid-owner dnsmasq" \
-    has_rule mangle OUTPUT "-o $nic .*--uid-owner .*-j DROP"
+    has_rule mangle OUTPUT "-o $nic " "--uid-owner dnsmasq" "-j DROP"
 chk "no upstream resolver for SDN dnsmasq: /run/dnsmasq/resolv.conf" no_upstream_resolver
 
 echo
