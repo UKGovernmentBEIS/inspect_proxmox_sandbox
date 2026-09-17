@@ -139,6 +139,7 @@ echo "INFO  ICMP to the gateway [$(ping -c1 -W2 "$gw" >/dev/null 2>&1 && echo re
 
 echo
 echo "# cloud metadata and link-local"
+# addresses from https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html#instance-metadata-v2-how-it-works
 # IMDS addresses: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html#instance-metadata-v2-how-it-works
 # Resolver addresses: https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html
 want blocked "IMDSv1 GET http://169.254.169.254/latest/meta-data/instance-id" \
