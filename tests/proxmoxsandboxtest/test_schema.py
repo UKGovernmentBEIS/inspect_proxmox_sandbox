@@ -129,13 +129,21 @@ def test_unnamed_vm_named_default_from_dict_input():
 
 
 def test_second_unnamed_vm_rejected():
-    with pytest.raises(ValidationError, match=r"vms_config\[1\] has no name"):
+    with pytest.raises(
+        ValidationError, match=r"vms_config\[1\] is named 'default' \(the default"
+    ):
         _config(_vm(), _vm())
 
 
 def test_unnamed_non_sandbox_vm_rejected_even_before_the_default():
-    with pytest.raises(ValidationError, match=r"vms_config\[0\] has no name"):
+    with pytest.raises(
+        ValidationError, match=r"vms_config\[0\] is named 'default' \(the default"
+    ):
         _config(_vm(is_sandbox=False), _vm("web"))
+
+
+def test_explicit_none_name_means_default():
+    assert _vm(None).name == "default"
 
 
 def test_no_sandbox_vm_rejected():

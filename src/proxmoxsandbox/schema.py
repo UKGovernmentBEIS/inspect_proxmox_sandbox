@@ -15,7 +15,14 @@ from typing import (
     Union,
 )
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
 
@@ -226,10 +233,10 @@ class VmConfig(BaseModel, frozen=True):
         vm_source_config: The source configuration for the VM
         name: The name of the VM. Must be a valid DNS name and unique within a
             sample: it is the Proxmox VM name, the key used with Inspect's
-            sandbox(), and the identifier other VMs use in depends_on. The first
-            is_sandbox VM is always reachable as sandbox("default") and is named
-            "default" if no name is given; every other VM must be named. Only
-            that VM may be named "default".
+            sandbox(), and the identifier other VMs use in depends_on. Defaults
+            to "default", which is only allowed on the first is_sandbox VM (it is
+            always reachable as sandbox("default") anyway), so every other VM
+            must be given a name.
         ram_mb: RAM allocation in megabytes (default: 2048)
         vcpus: Number of virtual CPUs (default: 2)
         nics: Network interface configurations (optional)
@@ -271,7 +278,7 @@ class VmConfig(BaseModel, frozen=True):
     """
 
     vm_source_config: VmSourceConfig
-    name: Optional[str] = None
+    name: str = "default"
     ram_mb: Optional[int] = 2048
     vcpus: Optional[int] = 2
     nics: Optional[Tuple[VmNicConfig, ...]] = None
@@ -284,6 +291,12 @@ class VmConfig(BaseModel, frozen=True):
     cpu: Optional[str] = None
     depends_on: Tuple[str, ...] = ()
     healthcheck: Optional[HealthCheck] = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _none_means_default(cls, value: Any) -> Any:
+        # Configs recorded before name had a default serialised it as null.
+        return "default" if value is None else value
 
     @property
     def requires_guest_agent(self) -> bool:
@@ -416,52 +429,12 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     # Eval-specific configuration
     sdn_config: SdnConfigType = "auto"
     vms_config: Tuple[VmConfig, ...] = (
-        VmConfig(
-            name="default", vm_source_config=VmSourceConfig(built_in="ubuntu24.04")
-        ),
+        VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
 
     def vm_names(self) -> Tuple[str, ...]:
-        """Names in vms_config order. Every VM has one once the config has validated."""
-        return tuple(name for vm in self.vms_config if (name := vm.name) is not None)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _name_default_vm(cls, data: Any) -> Any:
-        """Name the first is_sandbox VM "default" if the user left it unnamed.
-
-        That VM is registered as sandbox("default") whatever it is called, so this
-        just records the name it already answers to. Any other unnamed VM is
-        rejected by _validate_vm_names. Runs before VmConfig validation, so the
-        entries may be dicts or VmConfig instances.
-        """
-        if not isinstance(data, dict) or not isinstance(
-            data.get("vms_config"), (list, tuple)
-        ):
-            return data
-        vms = list(data["vms_config"])
-        if not all(isinstance(vm, (dict, VmConfig)) for vm in vms):
-            return data
-
-        def field(vm: Any, key: str, default: Any) -> Any:
-            return vm.get(key, default) if isinstance(vm, dict) else getattr(vm, key)
-
-        # If some VM is already called "default", leave it to _validate_vm_names
-        # to say whether that was allowed, rather than reporting a duplicate.
-        if any(field(vm, "name", None) == "default" for vm in vms):
-            return data
-        first_sandbox = next(
-            (i for i, vm in enumerate(vms) if field(vm, "is_sandbox", True)), None
-        )
-        if first_sandbox is None or field(vms[first_sandbox], "name", None) is not None:
-            return data
-        vm = vms[first_sandbox]
-        vms[first_sandbox] = (
-            {**vm, "name": "default"}
-            if isinstance(vm, dict)
-            else vm.model_copy(update={"name": "default"})
-        )
-        return {**data, "vms_config": tuple(vms)}
+        """Names in vms_config order."""
+        return tuple(vm.name for vm in self.vms_config)
 
     @model_validator(mode="after")
     def _validate_vm_names(self) -> "ProxmoxSandboxEnvironmentConfig":
@@ -474,14 +447,13 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
             )
         seen: Dict[str, int] = {}
         for i, vm in enumerate(self.vms_config):
-            if vm.name is None:
-                continue
             if vm.name == "":
                 raise ValueError(f"vms_config[{i}] has an empty name")
             if vm.name == "default" and i != first_sandbox:
                 raise ValueError(
-                    f"vms_config[{i}] is named 'default', which is reserved for "
-                    f"the first is_sandbox=True VM (Inspect's default sandbox)"
+                    f"vms_config[{i}] is named 'default' (the default when no name "
+                    f"is given), which is reserved for the first is_sandbox=True VM "
+                    f"(Inspect's default sandbox); give it a name"
                 )
             if vm.name in seen:
                 raise ValueError(
@@ -490,15 +462,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
                     f"depends_on, so they must be unique within a sample"
                 )
             seen[vm.name] = i
-        # Checked after the named VMs so that an unnamed first sandbox VM next to
-        # a misplaced "default" reports the reservation, not the missing name.
-        for i, vm in enumerate(self.vms_config):
-            if vm.name is None:
-                raise ValueError(
-                    f"vms_config[{i}] has no name. Only the first is_sandbox VM may "
-                    f"be left unnamed (it is then named 'default'); every other VM "
-                    f"needs a name so it can be identified in Inspect and Proxmox"
-                )
         return self
 
     @model_validator(mode="after")

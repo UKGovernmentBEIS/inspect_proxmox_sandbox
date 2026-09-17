@@ -402,7 +402,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 async_proxmox=infra_commands.async_proxmox, node=instance.node
             )
 
-            for (vm_id, vm_config), name in zip(vm_configs_with_ids, config.vm_names()):
+            for vm_id, vm_config in vm_configs_with_ids:
                 vm_sandbox_environment = ProxmoxSandboxEnvironment(
                     infra_commands=infra_commands,
                     agent_commands=agent_commands,
@@ -414,7 +414,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     pool_id=pool_id,
                     os_type=vm_config.os_type,
                 )
-                sandboxes[name] = vm_sandbox_environment
+                sandboxes[vm_config.name] = vm_sandbox_environment
                 # The first sandbox VM is also Inspect's "default". Config
                 # validation guarantees there is one and that no later VM took
                 # the name.

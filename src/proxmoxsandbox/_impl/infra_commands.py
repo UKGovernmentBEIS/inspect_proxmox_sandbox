@@ -2,7 +2,6 @@ import abc
 import asyncio
 import os
 import sys
-from dataclasses import dataclass
 from logging import getLogger
 from random import randint
 from typing import (
@@ -39,25 +38,6 @@ from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
     VmConfig,
 )
-
-
-@dataclass(frozen=True)
-class PlannedVm:
-    """One entry of vms_config with its name typed as always present.
-
-    ProxmoxSandboxEnvironmentConfig guarantees the name after validation; the
-    scheduler and depends_on refer to VMs by it.
-    """
-
-    name: str
-    config: VmConfig
-
-    @staticmethod
-    def from_config(config: ProxmoxSandboxEnvironmentConfig) -> Tuple["PlannedVm", ...]:
-        return tuple(
-            PlannedVm(name, vm)
-            for name, vm in zip(config.vm_names(), config.vms_config)
-        )
 
 
 class ProxmoxTarget(NamedTuple):
@@ -192,14 +172,14 @@ class InfraCommands(abc.ABC):
             ipam_mappings.extend(per_vm_ipam_mappings)
 
         vm_configs_with_ids = await self._start_vms_in_dependency_order(
-            PlannedVm.from_config(config), vnet_aliases, known_builtins
+            config.vms_config, vnet_aliases, known_builtins
         )
 
         return vm_configs_with_ids, sdn_zone_id, tuple(ipam_mappings)
 
     async def _start_vms_in_dependency_order(
         self,
-        vms: Tuple[PlannedVm, ...],
+        vms_config: Tuple[VmConfig, ...],
         vnet_aliases: VnetAliases,
         known_builtins: Dict[str, int],
     ) -> Tuple[Tuple[int, VmConfig], ...]:
@@ -210,22 +190,24 @@ class InfraCommands(abc.ABC):
         task state. Only the readiness waits for already-started VMs overlap.
         Returns (vm_id, config) pairs in `vms_config` order.
         """
-        by_name = {vm.name: vm for vm in vms}
-        scheduler = VmScheduler({vm.name: vm.config.depends_on for vm in vms})
+        by_name = {vm.name: vm for vm in vms_config}
+        scheduler = VmScheduler({vm.name: vm.depends_on for vm in vms_config})
         created: Dict[str, Tuple[int, VmConfig]] = {}
         readiness_tasks: List[asyncio.Task[None]] = []
         try:
             # Yields each VM once its dependencies are ready; blocks in between;
             # ends once every VM is ready. Readiness failures raise out of it.
             async for name in scheduler:
-                vm = by_name[name]
+                vm_config = by_name[name]
                 self.logger.info(
-                    f"Creating VM {vm.name} ({len(created) + 1}/{len(vms)})"
+                    f"Creating VM {name} ({len(created) + 1}/{len(vms_config)})"
                 )
-                vm_id = await self._create_vm(vm, vnet_aliases, known_builtins)
-                created[name] = (vm_id, vm.config)
+                vm_id = await self._create_vm(vm_config, vnet_aliases, known_builtins)
+                created[name] = (vm_id, vm_config)
                 readiness_tasks.append(
-                    asyncio.create_task(self._await_vm_ready(scheduler, vm, vm_id))
+                    asyncio.create_task(
+                        self._await_vm_ready(scheduler, vm_config, vm_id)
+                    )
                 )
         finally:
             for task in readiness_tasks:
@@ -233,23 +215,26 @@ class InfraCommands(abc.ABC):
             if readiness_tasks:
                 await asyncio.gather(*readiness_tasks, return_exceptions=True)
 
-        return tuple(created[vm.name] for vm in vms)
+        return tuple(created[vm.name] for vm in vms_config)
 
     async def _create_vm(
-        self, vm: PlannedVm, vnet_aliases: VnetAliases, known_builtins: Dict[str, int]
+        self,
+        vm_config: VmConfig,
+        vnet_aliases: VnetAliases,
+        known_builtins: Dict[str, int],
     ) -> int:
         """Clone, configure and start one VM; register it for cleanup."""
-        with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm.config=}"):
+        with trace_action(self.logger, self.TRACE_NAME, f"create VM {vm_config=}"):
             vm_id = await self.qemu_commands.create_and_start_vm(
                 sdn_vnet_aliases=vnet_aliases,
-                vm_config=vm.config,
+                vm_config=vm_config,
                 built_in_vm_ids=known_builtins,
             )
             self.qemu_commands.register_vm(vm_id)
         return vm_id
 
     async def _await_vm_ready(
-        self, scheduler: VmScheduler, vm: PlannedVm, vm_id: int
+        self, scheduler: VmScheduler, vm_config: VmConfig, vm_id: int
     ) -> None:
         """Wait for a VM's preconditions and healthcheck, then tell the scheduler.
 
@@ -257,23 +242,23 @@ class InfraCommands(abc.ABC):
         driver's cloning. Reports success or the first failure to `scheduler`,
         which is where the driver is blocked.
         """
-        label = f"{vm.name} (ID={vm_id})"
+        label = f"{vm_config.name} (ID={vm_id})"
         self.logger.info(f"Waiting for VM {label}")
         try:
             await self.qemu_commands.await_running(vm_id)
-            if vm.config.requires_guest_agent:
+            if vm_config.requires_guest_agent:
                 await self.qemu_commands.await_agent(vm_id)
-            if vm.config.healthcheck is not None:
+            if vm_config.healthcheck is not None:
                 await HealthCheckRunner(
-                    vm.config.healthcheck,
-                    self._healthcheck_executor(vm_id, vm.config),
+                    vm_config.healthcheck,
+                    self._healthcheck_executor(vm_id, vm_config),
                     label=label,
                 ).run()
         except Exception as exc:
-            scheduler.mark_failed(vm.name, exc)
+            scheduler.mark_failed(vm_config.name, exc)
             raise
         self.logger.info(f"VM {label} is ready")
-        scheduler.mark_ready(vm.name)
+        scheduler.mark_ready(vm_config.name)
 
     def _healthcheck_executor(
         self, vm_id: int, vm_config: VmConfig
