@@ -113,6 +113,14 @@ def test_provisioners_contain_egress_lockdown(provisioner: Path) -> None:
         "iptables -w -t mangle -I FORWARD 1 "
         '-m comment --comment "$COMMENT $RUN_ID" -j DROP'
     ) in script
+    assert (
+        "iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 "
+        '-m comment --comment "$COMMENT $RUN_ID" -j REJECT'
+    ) in script
+    assert (
+        "iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 "
+        '-m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset'
+    ) in script
     assert "OnUnitActiveSec=1min" in script
     lockdown = _extract_heredoc(script, "EGRESS_LOCKDOWN")
     assert "could not determine management NIC" not in lockdown

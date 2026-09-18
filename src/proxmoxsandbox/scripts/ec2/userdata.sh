@@ -177,10 +177,23 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
 
 EOFPATCH
 
-# Mark version to indicate patching
-sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
+cat > /usr/local/bin/inspect-proxmox-stamp-contract.sh << 'STAMP_CONTRACT'
+#!/bin/bash
+set -euo pipefail
+C=aisi2
+F=/usr/share/perl5/PVE/pvecfg.pm
+before=$(md5sum < "$F")
+sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)\(\.aisi[0-9]\+\)\?',/\1.$C',/
+        s|\(return '[0-9]\+\.[0-9]\+\.[0-9]\+\)\(\.aisi[0-9]\+\)\?/|\1.$C/|" "$F"
+grep -q "'version' => '[0-9.]*\.$C'," "$F" || { echo "ERROR: $F not stamped $C" >&2; exit 1; }
+[ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
+STAMP_CONTRACT
+chmod +x /usr/local/bin/inspect-proxmox-stamp-contract.sh
+cat > /etc/apt/apt.conf.d/80inspect-proxmox-contract << 'APT_HOOK'
+DPkg::Post-Invoke { "/usr/local/bin/inspect-proxmox-stamp-contract.sh || true"; };
+APT_HOOK
+/usr/local/bin/inspect-proxmox-stamp-contract.sh
 
-# --- DNS forwarding for SDN dnsmasq instances ---
 # PVE launches per-zone dnsmasq with -r /run/dnsmasq/resolv.conf for upstream DNS.
 # On EC2 that file doesn't exist, so dnsmasq can't forward queries and VMs have
 # no working DNS. Point it at the VPC resolver (second IP in the VPC CIDR).
@@ -394,11 +407,13 @@ reload_dnsmasq() {
 }
 
 gc_stale_rules() {
-    iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
-        case "$rule" in
-            *"$COMMENT $RUN_ID"*) continue ;;
-        esac
-        echo "${rule#-A }" | xargs iptables -w -t mangle -D || true
+    for table in mangle filter; do
+        iptables-save -t "$table" | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
+            case "$rule" in
+                *"$COMMENT $RUN_ID"*) continue ;;
+            esac
+            echo "${rule#-A }" | xargs iptables -w -t "$table" -D || true
+        done
     done
 }
 
@@ -412,6 +427,8 @@ blank_resolv() {
 }
 
 if [ -f "$MARKER" ]; then
+    iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
+    iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
     MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
     if [ -z "$MGMT_NICS" ]; then
         iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
@@ -446,10 +463,12 @@ Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-p
 After=network-online.target pve-firewall.service proxmox-firewall.service
 Wants=network-online.target
 OnFailure=inspect-proxmox-egress-lockdown-halt.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
+SuccessExitStatus=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
