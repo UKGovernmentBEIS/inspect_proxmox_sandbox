@@ -114,11 +114,11 @@ def test_provisioners_contain_egress_lockdown(provisioner: Path) -> None:
         '-m comment --comment "$COMMENT $RUN_ID" -j DROP'
     ) in script
     assert (
-        "iptables -w -I INPUT 1 ! -i lo -p udp --dport 53 "
+        "iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 "
         '-m comment --comment "$COMMENT $RUN_ID" -j REJECT'
     ) in script
     assert (
-        "iptables -w -I INPUT 1 ! -i lo -p tcp --dport 53 "
+        "iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 "
         '-m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset'
     ) in script
     assert "OnUnitActiveSec=1min" in script
