@@ -233,8 +233,6 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
  
 EOFPATCH
 
-# Host contract for off-host callers (scripts/ec2/README.md); bump when host-side behaviour they
-# assert changes. Re-applied by the apt hook because a pve-manager upgrade replaces pvecfg.pm.
 cat > /usr/local/bin/inspect-proxmox-stamp-contract.sh << 'STAMP_CONTRACT'
 #!/bin/bash
 set -euo pipefail
@@ -353,9 +351,6 @@ blank_resolv() {
 }
 
 if [ -f "$MARKER" ]; then
-    # Guests must not reach dnsmasq at all: its lease table spans every vnet in the zone.
-    # REJECT, not DROP: dnsmasq is the DHCP-supplied resolver, so a drop would hang every
-    # guest lookup. No -i: vnet names are generated per sample. See scripts/ec2/README.md.
     iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
     iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
     MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
@@ -392,8 +387,6 @@ Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-p
 After=network-online.target pve-firewall.service proxmox-firewall.service
 Wants=network-online.target
 OnFailure=inspect-proxmox-egress-lockdown-halt.service
-# OnFailure masks the API, so only the script's own verdict may fire it. Without the two
-# settings below, a concurrent restart (TERM mid-run) or 5 starts in 10s masks a locked host.
 StartLimitIntervalSec=0
 
 [Service]
