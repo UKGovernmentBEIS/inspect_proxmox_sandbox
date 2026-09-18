@@ -356,8 +356,8 @@ if [ -f "$MARKER" ]; then
     # Guests must not reach dnsmasq at all: its lease table spans every vnet in the zone.
     # REJECT, not DROP: dnsmasq is the DHCP-supplied resolver, so a drop would hang every
     # guest lookup. No -i: vnet names are generated per sample. See scripts/ec2/README.md.
-    iptables -w -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
-    iptables -w -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
+    iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
+    iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
     MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
     if [ -z "$MGMT_NICS" ]; then
         iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
