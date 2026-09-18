@@ -151,9 +151,6 @@ lockdown armed — the internet. They say nothing about what the *host* can reac
 guest that escapes to the host inherits all of it. For untrusted workloads the VPC has
 to close that half.
 
-`experimental/check-host-isolation.sh` asserts everything below; on a host with ordinary
-internet access it fails by design.
-
 **Host layer.** Arm the egress lockdown: `touch
 /etc/inspect-proxmox-egress-lockdown` and start
 `inspect-proxmox-egress-lockdown.service` (see CONTRIBUTING.md). It drops forwarded
@@ -202,8 +199,7 @@ timed out.
    `--metadata-options`, and a backstop rather than the primary control.
 
 Routes to peered VPCs, transit gateways and on-prem survive all of this, and a guest that
-reaches one is off the host. Nothing in the AMI knows those addresses; pass them to
-`check-guest-isolation.sh` as `--unreachable IP[:PORT]` and it asserts they're dead.
+reaches one is off the host. Nothing in the AMI knows those addresses.
 
 ## EC2-specific bits handled by `userdata.sh`
 

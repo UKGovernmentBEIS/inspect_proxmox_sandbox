@@ -6,10 +6,10 @@ CONTRIBUTING.md for the setup and teardown sequence.
 
 Forwarded traffic is dropped, so the guest has no egress. Its DHCP lease still
 works, but the SDN resolver does not: with no upstream all it could serve is its
-own lease table, so the host rejects port 53 outright. Rejects, not
-drops, because dnsmasq advertises itself as the DHCP-supplied resolver and there
-is no way to point guests elsewhere — a drop would hang every lookup in the
-guest until its resolver timed out.
+own lease table, so the host rejects port 53 outright. Rejects, not drops,
+because dnsmasq advertises itself as the DHCP-supplied resolver and there is no
+way to point guests elsewhere: a drop would hang every lookup in the guest until
+its resolver timed out.
 """
 
 import os
