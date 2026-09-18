@@ -119,23 +119,20 @@ echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selectio
 echo "postfix postfix/mailname string proxmox.localdomain" | debconf-set-selections
 DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi chrony
 
+rm -vf /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
+
 cat > /root/patch-pve-qemu.sh << 'PVE_QEMU_PATCH'
 #!/bin/bash
 set -euxo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-FIXED_RELEASE_VERSION="11.1.1-1"
 PATCHED_VERSION="11.0.3-3+aisi1"
 PVE_QEMU_BASE_COMMIT="c3b7a675a52c11a1c4a5873ff2bd1696df7bf98c"
 PVE_QEMU_PATCHES_COMMIT="5e08c14024a6646711fc88529942e5296b9cd676"
 BUILD_DIR="/root/pve-qemu-build"
 
 INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
-if dpkg --compare-versions "$INSTALLED_VERSION" ge "$FIXED_RELEASE_VERSION"; then
-    echo "pve-qemu-kvm $INSTALLED_VERSION already includes the official scsi-disk fix, nothing to do"
-    exit 0
-fi
 if /usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -qF quirk_mode_page_set_block_size; then
     echo "pve-qemu-kvm $INSTALLED_VERSION already carries the scsi-disk quirk patch, nothing to do"
     exit 0
@@ -591,8 +588,6 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 FIXUP_FIREWALL_UNIT
-
-rm -vf /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 
 systemctl daemon-reload
 systemctl enable proxmox-ami-fixup-hostname.service
