@@ -425,6 +425,15 @@ systemctl enable inspect-proxmox-block-cloud-metadata.service
 systemctl enable inspect-proxmox-egress-lockdown.service
 systemctl enable inspect-proxmox-egress-lockdown.timer
 
+set -o pipefail
+pveum user list --output-format json | jq -r '.[].userid' |
+while IFS= read -r userid; do
+    pveum user token list "$userid" --output-format json | jq -r '.[].tokenid' |
+    while IFS= read -r tokenid; do
+        pveum user token remove "$userid" "$tokenid"
+    done
+done
+
 touch /var/local/inspect-proxmox-on-first-boot.done
 
 # shut down to signal to virt-install that installation is complete
