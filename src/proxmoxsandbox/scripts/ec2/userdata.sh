@@ -633,6 +633,14 @@ OTELAPPLYUNIT
 systemctl daemon-reload
 systemctl enable cloudwatch-otel-apply.service
 
+pveum user list --output-format json | jq -r '.[].userid' |
+while IFS= read -r userid; do
+    pveum user token list "$userid" --output-format json | jq -r '.[].tokenid' |
+    while IFS= read -r tokenid; do
+        pveum user token remove "$userid" "$tokenid"
+    done
+done
+
 echo "PROXMOX INSTALL COMPLETE: $(pveversion)"
 
 # Final reboot: pvenetcommit.service will promote interfaces.new -> interfaces
