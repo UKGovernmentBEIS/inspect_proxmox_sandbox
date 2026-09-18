@@ -271,10 +271,8 @@ pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp
 pvesh set /nodes/proxmox/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
 
-# IPv6 is not supported for sandbox guests on this provider. SDN vnet bridges are
-# created per sample with generated names, so we can't pin a rule to them; instead
-# default.disable_ipv6 makes every interface created after boot (i.e. the vnets)
-# come up with no IPv6. The already-up management NIC keeps its own setting.
+# vnet names are generated per sample, so only default.disable_ipv6 can reach them. The
+# management NIC is already up and keeps its own setting.
 cat > /etc/sysctl.d/99-inspect-proxmox-disable-ipv6.conf << 'SYSCTL_V6'
 net.ipv6.conf.default.disable_ipv6 = 1
 SYSCTL_V6
