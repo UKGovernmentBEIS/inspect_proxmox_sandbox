@@ -1,12 +1,15 @@
-"""Keep compressed userdata within EC2's limit, with room for launch wrappers."""
+"""EC2 caps instance user data at 16384 bytes, gzipped and base64-encoded.
 
+scripts/ec2/userdata.sh is passed that way, so it has a size budget. Overrunning
+it fails at RunInstances, which is only reachable by launching a real instance.
+"""
+
+import base64
 import gzip
 import json
 from pathlib import Path
 
-import pytest
-
-COMPRESSED_USERDATA_BUDGET = 13500
+BUDGET = 13500
 
 SCRIPT = (
     Path(__file__).parents[2]
@@ -18,10 +21,6 @@ SCRIPT = (
 )
 
 
-@pytest.mark.parametrize("json_wrapped", [False, True])
-def test_userdata_fits_ec2_limit(json_wrapped: bool) -> None:
-    userdata = SCRIPT.read_text()
-    if json_wrapped:
-        userdata = json.dumps(userdata)
-    compressed = gzip.compress(userdata.encode(), mtime=0)
-    assert len(compressed) <= COMPRESSED_USERDATA_BUDGET
+def test_userdata_fits_ec2_limit() -> None:
+    encoded = base64.b64encode(gzip.compress(json.dumps(SCRIPT.read_text()).encode()))
+    assert len(encoded) <= BUDGET
