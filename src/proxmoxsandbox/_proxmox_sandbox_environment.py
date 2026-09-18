@@ -75,6 +75,10 @@ class ReturnCodeNotWritten(Exception):
     """The exec wrapper exited without writing its returncode file."""
 
 
+class InvalidReturnCode(Exception):
+    """The guest's returncode file does not contain an integer."""
+
+
 @sandboxenv(name="proxmox")
 class ProxmoxSandboxEnvironment(SandboxEnvironment):
     """An Inspect sandbox environment for Proxmox virtual machines."""
@@ -859,6 +863,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     stdout=stdout,
                     stderr=f"{stderr}\n{killed_note}" if stderr else killed_note,
                 )
+            except InvalidReturnCode:
+                note = "proxmox sandbox: command returned an invalid exit code."
+                exec_response = ExecResult(
+                    success=False,
+                    returncode=1,
+                    stdout=stdout,
+                    stderr=f"{stderr}\n{note}" if stderr else note,
+                )
 
         # cleanup - we don't need to wait for the result of this
         if is_windows:
@@ -890,6 +902,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @tenacity.retry(
         wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
         stop=tenacity.stop_after_delay(2),
+        retry=tenacity.retry_if_not_exception_type(InvalidReturnCode),
         reraise=True,
     )
     async def _read_return_code(self, tmp_start) -> int:
@@ -904,7 +917,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         returncode_string_stripped = raw.decode("utf-8", errors="replace").strip()
         if len(returncode_string_stripped) == 0:
             raise ReturnCodeNotWritten()
-        return int(returncode_string_stripped)
+        try:
+            return int(returncode_string_stripped)
+        except ValueError as ex:
+            raise InvalidReturnCode() from ex
 
     async def _read_exec_output(self, filepath: str) -> str:
         # decode=0 gives raw bytes; decode UTF-8 errors="replace" (output is
