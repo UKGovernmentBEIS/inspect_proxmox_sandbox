@@ -44,19 +44,10 @@ export INSTANCE_NAME=proxmox                  # Name tag for the instance
 # export INSTANCE_PROFILE=...                 # required unless DHMC is enabled in this account/region
 # export LAUNCH_EXTRA_TAGS='{Key=team,Value=infra}'   # AWS CLI shorthand; single-quote to prevent brace expansion
 
+# Launches m8i.2xlarge, runs the full Proxmox install via user-data, and tails
+# the install log on the host until it reports complete (~5-15 min). Prints
+# the instance ID and root password when done.
 ./launch.sh
-```
-
-The launcher follows installation through both reboots and prints the instance
-ID and root password when complete. Installation includes the QEMU SCSI disk
-security fixes; if the installed package does not already contain them, it
-builds and installs a backport from source. This can lengthen the initial bake.
-
-If the QEMU backport fails, installation stops before reporting completion.
-Inspect `/root/install-proxmox.log`, resolve the error, then retry stage 2:
-
-```bash
-sudo systemctl restart proxmox-install-stage2.service
 ```
 
 Once the build instance reports complete, snapshot it:
