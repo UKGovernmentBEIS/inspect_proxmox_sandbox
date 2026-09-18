@@ -299,20 +299,6 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_PASSWORD_UNIT
 
-cat > /usr/local/bin/proxmox-ami-fixup-tokens.sh << 'FIXUP_TOKENS'
-#!/bin/bash
-set -euo pipefail
-
-pveum user list --output-format json | jq -r '.[].userid' |
-while IFS= read -r userid; do
-    pveum user token list "$userid" --output-format json | jq -r '.[].tokenid' |
-    while IFS= read -r tokenid; do
-        pveum user token remove "$userid" "$tokenid"
-    done
-done
-FIXUP_TOKENS
-chmod +x /usr/local/bin/proxmox-ami-fixup-tokens.sh
-
 # At boot, not baked in: the NIC name (enp39s0, ens5, ...) depends on instance family.
 cat > /usr/local/bin/proxmox-ami-fixup-nat.sh << 'FIXUP_NAT'
 #!/bin/bash
@@ -647,7 +633,13 @@ OTELAPPLYUNIT
 systemctl daemon-reload
 systemctl enable cloudwatch-otel-apply.service
 
-/usr/local/bin/proxmox-ami-fixup-tokens.sh
+pveum user list --output-format json | jq -r '.[].userid' |
+while IFS= read -r userid; do
+    pveum user token list "$userid" --output-format json | jq -r '.[].tokenid' |
+    while IFS= read -r tokenid; do
+        pveum user token remove "$userid" "$tokenid"
+    done
+done
 
 echo "PROXMOX INSTALL COMPLETE: $(pveversion)"
 
