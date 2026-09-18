@@ -158,7 +158,7 @@ internet access it fails by design.
 /etc/inspect-proxmox-egress-lockdown` and start
 `inspect-proxmox-egress-lockdown.service` (see CONTRIBUTING.md). It drops forwarded
 traffic across the management NIC in both directions, strips SDN dnsmasq's upstream
-resolver, and switches the node's port-53 rules from ACCEPT to REJECT: guests still get
+resolver, and rejects port 53 in the host's iptables `INPUT` chain: guests still get
 their DHCP leases, but there is no resolver left for them to query. Nothing needs one —
 the only names a guest could still have resolved were the other guests in its own
 sample's lease table, across every vnet in the zone. REJECT rather than DROP because

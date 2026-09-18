@@ -6,7 +6,7 @@ CONTRIBUTING.md for the setup and teardown sequence.
 
 Forwarded traffic is dropped, so the guest has no egress. Its DHCP lease still
 works, but the SDN resolver does not: with no upstream all it could serve is its
-own lease table, so the node firewall rejects port 53 outright. Rejects, not
+own lease table, so the host rejects port 53 outright. Rejects, not
 drops, because dnsmasq advertises itself as the DHCP-supplied resolver and there
 is no way to point guests elsewhere — a drop would hang every lookup in the
 guest until its resolver timed out.
@@ -54,17 +54,24 @@ query = struct.pack("!HHHHHH", 0x2A2A, 0x0100, 1, 0, 0, 0) + question
 query += struct.pack("!HH", 1, 1)
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.settimeout(5)
+sock.settimeout(3)
 # connect(), not sendto(): an unconnected UDP socket is never told about the ICMP
-# port-unreachable the node's REJECT rule sends back.
+# port-unreachable the host's REJECT rule sends back.
 sock.connect((server, 53))
-sock.send(query)
-try:
-    reply = sock.recv(4096)
-except ConnectionRefusedError:
-    print("REFUSED")
-    sys.exit(0)
-except socket.timeout:
+# The host rate-limits ICMP port-unreachable per destination (icmp_ratelimit: one a
+# second after a small burst) and the guest's own resolver retries drain that, so one
+# silence is not a verdict; the wait between attempts is what lets a token back in.
+for _ in range(4):
+    sock.send(query)
+    try:
+        reply = sock.recv(4096)
+        break
+    except ConnectionRefusedError:
+        print("REFUSED")
+        sys.exit(0)
+    except socket.timeout:
+        continue
+else:
     print("NO_REPLY")
     sys.exit(0)
 
@@ -76,7 +83,7 @@ print(f"rcode={flags & 0xF} answers={answer_count}")
 async def _dns_probe(env: ProxmoxSandboxEnvironment, server: str, name: str) -> str:
     """Query `server` for `name` from the guest.
 
-    Returns "REFUSED" (ICMP port-unreachable), "NO_REPLY" (silence), or
+    Returns "REFUSED" (ICMP port-unreachable), "NO_REPLY" (silence on every attempt), or
     "rcode=N answers=M" if the resolver answered.
     """
     result = await env.exec(
@@ -162,7 +169,7 @@ async def test_locked_down_host_denies_guest_egress_and_dns(
             f"{EXTERNAL_NAME} resolved: {getent_res.stdout!r}. {NOT_LOCKED_DOWN_HINT}"
         )
 
-        # REFUSED rather than NO_REPLY is the point: the node rule rejects, so the
+        # REFUSED rather than NO_REPLY is the point: the host rejects, so the
         # guest learns the port is shut in one round trip.
         udp_probe = await _dns_probe(env, gateway, EXTERNAL_NAME)
         assert udp_probe == "REFUSED", (
