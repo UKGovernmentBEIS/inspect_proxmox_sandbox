@@ -409,11 +409,13 @@ reload_dnsmasq() {
 }
 
 gc_stale_rules() {
-    iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
-        case "$rule" in
-            *"$COMMENT $RUN_ID"*) continue ;;
-        esac
-        echo "${rule#-A }" | xargs iptables -w -t mangle -D || true
+    for table in mangle filter; do
+        iptables-save -t "$table" | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
+            case "$rule" in
+                *"$COMMENT $RUN_ID"*) continue ;;
+            esac
+            echo "${rule#-A }" | xargs iptables -w -t "$table" -D || true
+        done
     done
 }
 
@@ -426,38 +428,12 @@ blank_resolv() {
     reload_dnsmasq
 }
 
-# Port-53 rules carry no --iface, so they cover every SDN gateway and the management address.
-# REJECT under lockdown, because dnsmasq then has no upstream. See scripts/ec2/README.md.
-NODE=$(hostname)
-FW_COMMENT="inspect-proxmox-sandbox: host-isolation"
-dns53_query() { # jq filter over our port-53 rules
-    pvesh get "/nodes/$NODE/firewall/rules" --output-format json 2>/dev/null \
-        | jq -r --arg c "$FW_COMMENT" "[ .[] | select(.comment == \$c and .type == \"in\"
-                   and ((.dport // \"\") | tostring) == \"53\") ] | $1" 2>/dev/null || true
-}
-dns53_is() { # ACCEPT|REJECT: exactly one rule per proto, both in the wanted action
-    [ "$(dns53_query 'map("\(.action)/\(.proto)") | sort | join(",")')" = "$1/tcp,$1/udp" ]
-}
-set_dns53() { # ACCEPT|REJECT
-    local want="$1"
-    if dns53_is "$want"; then
-        return 0
-    fi
-    dns53_query 'map(.pos) | sort | reverse | .[]' \
-        | while read -r pos; do
-            [ -n "$pos" ] && { pvesh delete "/nodes/$NODE/firewall/rules/$pos" || true; }
-        done
-    for proto in udp tcp; do
-        pvesh create "/nodes/$NODE/firewall/rules" --type in --action "$want" \
-            --proto "$proto" --dport 53 --enable 1 --comment "$FW_COMMENT" || true
-    done
-    # The end state matters, not the individual calls; callers differ on what failure means.
-    dns53_is "$want" || { echo "ERROR: port-53 rules not $want after rewrite" >&2; return 1; }
-}
-
 if [ -f "$MARKER" ]; then
-    # Fatal, like the iptables calls below: the port must close.
-    set_dns53 REJECT
+    # Guests must not reach dnsmasq at all: its lease table spans every vnet in the zone.
+    # REJECT, not DROP: dnsmasq is the DHCP-supplied resolver, so a drop would hang every
+    # guest lookup. No -i: vnet names are generated per sample. See scripts/ec2/README.md.
+    iptables -w -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
+    iptables -w -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
     MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
     if [ -z "$MGMT_NICS" ]; then
         iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
@@ -474,8 +450,6 @@ if [ -f "$MARKER" ]; then
     gc_stale_rules
     blank_resolv
 else
-    # Tolerated: over-restriction is safe, and OnFailure would mask the API here.
-    set_dns53 ACCEPT || true
     gc_stale_rules
     if [ -f "$RESOLV_BACKUP" ]; then
         mv -f "$RESOLV_BACKUP" "$RESOLV"
@@ -491,12 +465,8 @@ chmod +x /usr/local/bin/inspect-proxmox-egress-lockdown.sh
 cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.service << 'EGRESS_LOCKDOWN_UNIT'
 [Unit]
 Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-proxmox-egress-lockdown)
-# pvesh talks to pmxcfs, not pvedaemon: without pve-cluster every rule read is ipcc_send_rec.
-# After the firewall fixup because both rewrite the node rules, and a delete renumbers the
-# positions the other is midway through using ("no rule at position 2").
-After=network-online.target pve-firewall.service proxmox-firewall.service pve-cluster.service
-After=proxmox-ami-fixup-firewall.service
-Wants=network-online.target pve-cluster.service
+After=network-online.target pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
 OnFailure=inspect-proxmox-egress-lockdown-halt.service
 # OnFailure masks the API, so only the script's own verdict may fire it. Without the two
 # settings below, a concurrent restart (TERM mid-run) or 5 starts in 10s masks a locked host.
@@ -551,11 +521,10 @@ pvesh get /nodes/$NODE/firewall/rules --output-format json \
     | while read -r pos; do pvesh delete /nodes/$NODE/firewall/rules/"$pos"; done
 pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1 --comment "$C"
 pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1 --comment "$C"
-# No --iface possible: SDN gateways are created per sample. REJECT under the marker rather
-# than DROP, so lookups fail instead of hanging; the lockdown script swaps them between boots.
-if [ -f /etc/inspect-proxmox-egress-lockdown ]; then DNS53=REJECT; else DNS53=ACCEPT; fi
-pvesh create /nodes/$NODE/firewall/rules --type in --action $DNS53 --proto udp --dport 53 --enable 1 --comment "$C"
-pvesh create /nodes/$NODE/firewall/rules --type in --action $DNS53 --proto tcp --dport 53 --enable 1 --comment "$C"
+# No --iface possible: SDN gateways are created per sample. The egress lockdown rejects
+# port 53 ahead of these in iptables INPUT, so they stay ACCEPT regardless of the marker.
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$C"
+pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1 --comment "$C"
 pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1 --comment "$C"
 pvesh set /nodes/$NODE/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
