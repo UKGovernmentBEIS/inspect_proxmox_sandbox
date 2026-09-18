@@ -127,7 +127,7 @@ for host in "${hosts[@]}"; do
         want blocked "host $host:$port (${spec#*:})" "$(tcp_state "$host" "$port")"
     done
     want blocked "Proxmox API https://$host:8006/api2/json/version" "$(http_state "https://$host:8006/api2/json/version")"
-    # The node rule closes the resolver's port with REJECT so guests fail immediately instead
+    # The host closes the resolver's port with REJECT so guests fail immediately instead
     # of hanging on every lookup. Silence here means the rule is a DROP; reachable means
     # dnsmasq is still serving this address.
     want rejected "host $host:53 (dns)" "$(tcp_state "$host" 53)"
@@ -185,7 +185,7 @@ else
         want blocked "VPC resolver $resolver_addr:53 over UDP" \
             "$(dns_state "$resolver_addr" A "${names[0]}")"
     done
-    # Under the lockdown the node rule rejects port 53, so the SDN resolver answers nothing at
+    # Under the lockdown the host rejects port 53, so the SDN resolver answers nothing at
     # all — not even REFUSED. dig never falls back to TCP on silence, so that transport needs
     # a probe of its own.
     for name in "${names[@]}"; do

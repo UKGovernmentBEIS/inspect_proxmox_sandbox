@@ -190,34 +190,15 @@ chk "node firewall rules readable" fetched "$node_rules_rc" "$node_rules"
 chk "cluster firewall rules readable" fetched "$cluster_rules_rc" "$cluster_rules"
 chk "cluster firewall enabled" fw_enabled /etc/pve/firewall/cluster.fw
 chk "node firewall enabled" fw_enabled "/etc/pve/nodes/$node/host.fw"
-# Under lockdown the resolver has no upstream, so all it can still do for a guest is answer
-# from its own lease table — cross-segment host enumeration, since one dnsmasq serves every
-# vnet in a zone. The port is closed there, leaving DHCP as the only thing guests may reach.
-port53_rejected() { # proto: closed, but answering, so guests fail fast rather than hang
-    # Unbound, like the ACCEPT it replaces: bound to the mgmt NIC it would reach nothing a
-    # guest sends, and the lookups this is meant to fail fast would hang instead.
-    jq -e --arg p "$1" \
-        'any(.[]; .type == "in" and .action == "REJECT" and (.iface // "") == ""
-             and .proto == $p and ((.dport // "") | tostring) == "53")' \
-        <<<"$node_rules" >/dev/null && return 0
-    echo "node port-53 rules: $(jq -c '[.[] | select(((.dport // "") | tostring) == "53")
-                                        | {pos, action, proto, iface}]' <<<"$node_rules")"
-    return 1
-}
-# Guests reach the host only where an ACCEPT is unbound, so the DHCP rule is the one that has
-# to be: udp/67 on every gateway. Port 53 is an ACCEPT only without the lockdown marker; with
-# it, the same two rules are REJECT and port53_rejected is what looks for them.
-node_accepts=("tcp/8006@$nic" "tcp/22@$nic" "udp/67@")
-[ -f "$marker" ] || node_accepts+=("udp/53@" "tcp/53@")
+# Guests reach the host only where an ACCEPT is unbound: DHCP and DNS on every gateway. The
+# port-53 ACCEPTs stay under lockdown; the lockdown's iptables INPUT REJECT (checked below)
+# sits ahead of the node firewall and closes the port.
+node_accepts=("tcp/8006@$nic" "tcp/22@$nic" "udp/67@" "udp/53@" "tcp/53@")
 # Skipped rather than run on an unreadable fetch, which would fail for a reason that has
 # nothing to do with the rules.
 if [ "$node_rules_rc" = 0 ]; then
     chk "node inbound ACCEPTs are exactly the AMI's, mgmt NIC $nic" \
         accepts_are "$node_rules" "${node_accepts[@]}"
-    if [ -f "$marker" ]; then
-        chk "DNS rejected rather than dropped, so guests fail fast: udp/53" port53_rejected udp
-        chk "DNS rejected rather than dropped, so guests fail fast: tcp/53" port53_rejected tcp
-    fi
 else
     skip "node inbound ACCEPT checks" "node firewall rules unreadable"
 fi
@@ -239,6 +220,12 @@ dnsmasq_uid=$(id -u dnsmasq 2>/dev/null)
 chk "dnsmasq upstream queries dropped: mangle OUTPUT --uid-owner dnsmasq (${dnsmasq_uid:-no such user})" \
     has_rule mangle OUTPUT "-o $nic " "--uid-owner ${dnsmasq_uid:-dnsmasq} " "-j DROP"
 chk "no upstream resolver for SDN dnsmasq: /run/dnsmasq/resolv.conf" no_upstream_resolver
+# With no upstream, all the resolver could still serve a guest is its own lease table, which
+# spans every vnet in the zone. REJECT, not DROP, so lookups fail instead of hanging.
+chk "guest DNS rejected rather than dropped: INPUT udp/53 -j REJECT" \
+    has_rule filter INPUT "! -i lo -p udp -m udp --dport 53 " "-j REJECT"
+chk "guest DNS rejected rather than dropped: INPUT tcp/53 -j REJECT" \
+    has_rule filter INPUT "! -i lo -p tcp -m tcp --dport 53 " "-j REJECT --reject-with tcp-reset"
 
 echo
 echo "# AWS-level controls, as seen from the host"
