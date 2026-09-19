@@ -30,6 +30,7 @@ from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.qga_responses import validate_exec_pid
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 
 logger = getLogger(__name__)
@@ -254,7 +255,10 @@ rmdir {mount_q}
         exec_resp = await self.agent_commands.exec_command(
             vm_id=vm_id, command=["sh", "-c", script]
         )
-        pid = exec_resp["pid"]
+        # Guest-controlled pid; validate before it reaches the exec-status URL.
+        pid = validate_exec_pid(exec_resp, vm_id)
+
+        wait_deadline = time.monotonic() + 120
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
@@ -263,15 +267,16 @@ rmdir {mount_q}
         )
         async def wait() -> bool | dict:
             status = await self.agent_commands.get_agent_exec_status(
-                vm_id=vm_id, pid=pid
+                vm_id=vm_id, pid=pid, deadline=wait_deadline
             )
             if status.get("exited") != 1:
                 return False
             return status
 
         status = await wait()
-        assert isinstance(status, dict)
-        exitcode = status.get("exitcode", 1)
+        # status is a validated exec-status dict (get_agent_exec_status enforces
+        # integer exited/exitcode/signal); no assert on guest data.
+        exitcode = status.get("exitcode", 1) if isinstance(status, dict) else 1
         if exitcode != 0:
             stderr = status.get("err-data", "")
             stdout = status.get("out-data", "")
