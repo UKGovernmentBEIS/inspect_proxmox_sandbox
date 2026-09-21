@@ -300,22 +300,22 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
  
 EOFPATCH
 
-cat > /usr/local/bin/inspect-proxmox-stamp-contract.sh << 'STAMP_CONTRACT'
+STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
+cat > "$STAMP" << 'STAMP_CONTRACT'
 #!/bin/bash
 set -euo pipefail
 C=aisi2
 F=/usr/share/perl5/PVE/pvecfg.pm
 before=$(md5sum < "$F")
-sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)\(\.aisi[0-9]\+\)\?',/\1.$C',/
-        s|\(return '[0-9]\+\.[0-9]\+\.[0-9]\+\)\(\.aisi[0-9]\+\)\?/|\1.$C/|" "$F"
+sed -i -E "s/\.aisi[0-9]+//g
+           s/('version' => '[0-9.]+)'/\1.$C'/
+           s|(return '[0-9.]+)/|\1.$C/|" "$F"
 grep -q "'version' => '[0-9.]*\.$C'," "$F" || { echo "ERROR: $F not stamped $C" >&2; exit 1; }
 [ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
 STAMP_CONTRACT
-chmod +x /usr/local/bin/inspect-proxmox-stamp-contract.sh
-cat > /etc/apt/apt.conf.d/80inspect-proxmox-contract << 'APT_HOOK'
-DPkg::Post-Invoke { "/usr/local/bin/inspect-proxmox-stamp-contract.sh || true"; };
-APT_HOOK
-/usr/local/bin/inspect-proxmox-stamp-contract.sh
+chmod +x "$STAMP"
+echo "DPkg::Post-Invoke { \"$STAMP || true\"; };" > /etc/apt/apt.conf.d/80inspect-proxmox-contract
+"$STAMP"
 
 # Host isolation - see README
 # Delete our own rules (matched by comment) then recreate, so the rule set

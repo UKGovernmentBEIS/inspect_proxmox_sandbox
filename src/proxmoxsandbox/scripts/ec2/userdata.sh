@@ -8,12 +8,10 @@
 set -euxo pipefail
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
 
-# --- IMDSv2 helper (also used by EIC and AMI fixup services below) ---
 apt-get update -y
 apt-get install -y wget curl
 cat > /usr/local/bin/call-ec2-hypervisor << 'CALL_EC2_HYPERVISOR'
 #!/bin/bash
-# Fetch a path from EC2 IMDSv2 (the EC2 hypervisor's metadata service).
 set -euo pipefail
 TOKEN=$(curl -sf -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
     http://169.254.169.254/latest/api/token)
@@ -22,7 +20,6 @@ curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
 CALL_EC2_HYPERVISOR
 chmod 755 /usr/local/bin/call-ec2-hypervisor
 
-# --- SSM agent (needed for out-of-band access before Proxmox is up) ---
 # Pull from the in-region bucket so the build doesn't pay cross-region S3 egress.
 REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
 wget -q "https://s3.${REGION}.amazonaws.com/amazon-ssm-${REGION}/latest/debian_amd64/amazon-ssm-agent.deb" \
@@ -31,8 +28,6 @@ dpkg -i /tmp/amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent
 systemctl start amazon-ssm-agent
 
-# --- EC2 Instance Connect (package not in Debian 13 repos; configure sshd manually) ---
-# Fetches temporary keys pushed by `aws ec2-instance-connect send-ssh-public-key` from IMDS.
 cat > /usr/local/bin/eic_authorized_keys << 'EICSCRIPT'
 #!/bin/bash
 exec /usr/local/bin/call-ec2-hypervisor "latest/meta-data/managed-ssh-keys/active-keys/${1}/"
@@ -91,7 +86,6 @@ for i in $(seq 1 36); do
 done
 echo "  amazon-guardduty-agent state: ${state:-not present}; proceeding"
 
-# --- Reboot into Proxmox kernel, then continue via systemd oneshot ---
 cat > /etc/systemd/system/proxmox-install-stage2.service << 'UNIT'
 [Unit]
 Description=Proxmox VE install stage 2 (post-kernel-reboot)
@@ -198,10 +192,6 @@ systemctl disable --now dnsmasq
 # Not needed for simple zones (the default), only for EVPN/OSPF.
 # systemctl enable frr
 
-# Without this patch, static DHCP IP reservations (by MAC address) don't work.
-# See https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/
-# and https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
-
 cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
 --- a/usr/share/perl5/PVE/Network/SDN/Subnets.pm
 +++ b/usr/share/perl5/PVE/Network/SDN/Subnets.pm
@@ -246,22 +236,22 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
 
 EOFPATCH
 
-cat > /usr/local/bin/inspect-proxmox-stamp-contract.sh << 'STAMP_CONTRACT'
+STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
+cat > "$STAMP" << 'STAMP_CONTRACT'
 #!/bin/bash
 set -euo pipefail
 C=aisi2
 F=/usr/share/perl5/PVE/pvecfg.pm
 before=$(md5sum < "$F")
-sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)\(\.aisi[0-9]\+\)\?',/\1.$C',/
-        s|\(return '[0-9]\+\.[0-9]\+\.[0-9]\+\)\(\.aisi[0-9]\+\)\?/|\1.$C/|" "$F"
+sed -i -E "s/\.aisi[0-9]+//g
+           s/('version' => '[0-9.]+)'/\1.$C'/
+           s|(return '[0-9.]+)/|\1.$C/|" "$F"
 grep -q "'version' => '[0-9.]*\.$C'," "$F" || { echo "ERROR: $F not stamped $C" >&2; exit 1; }
 [ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
 STAMP_CONTRACT
-chmod +x /usr/local/bin/inspect-proxmox-stamp-contract.sh
-cat > /etc/apt/apt.conf.d/80inspect-proxmox-contract << 'APT_HOOK'
-DPkg::Post-Invoke { "/usr/local/bin/inspect-proxmox-stamp-contract.sh || true"; };
-APT_HOOK
-/usr/local/bin/inspect-proxmox-stamp-contract.sh
+chmod +x "$STAMP"
+echo "DPkg::Post-Invoke { \"$STAMP || true\"; };" > /etc/apt/apt.conf.d/80inspect-proxmox-contract
+"$STAMP"
 
 # PVE launches per-zone dnsmasq with -r /run/dnsmasq/resolv.conf for upstream DNS.
 # On EC2 that file doesn't exist, so dnsmasq can't forward queries and VMs have
