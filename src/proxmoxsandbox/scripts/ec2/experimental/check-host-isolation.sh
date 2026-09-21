@@ -9,7 +9,7 @@
 # Assumes the configuration in the parent README's "Properly isolating the host": egress
 # lockdown armed, no route off the VPC, reachable only via interface endpoints. That is
 # the configuration worth checking; an ordinary host fails these by design.
-# shellcheck disable=SC2329  # the check helpers are invoked indirectly, via chk
+# shellcheck disable=SC2329  # the check helpers are invoked indirectly, via check
 set -uo pipefail
 
 usage() { echo "usage: $0" >&2; exit 2; }
@@ -17,7 +17,7 @@ usage() { echo "usage: $0" >&2; exit 2; }
 
 checks=0
 failures=0
-chk() {
+check() {
     local name=$1 out
     shift
     checks=$((checks + 1))
@@ -110,35 +110,35 @@ fi
 
 echo
 echo "# units (stale-AMI guard)"
-chk "host firewall unit: proxmox-ami-fixup-firewall.service" unit_ok proxmox-ami-fixup-firewall.service
-chk "pve-firewall enabled and running" pvefw_running
-chk "IMDS / link-local forwarding block: inspect-proxmox-block-cloud-metadata.service" unit_ok inspect-proxmox-block-cloud-metadata.service
-chk "guest NAT/FORWARD rules: proxmox-ami-fixup-nat.service" unit_ok proxmox-ami-fixup-nat.service
-chk "egress lockdown (internet+DNS): inspect-proxmox-egress-lockdown.service" unit_ok inspect-proxmox-egress-lockdown.service
-chk "egress lockdown re-armed periodically: inspect-proxmox-egress-lockdown.timer" systemctl is-active -q inspect-proxmox-egress-lockdown.timer
-chk "egress lockdown fails deadly: OnFailure=inspect-proxmox-egress-lockdown-halt.service" \
+check "host firewall unit: proxmox-ami-fixup-firewall.service" unit_ok proxmox-ami-fixup-firewall.service
+check "pve-firewall enabled and running" pvefw_running
+check "IMDS / link-local forwarding block: inspect-proxmox-block-cloud-metadata.service" unit_ok inspect-proxmox-block-cloud-metadata.service
+check "guest NAT/FORWARD rules: proxmox-ami-fixup-nat.service" unit_ok proxmox-ami-fixup-nat.service
+check "egress lockdown (internet+DNS): inspect-proxmox-egress-lockdown.service" unit_ok inspect-proxmox-egress-lockdown.service
+check "egress lockdown re-armed periodically: inspect-proxmox-egress-lockdown.timer" systemctl is-active -q inspect-proxmox-egress-lockdown.timer
+check "egress lockdown fails deadly: OnFailure=inspect-proxmox-egress-lockdown-halt.service" \
     on_failure_is inspect-proxmox-egress-lockdown.service inspect-proxmox-egress-lockdown-halt.service
 # Masked means the halt unit fired at some point, so the rules can look right now even
 # though a lockdown run failed earlier.
-chk "Proxmox API not masked by the halt unit: pveproxy, pvedaemon" not_masked pveproxy.service pvedaemon.service
-chk "contract re-stamped after apt runs: /etc/apt/apt.conf.d/80inspect-proxmox-contract" \
+check "Proxmox API not masked by the halt unit: pveproxy, pvedaemon" not_masked pveproxy.service pvedaemon.service
+check "contract re-stamped after apt runs: /etc/apt/apt.conf.d/80inspect-proxmox-contract" \
     grep -qF /usr/local/bin/inspect-proxmox-stamp-contract.sh /etc/apt/apt.conf.d/80inspect-proxmox-contract
 # Without these two, systemd scores a concurrent restart or a burst of starts as a unit
 # failure, and the halt unit masks the API on a host whose lockdown is applied correctly.
-chk "halt unit fires only on the lockdown's own verdict: SuccessExitStatus, StartLimitIntervalUSec" \
+check "halt unit fires only on the lockdown's own verdict: SuccessExitStatus, StartLimitIntervalUSec" \
     unit_prop_is inspect-proxmox-egress-lockdown.service SuccessExitStatus TERM \
     StartLimitIntervalUSec 0
 
 echo
 echo "# forwarding rules and kernel state"
-chk "link-local destinations dropped: raw PREROUTING -d 169.254.0.0/16 -j DROP" \
+check "link-local destinations dropped: raw PREROUTING -d 169.254.0.0/16 -j DROP" \
     has_rule raw PREROUTING "-d 169.254.0.0/16 -j DROP"
-chk "link-local sources dropped: FORWARD -s 169.254.0.0/16 -j DROP" \
+check "link-local sources dropped: FORWARD -s 169.254.0.0/16 -j DROP" \
     has_rule filter FORWARD "-s 169.254.0.0/16 -j DROP"
-chk "forwarded IPv6 dropped: ip6tables FORWARD -j DROP" has_rule6 FORWARD "-A FORWARD -j DROP"
-chk "IPv6 off for interfaces created after boot (SDN vnets): net.ipv6.conf.default.disable_ipv6" \
+check "forwarded IPv6 dropped: ip6tables FORWARD -j DROP" has_rule6 FORWARD "-A FORWARD -j DROP"
+check "IPv6 off for interfaces created after boot (SDN vnets): net.ipv6.conf.default.disable_ipv6" \
     sysctl_is net.ipv6.conf.default.disable_ipv6 1
-chk "IPv4 forwarding on (guests reach their gateway): net.ipv4.ip_forward" sysctl_is net.ipv4.ip_forward 1
+check "IPv4 forwarding on (guests reach their gateway): net.ipv4.ip_forward" sysctl_is net.ipv4.ip_forward 1
 
 echo
 echo "# Proxmox firewall (host services reachable only on the mgmt NIC)"
@@ -183,10 +183,10 @@ accepts_are() { # rules expected...
     echo "got:  $(oneline "$got")"
     return 1
 }
-chk "node firewall rules readable" fetched "$node_rules_rc" "$node_rules"
-chk "cluster firewall rules readable" fetched "$cluster_rules_rc" "$cluster_rules"
-chk "cluster firewall enabled" fw_enabled /etc/pve/firewall/cluster.fw
-chk "node firewall enabled" fw_enabled "/etc/pve/nodes/$node/host.fw"
+check "node firewall rules readable" fetched "$node_rules_rc" "$node_rules"
+check "cluster firewall rules readable" fetched "$cluster_rules_rc" "$cluster_rules"
+check "cluster firewall enabled" fw_enabled /etc/pve/firewall/cluster.fw
+check "node firewall enabled" fw_enabled "/etc/pve/nodes/$node/host.fw"
 # Guests reach the host only where an ACCEPT is unbound: DHCP and DNS on every gateway. The
 # port-53 ACCEPTs stay under lockdown; the lockdown's iptables INPUT REJECT (checked below)
 # sits ahead of the node firewall and closes the port.
@@ -194,14 +194,14 @@ node_accepts=("tcp/8006@$nic" "tcp/22@$nic" "udp/67@" "udp/53@" "tcp/53@")
 # Skipped rather than run on an unreadable fetch, which would fail for a reason that has
 # nothing to do with the rules.
 if [ "$node_rules_rc" = 0 ]; then
-    chk "node inbound ACCEPTs are exactly the AMI's, mgmt NIC $nic" \
+    check "node inbound ACCEPTs are exactly the AMI's, mgmt NIC $nic" \
         accepts_are "$node_rules" "${node_accepts[@]}"
 else
     skip "node inbound ACCEPT checks" "node firewall rules unreadable"
 fi
 if [ "$cluster_rules_rc" = 0 ]; then
     # A cluster-level rule applies on every node NIC, and the AMI creates none.
-    chk "no inbound ACCEPT at cluster level" accepts_are "$cluster_rules"
+    check "no inbound ACCEPT at cluster level" accepts_are "$cluster_rules"
 else
     skip "cluster inbound ACCEPT check" "cluster firewall rules unreadable"
 fi
@@ -209,26 +209,26 @@ fi
 echo
 echo "# guest egress lockdown"
 no_upstream_resolver() { ! grep -q "^nameserver" /run/dnsmasq/resolv.conf; }
-chk "opt-in marker present: $marker" test -f "$marker"
-chk "guest egress dropped: mangle FORWARD -o $nic" has_rule mangle FORWARD "-o $nic " "-j DROP"
-chk "guest ingress dropped: mangle FORWARD -i $nic" has_rule mangle FORWARD "-i $nic " "-j DROP"
+check "opt-in marker present: $marker" test -f "$marker"
+check "guest egress dropped: mangle FORWARD -o $nic" has_rule mangle FORWARD "-o $nic " "-j DROP"
+check "guest ingress dropped: mangle FORWARD -i $nic" has_rule mangle FORWARD "-i $nic " "-j DROP"
 # iptables -S prints the owner as a number
 dnsmasq_uid=$(id -u dnsmasq 2>/dev/null)
-chk "dnsmasq upstream queries dropped: mangle OUTPUT --uid-owner dnsmasq (${dnsmasq_uid:-no such user})" \
+check "dnsmasq upstream queries dropped: mangle OUTPUT --uid-owner dnsmasq (${dnsmasq_uid:-no such user})" \
     has_rule mangle OUTPUT "-o $nic " "--uid-owner ${dnsmasq_uid:-dnsmasq} " "-j DROP"
-chk "no upstream resolver for SDN dnsmasq: /run/dnsmasq/resolv.conf" no_upstream_resolver
+check "no upstream resolver for SDN dnsmasq: /run/dnsmasq/resolv.conf" no_upstream_resolver
 # With no upstream, all the resolver could still serve a guest is its own lease table, which
 # spans every vnet in the zone. REJECT, not DROP, so lookups fail instead of hanging.
-chk "guest DNS rejected rather than dropped: INPUT udp/53 -j REJECT" \
+check "guest DNS rejected rather than dropped: INPUT udp/53 -j REJECT" \
     has_rule filter INPUT "! -i lo -p udp -m udp --dport 53 " "-j REJECT"
-chk "guest DNS rejected rather than dropped: INPUT tcp/53 -j REJECT" \
+check "guest DNS rejected rather than dropped: INPUT tcp/53 -j REJECT" \
     has_rule filter INPUT "! -i lo -p tcp -m tcp --dport 53 " "-j REJECT --reject-with tcp-reset"
 
 echo
 echo "# AWS-level controls, as seen from the host"
 endpoint_ok() { is_private "$1" && connects "https://$2/"; }
 region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
-chk "region from IMDS" test -n "$region"
+check "region from IMDS" test -n "$region"
 endpoints=""
 if [ -z "$region" ]; then
     skip "interface endpoint checks" "no region, so the endpoint names cannot be built"
@@ -238,8 +238,8 @@ else
     for svc in ssm ssmmessages ec2messages; do
         name="$svc.$region.amazonaws.com"
         ip=$(resolves_to "$name")
-        chk "interface endpoint $svc: $name resolves" test -n "$ip"
-        chk "interface endpoint $svc: $ip private and answering on 443" endpoint_ok "$ip" "$name"
+        check "interface endpoint $svc: $name resolves" test -n "$ip"
+        check "interface endpoint $svc: $ip private and answering on 443" endpoint_ok "$ip" "$name"
         [ -n "$ip" ] && endpoints="$endpoints $ip"
     done
     # The CloudWatch endpoint is optional, so a public answer here is a VPC without one
@@ -247,15 +247,15 @@ else
     name="monitoring.$region.amazonaws.com"
     ip=$(resolves_to "$name")
     if is_private "$ip"; then
-        chk "interface endpoint monitoring: $ip answering on 443" connects "https://$name/"
+        check "interface endpoint monitoring: $ip answering on 443" connects "https://$name/"
         endpoints="$endpoints $ip"
     else
         skip "interface endpoint monitoring" \
             "${ip:-$name} is not an endpoint in this VPC (metrics are optional)"
     fi
 fi
-chk "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" unresolvable deb.debian.org
-chk "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
+check "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" unresolvable deb.debian.org
+check "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
 
 echo
 # Every IPv4 address this host holds is one a guest must not reach: the management address,

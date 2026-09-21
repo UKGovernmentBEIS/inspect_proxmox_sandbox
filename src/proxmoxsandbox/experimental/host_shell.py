@@ -69,24 +69,26 @@ async def run_script_on_host(
         f"{payload}\nEOF\nexit\n"
     )
 
-    async with websockets.connect(
-        url,
-        ssl=ssl_context,
-        additional_headers={"Cookie": f"PVEAuthCookie={api.ticket}"},
-        subprotocols=[websockets.Subprotocol("binary")],
-        max_size=None,
-    ) as ws:
-        await ws.send(f"{term['user']}:{term['ticket']}\n".encode())
-        ok = await asyncio.wait_for(ws.recv(), timeout)
-        if ok != b"OK":
-            raise RuntimeError(f"termproxy handshake failed: {ok!r}")
-        await ws.send(b"1:200:50:")
-        data = command.encode()
-        await ws.send(f"0:{len(data)}:".encode() + data)
+    async def run() -> bytes:
+        async with websockets.connect(
+            url,
+            ssl=ssl_context,
+            additional_headers={
+                **api.extra_headers,
+                "Cookie": f"PVEAuthCookie={api.ticket}",
+            },
+            subprotocols=[websockets.Subprotocol("binary")],
+            max_size=None,
+        ) as ws:
+            await ws.send(f"{term['user']}:{term['ticket']}\n".encode())
+            ok = await ws.recv()
+            if ok != b"OK":
+                raise RuntimeError(f"termproxy handshake failed: {ok!r}")
+            await ws.send(b"1:200:50:")
+            data = command.encode()
+            await ws.send(f"0:{len(data)}:".encode() + data)
 
-        end_marker = f"{marker}END ".encode()
-
-        async def read_until_end() -> bytes:
+            end_marker = f"{marker}END ".encode()
             buffer = b""
             while True:
                 chunk = await ws.recv()
@@ -94,7 +96,7 @@ async def run_script_on_host(
                 if end_marker in buffer and b"\n" in buffer.split(end_marker, 1)[1]:
                     return buffer
 
-        buffer = await asyncio.wait_for(read_until_end(), timeout)
+    buffer = await asyncio.wait_for(run(), timeout)
 
     text = buffer.decode(errors="replace").replace("\r\n", "\n")
     body = text.split(f"{marker}BEGIN\n", 1)[1]
