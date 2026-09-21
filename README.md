@@ -152,7 +152,10 @@ The drop rules live in the mangle table's `FORWARD` chain, which is evaluated
 before every filter-table rule, so activating the lockdown also cuts off guest
 connections that are already established (e.g. a download started beforehand).
 Neither firewall backend touches the mangle table, so there are no coexistence
-conflicts.
+conflicts. The port-53 REJECT has to sit in the filter table's `INPUT` chain
+(`xt_REJECT` is filter-only); it coexists with the node firewall's port-53 ACCEPT
+because a REJECT verdict is final wherever it is reached, and `pve-firewall`
+manages only its own `PVEFW-*` chains.
 
 The DNS side works by blanking the upstream resolver file (`/run/dnsmasq/resolv.conf`)
 the SDN `dnsmasq` instances forward through and reloading them, so they keep

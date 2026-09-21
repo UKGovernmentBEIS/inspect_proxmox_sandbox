@@ -8,12 +8,10 @@
 set -euxo pipefail
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
 
-# --- IMDSv2 helper (also used by EIC and AMI fixup services below) ---
 apt-get update -y
 apt-get install -y wget curl
 cat > /usr/local/bin/call-ec2-hypervisor << 'CALL_EC2_HYPERVISOR'
 #!/bin/bash
-# Fetch a path from EC2 IMDSv2 (the EC2 hypervisor's metadata service).
 set -euo pipefail
 TOKEN=$(curl -sf -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
     http://169.254.169.254/latest/api/token)
@@ -22,7 +20,6 @@ curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
 CALL_EC2_HYPERVISOR
 chmod 755 /usr/local/bin/call-ec2-hypervisor
 
-# --- SSM agent (needed for out-of-band access before Proxmox is up) ---
 # Pull from the in-region bucket so the build doesn't pay cross-region S3 egress.
 REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
 wget -q "https://s3.${REGION}.amazonaws.com/amazon-ssm-${REGION}/latest/debian_amd64/amazon-ssm-agent.deb" \
@@ -31,8 +28,6 @@ dpkg -i /tmp/amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent
 systemctl start amazon-ssm-agent
 
-# --- EC2 Instance Connect (package not in Debian 13 repos; configure sshd manually) ---
-# Fetches temporary keys pushed by `aws ec2-instance-connect send-ssh-public-key` from IMDS.
 cat > /usr/local/bin/eic_authorized_keys << 'EICSCRIPT'
 #!/bin/bash
 exec /usr/local/bin/call-ec2-hypervisor "latest/meta-data/managed-ssh-keys/active-keys/${1}/"
@@ -91,7 +86,6 @@ for i in $(seq 1 36); do
 done
 echo "  amazon-guardduty-agent state: ${state:-not present}; proceeding"
 
-# --- Reboot into Proxmox kernel, then continue via systemd oneshot ---
 cat > /etc/systemd/system/proxmox-install-stage2.service << 'UNIT'
 [Unit]
 Description=Proxmox VE install stage 2 (post-kernel-reboot)
@@ -119,6 +113,75 @@ echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selectio
 echo "postfix postfix/mailname string proxmox.localdomain" | debconf-set-selections
 DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi chrony
 
+rm -vf /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
+
+cat > /root/patch-pve-qemu.sh << 'PVE_QEMU_PATCH'
+#!/bin/bash
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+PATCHED_VERSION="11.0.3-3+aisi1"
+PVE_QEMU_BASE_COMMIT="c3b7a675a52c11a1c4a5873ff2bd1696df7bf98c"
+PVE_QEMU_PATCHES_COMMIT="5e08c14024a6646711fc88529942e5296b9cd676"
+BUILD_DIR="/root/pve-qemu-build"
+
+INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
+if /usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -qF quirk_mode_page_set_block_size; then
+    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the scsi-disk quirk patch, nothing to do"
+    exit 0
+fi
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends \
+    build-essential devscripts equivs git quilt python3 lintian
+
+rm -rf "$BUILD_DIR"
+git clone https://git.proxmox.com/git/pve-qemu.git "$BUILD_DIR"
+cd "$BUILD_DIR"
+git checkout "$PVE_QEMU_BASE_COMMIT"
+git checkout "$PVE_QEMU_PATCHES_COMMIT" -- \
+    debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
+    debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
+mv debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
+    debian/patches/extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch
+mv debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch \
+    debian/patches/extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
+sed -i '/^extra\/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA\.patch$/a extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch\nextra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch' debian/patches/series
+grep -qF extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch debian/patches/series
+grep -qF extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch debian/patches/series
+sed -i 's|url = ../mirror_qemu|url = https://git.proxmox.com/git/mirror_qemu.git|' .gitmodules
+sed -i 's/clean -xdfi/clean -xdff/' Makefile
+
+mv debian/changelog debian/changelog.orig
+cat > debian/changelog <<'CHANGELOG_END'
+pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
+
+  * backport scsi-disk WRITE SAME out-of-bounds read fix and MODE SELECT
+    block size quirk from pve-qemu master (upstream qemu commits merged
+    2026-08-27), ahead of the official 11.1.1-1 release.
+
+ -- AISI <platform@example.com>  Thu, 17 Sep 2026 13:55:04 +0000
+
+CHANGELOG_END
+cat debian/changelog.orig >> debian/changelog
+rm debian/changelog.orig
+
+mk-build-deps -ir -t 'apt-get -o DPkg::Lock::Timeout=600 -y --no-install-recommends' debian/control
+make deb
+
+dpkg -i "pve-qemu-kvm_${PATCHED_VERSION}_amd64.deb"
+/usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -F quirk_mode_page_set_block_size
+
+apt-get -o DPkg::Lock::Timeout=600 -y purge pve-qemu-kvm-build-deps
+apt-get -o DPkg::Lock::Timeout=600 -y autoremove
+cd /
+rm -rf "$BUILD_DIR"
+echo "pve-qemu-kvm patched to $(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
+PVE_QEMU_PATCH
+bash /root/patch-pve-qemu.sh
+rm -f /root/patch-pve-qemu.sh
+
 DEBIAN_FRONTEND=noninteractive apt-get remove -y linux-image-amd64 'linux-image-6.12*' os-prober
 update-grub
 
@@ -128,10 +191,6 @@ systemctl disable --now dnsmasq
 # frr: needed for SDN routing (EVPN/OSPF zones); installed with proxmox-ve but not enabled.
 # Not needed for simple zones (the default), only for EVPN/OSPF.
 # systemctl enable frr
-
-# Without this patch, static DHCP IP reservations (by MAC address) don't work.
-# See https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/
-# and https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
 cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
 --- a/usr/share/perl5/PVE/Network/SDN/Subnets.pm
@@ -177,10 +236,23 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
 
 EOFPATCH
 
-# Mark version to indicate patching
-sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
+STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
+cat > "$STAMP" << 'STAMP_CONTRACT'
+#!/bin/bash
+set -euo pipefail
+C=aisi2
+F=/usr/share/perl5/PVE/pvecfg.pm
+before=$(md5sum < "$F")
+sed -i -E "s/\.aisi[0-9]+//g
+           s/('version' => '[0-9.]+)'/\1.$C'/
+           s|(return '[0-9.]+)/|\1.$C/|" "$F"
+grep -q "'version' => '[0-9.]*\.$C'," "$F" || { echo "ERROR: $F not stamped $C" >&2; exit 1; }
+[ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
+STAMP_CONTRACT
+chmod +x "$STAMP"
+echo "DPkg::Post-Invoke { \"$STAMP || true\"; };" > /etc/apt/apt.conf.d/80inspect-proxmox-contract
+"$STAMP"
 
-# --- DNS forwarding for SDN dnsmasq instances ---
 # PVE launches per-zone dnsmasq with -r /run/dnsmasq/resolv.conf for upstream DNS.
 # On EC2 that file doesn't exist, so dnsmasq can't forward queries and VMs have
 # no working DNS. Point it at the VPC resolver (second IP in the VPC CIDR).
@@ -394,11 +466,13 @@ reload_dnsmasq() {
 }
 
 gc_stale_rules() {
-    iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
-        case "$rule" in
-            *"$COMMENT $RUN_ID"*) continue ;;
-        esac
-        echo "${rule#-A }" | xargs iptables -w -t mangle -D || true
+    for table in mangle filter; do
+        iptables-save -t "$table" | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
+            case "$rule" in
+                *"$COMMENT $RUN_ID"*) continue ;;
+            esac
+            echo "${rule#-A }" | xargs iptables -w -t "$table" -D || true
+        done
     done
 }
 
@@ -412,6 +486,8 @@ blank_resolv() {
 }
 
 if [ -f "$MARKER" ]; then
+    iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
+    iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
     MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
     if [ -z "$MGMT_NICS" ]; then
         iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
@@ -446,10 +522,12 @@ Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-p
 After=network-online.target pve-firewall.service proxmox-firewall.service
 Wants=network-online.target
 OnFailure=inspect-proxmox-egress-lockdown-halt.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
+SuccessExitStatus=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
@@ -519,8 +597,6 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 FIXUP_FIREWALL_UNIT
-
-rm -vf /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 
 systemctl daemon-reload
 systemctl enable proxmox-ami-fixup-hostname.service

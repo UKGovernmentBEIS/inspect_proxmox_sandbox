@@ -186,6 +186,73 @@ apt upgrade -y
 apt install -y dnsmasq xterm patch jq
 systemctl disable --now dnsmasq
 
+cat > /root/patch-pve-qemu.sh << 'PVE_QEMU_PATCH'
+#!/bin/bash
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+PATCHED_VERSION="11.0.3-3+aisi1"
+PVE_QEMU_BASE_COMMIT="c3b7a675a52c11a1c4a5873ff2bd1696df7bf98c"
+PVE_QEMU_PATCHES_COMMIT="5e08c14024a6646711fc88529942e5296b9cd676"
+BUILD_DIR="/root/pve-qemu-build"
+
+INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
+if /usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -qF quirk_mode_page_set_block_size; then
+    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the scsi-disk quirk patch, nothing to do"
+    exit 0
+fi
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends \
+    build-essential devscripts equivs git quilt python3 lintian
+
+rm -rf "$BUILD_DIR"
+git clone https://git.proxmox.com/git/pve-qemu.git "$BUILD_DIR"
+cd "$BUILD_DIR"
+git checkout "$PVE_QEMU_BASE_COMMIT"
+git checkout "$PVE_QEMU_PATCHES_COMMIT" -- \
+    debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
+    debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
+mv debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
+    debian/patches/extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch
+mv debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch \
+    debian/patches/extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
+sed -i '/^extra\/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA\.patch$/a extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch\nextra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch' debian/patches/series
+grep -qF extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch debian/patches/series
+grep -qF extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch debian/patches/series
+sed -i 's|url = ../mirror_qemu|url = https://git.proxmox.com/git/mirror_qemu.git|' .gitmodules
+sed -i 's/clean -xdfi/clean -xdff/' Makefile
+
+mv debian/changelog debian/changelog.orig
+cat > debian/changelog <<'CHANGELOG_END'
+pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
+
+  * backport scsi-disk WRITE SAME out-of-bounds read fix and MODE SELECT
+    block size quirk from pve-qemu master (upstream qemu commits merged
+    2026-08-27), ahead of the official 11.1.1-1 release.
+
+ -- AISI <platform@example.com>  Thu, 17 Sep 2026 13:55:04 +0000
+
+CHANGELOG_END
+cat debian/changelog.orig >> debian/changelog
+rm debian/changelog.orig
+
+mk-build-deps -ir -t 'apt-get -o DPkg::Lock::Timeout=600 -y --no-install-recommends' debian/control
+make deb
+
+dpkg -i "pve-qemu-kvm_${PATCHED_VERSION}_amd64.deb"
+/usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -F quirk_mode_page_set_block_size
+
+apt-get -o DPkg::Lock::Timeout=600 -y purge pve-qemu-kvm-build-deps
+apt-get -o DPkg::Lock::Timeout=600 -y autoremove
+cd /
+rm -rf "$BUILD_DIR"
+echo "pve-qemu-kvm patched to $(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
+PVE_QEMU_PATCH
+bash /root/patch-pve-qemu.sh
+rm -f /root/patch-pve-qemu.sh
+
 # Fix IPAM bug, see https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/
 # and https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
@@ -233,8 +300,22 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
  
 EOFPATCH
 
-# modify version to indicate we patched
-sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
+STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
+cat > "$STAMP" << 'STAMP_CONTRACT'
+#!/bin/bash
+set -euo pipefail
+C=aisi2
+F=/usr/share/perl5/PVE/pvecfg.pm
+before=$(md5sum < "$F")
+sed -i -E "s/\.aisi[0-9]+//g
+           s/('version' => '[0-9.]+)'/\1.$C'/
+           s|(return '[0-9.]+)/|\1.$C/|" "$F"
+grep -q "'version' => '[0-9.]*\.$C'," "$F" || { echo "ERROR: $F not stamped $C" >&2; exit 1; }
+[ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
+STAMP_CONTRACT
+chmod +x "$STAMP"
+echo "DPkg::Post-Invoke { \"$STAMP || true\"; };" > /etc/apt/apt.conf.d/80inspect-proxmox-contract
+"$STAMP"
 
 # Host isolation - see README
 # Delete our own rules (matched by comment) then recreate, so the rule set
@@ -317,11 +398,13 @@ reload_dnsmasq() {
 }
 
 gc_stale_rules() {
-    iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
-        case "$rule" in
-            *"$COMMENT $RUN_ID"*) continue ;;
-        esac
-        echo "${rule#-A }" | xargs iptables -w -t mangle -D || true
+    for table in mangle filter; do
+        iptables-save -t "$table" | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
+            case "$rule" in
+                *"$COMMENT $RUN_ID"*) continue ;;
+            esac
+            echo "${rule#-A }" | xargs iptables -w -t "$table" -D || true
+        done
     done
 }
 
@@ -335,6 +418,8 @@ blank_resolv() {
 }
 
 if [ -f "$MARKER" ]; then
+    iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
+    iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
     MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
     if [ -z "$MGMT_NICS" ]; then
         iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
@@ -369,10 +454,12 @@ Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-p
 After=network-online.target pve-firewall.service proxmox-firewall.service
 Wants=network-online.target
 OnFailure=inspect-proxmox-egress-lockdown-halt.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
+SuccessExitStatus=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
