@@ -376,7 +376,7 @@ Every VM has a name, which serves three purposes:
 - It is the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
 - It is the identifier other VMs use in `depends_on`
 
-The first `is_sandbox=True` VM is Inspect's `default` sandbox, so you can always access it with `sandbox("default")`. If you give it a name, it is reachable under that name too; if you don't, it is simply named `default`, in Proxmox as well. Every other VM must be given a `name=`. Names must be unique within a sample and non-empty, and `default` is reserved: naming any other VM `default` is a configuration error.
+The first `is_sandbox=True` VM is Inspect's `default` sandbox, so you can always access it with `sandbox("default")`. If you give it a name, it is reachable under that name too; if you don't, it is simply named `default`, in Proxmox as well. Every other VM must be given a `name=`. Names must be valid DNS names (Proxmox rejects anything else) and unique within a sample, and `default` is reserved: naming any other VM `default` is a configuration error.
 
 ### Dependency-based VM startup
 

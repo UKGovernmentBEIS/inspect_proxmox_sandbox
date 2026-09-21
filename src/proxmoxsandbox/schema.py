@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from os import getenv
 from pathlib import Path
 from typing import (
@@ -187,6 +188,13 @@ OsType: TypeAlias = Literal[
 ]
 
 
+# Same regex as pve_verify_dns_name in PVE's JSONSchema.pm
+PVE_DNS_NAME_RE = re.compile(
+    r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)*"
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$"
+)
+
+
 class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     """
     Guest healthcheck evaluated during sample startup, gating this VM's readiness.
@@ -305,6 +313,17 @@ class VmConfig(BaseModel, frozen=True):
     def _none_means_default(cls, value: Any) -> Any:
         # Configs recorded before name had a default serialised it as null.
         return "default" if value is None else value
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_is_dns_name(cls, name: str) -> str:
+        if not PVE_DNS_NAME_RE.match(name):
+            raise ValueError(
+                f"VM name {name!r} is not a valid DNS name (Proxmox requires "
+                + "dot-separated labels of letters, digits and hyphens, not "
+                + "starting or ending with a hyphen)"
+            )
+        return name
 
     @property
     def requires_guest_agent(self) -> bool:
@@ -455,8 +474,6 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
             )
         seen: Dict[str, int] = {}
         for i, vm in enumerate(self.vms_config):
-            if vm.name == "":
-                raise ValueError(f"vms_config[{i}] has an empty name")
             if vm.name == "default" and i != first_sandbox:
                 raise ValueError(
                     f"vms_config[{i}] is named 'default' (the default when no name "

@@ -6,6 +6,7 @@
 - `VmConfig.healthcheck`: compose-style guest command that gates a VM's readiness. See "Healthchecks" in the README
 - **Breaking:** every VM except the first `is_sandbox` VM must be named; that one defaults to `default`. See "VM Names" in the README
 - VM readiness polls are at most 5 s apart, and a VM that never runs or whose guest agent never answers fails with `VmNotRunningError` / `GuestAgentUnavailableError`
+- Every VM now gets a serial port (`serial0: socket`)
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.

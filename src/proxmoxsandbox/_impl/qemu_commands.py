@@ -662,6 +662,7 @@ class QemuCommands(abc.ABC):
         json_for_create["memory"] = vm_config.ram_mb
         json_for_create["cores"] = vm_config.vcpus
         json_for_create["name"] = vm_config.name
+        json_for_create["serial0"] = "socket"
         if vm_config.uefi_boot:
             json_for_create["efidisk0"] = (
                 f"{self.image_storage}:0,efitype=4m,pre-enrolled-keys=0"

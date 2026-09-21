@@ -156,11 +156,6 @@ def test_unnamed_first_sandbox_with_default_taken_elsewhere_is_reserved_error():
         _config(_vm(), _vm("default"))
 
 
-def test_empty_vm_name_rejected():
-    with pytest.raises(ValidationError, match=r"vms_config\[0\] has an empty name"):
-        _config(_vm(""))
-
-
 def test_depends_on_empty_name_is_a_validation_error():
     with pytest.raises(ValidationError, match="unknown VM ''"):
         _config(_vm("a", depends_on=("",)), _vm("b"))
@@ -220,3 +215,21 @@ def test_dependency_cycle_rejected():
         match="VM dependency cycle: 'a' -> 'b' -> 'a'",
     ):
         _config(_vm("a", depends_on=("b",)), _vm("b", depends_on=("a",)))
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["romeo", "web-1", "Kali2025", "a.b.c", "x", "0pointer", "x" * 100],
+)
+def test_vmconfig_name_valid_dns_name(name):
+    vm = VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04"), name=name)
+    assert vm.name == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["bad_name", "has space", "", "-leading", "trailing-", "a..b", "a.", ".a", "é"],
+)
+def test_vmconfig_name_invalid_dns_name(name):
+    with pytest.raises(ValidationError, match="is not a valid DNS name"):
+        VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04"), name=name)

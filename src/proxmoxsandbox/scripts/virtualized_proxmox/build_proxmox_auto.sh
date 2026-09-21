@@ -255,10 +255,8 @@ pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp
 pvesh set /nodes/proxmox/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
 
-# IPv6 is not supported for sandbox guests on this provider. SDN vnet bridges are
-# created per sample with generated names, so we can't pin a rule to them; instead
-# default.disable_ipv6 makes every interface created after boot (i.e. the vnets)
-# come up with no IPv6. The already-up management NIC keeps its own setting.
+# vnet names are generated per sample, so only default.disable_ipv6 can reach them. The
+# management NIC is already up and keeps its own setting.
 cat > /etc/sysctl.d/99-inspect-proxmox-disable-ipv6.conf << 'SYSCTL_V6'
 net.ipv6.conf.default.disable_ipv6 = 1
 SYSCTL_V6
@@ -270,20 +268,16 @@ cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
 #!/bin/bash
 set -euo pipefail
 
-# Enforce RFC 3927: a router must not forward IPv4 link-local (169.254.0.0/16).
-#
-# Destination drop in raw PREROUTING (interface-agnostic, ahead of any FORWARD
-# ACCEPT; host requests are OUTPUT so unaffected) -- this blocks the metadata vector.
+# RFC 3927: a router must not forward IPv4 link-local. The destination drop goes in raw
+# PREROUTING, ahead of any FORWARD ACCEPT; host requests are OUTPUT so unaffected.
 iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
     || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
-# Source drop in FORWARD, not raw PREROUTING: belt-and-braces for full RFC
-# conformance. FORWARD leaves the host's own on-link replies (IMDS/DNS, at INPUT)
-# intact; a raw PREROUTING -s rule would drop them and break the host.
+# The source drop must be FORWARD, not raw PREROUTING: the latter would also drop the
+# host's own on-link replies (IMDS/DNS) and break it.
 iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
     || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
 
-# Belt-and-braces for the unsupported IPv6 case: drop forwarded guest v6 outright.
-# FORWARD only sees transit traffic, so the host's own v6 (INPUT/OUTPUT) is intact.
+# Guest v6 is unsupported; FORWARD sees only transit, so the host's own v6 is intact.
 if command -v ip6tables >/dev/null; then
     ip6tables -w -C FORWARD -j DROP 2>/dev/null \
         || ip6tables -w -A FORWARD -j DROP
@@ -410,6 +404,15 @@ systemctl daemon-reload
 systemctl enable inspect-proxmox-block-cloud-metadata.service
 systemctl enable inspect-proxmox-egress-lockdown.service
 systemctl enable inspect-proxmox-egress-lockdown.timer
+
+set -o pipefail
+pveum user list --output-format json | jq -r '.[].userid' |
+while IFS= read -r userid; do
+    pveum user token list "$userid" --output-format json | jq -r '.[].tokenid' |
+    while IFS= read -r tokenid; do
+        pveum user token remove "$userid" "$tokenid"
+    done
+done
 
 touch /var/local/inspect-proxmox-on-first-boot.done
 
