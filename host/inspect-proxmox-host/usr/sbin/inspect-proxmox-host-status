@@ -1,0 +1,31 @@
+#!/bin/bash
+# Report the guest egress lockdown's state for off-host verification, e.g. over SSM.
+# Facts only: the judgement is made by the caller, so it stays unit-testable without a
+# host. Never fails: a broken host must still report.
+set -u
+export PATH="$PATH:/usr/sbin:/sbin"
+SERVICE=inspect-proxmox-egress-lockdown.service
+TIMER=inspect-proxmox-egress-lockdown.timer
+MARKER=/etc/inspect-proxmox-egress-lockdown
+RESOLV=/run/dnsmasq/resolv.conf
+
+echo "### facts"
+echo "contract=$(dpkg-query -W -f '${Version}' inspect-proxmox-host 2>/dev/null || true)"
+if [ -f "$MARKER" ]; then echo "marker-present=yes"; else echo "marker-present=no"; fi
+echo "service-enabled=$(systemctl is-enabled $SERVICE 2>/dev/null || true)"
+echo "timer-enabled=$(systemctl is-enabled $TIMER 2>/dev/null || true)"
+echo "service-result=$(systemctl show -p Result --value $SERVICE 2>/dev/null || true)"
+echo "service-onfailure=$(systemctl show -p OnFailure --value $SERVICE 2>/dev/null || true)"
+for service in pveproxy pvedaemon; do
+    echo "$service-enabled=$(systemctl is-enabled $service 2>/dev/null || true)"
+done
+echo "dnsmasq-uid=$(id -u dnsmasq 2>/dev/null || true)"
+if [ -f "$RESOLV" ]; then echo "resolv-present=yes"; else echo "resolv-present=no"; fi
+echo "### egress-devs"
+ip route show default 2>/dev/null \
+    | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u || true
+echo "### mangle-rules"
+iptables -w -t mangle -S 2>/dev/null || true
+echo "### dnsmasq-resolv"
+cat "$RESOLV" 2>/dev/null || true
+echo "### end"

@@ -1,0 +1,11 @@
+.TH INSPECT-PROXMOX-HOST-SEAL 8 "2026-09-21" "inspect-proxmox-host" "System Administration"
+.SH NAME
+inspect-proxmox-host-seal \- remove every Proxmox API token before imaging a host
+.SH SYNOPSIS
+.B inspect-proxmox-host-seal
+.SH DESCRIPTION
+Removes all API tokens of all Proxmox users on this node, so that none is carried
+into hosts launched from an image of it. Run it as the last step before snapshotting
+a host into an AMI or template.
+.SH SEE ALSO
+.BR pveum (1)

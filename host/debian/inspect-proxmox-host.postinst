@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = configure ]; then
+    # PVE SDN runs its own dnsmasq per zone; the system instance would take port 53.
+    deb-systemd-helper disable dnsmasq.service >/dev/null 2>&1 || true
+    deb-systemd-invoke stop dnsmasq.service >/dev/null 2>&1 || true
+    deb-systemd-invoke restart systemd-sysctl.service >/dev/null 2>&1 || true
+    # Fails the install if the patched packages aren't actually in place: the stamp is
+    # the whole point, so a host that can't carry it must not look installed.
+    /usr/libexec/inspect-proxmox/stamp-contract
+fi
+
+#DEBHELPER#

@@ -1,0 +1,9 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+# The halt unit is only ever run via OnFailure; dh would otherwise start it at install,
+# which masks and stops the Proxmox API.
+override_dh_installsystemd:
+	dh_installsystemd -pinspect-proxmox-host --no-enable --no-start inspect-proxmox-egress-lockdown-halt.service
+	dh_installsystemd

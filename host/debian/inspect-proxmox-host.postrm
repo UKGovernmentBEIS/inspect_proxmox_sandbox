@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    F=/usr/share/perl5/PVE/pvecfg.pm
+    if [ -f "$F" ] && grep -q '\.aisi[0-9]' "$F"; then
+        sed -i -E 's/\.aisi[0-9]+//g' "$F"
+        [ -d /run/systemd/system ] && systemctl try-reload-or-restart pvedaemon pveproxy >/dev/null 2>&1 || true
+    fi
+fi
+
+#DEBHELPER#

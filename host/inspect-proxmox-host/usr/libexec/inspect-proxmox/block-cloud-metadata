@@ -1,0 +1,18 @@
+#!/bin/bash
+# Confine sandbox guests at the host's forwarding layer.
+set -euo pipefail
+
+# RFC 3927: a router must not forward IPv4 link-local. The destination drop goes in raw
+# PREROUTING, ahead of any FORWARD ACCEPT; host requests are OUTPUT so unaffected.
+iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
+# The source drop must be FORWARD, not raw PREROUTING: the latter would also drop the
+# host's own on-link replies (IMDS/DNS) and break it.
+iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
+
+# Guest v6 is unsupported; FORWARD sees only transit, so the host's own v6 is intact.
+if command -v ip6tables >/dev/null; then
+    ip6tables -w -C FORWARD -j DROP 2>/dev/null \
+        || ip6tables -w -A FORWARD -j DROP
+fi

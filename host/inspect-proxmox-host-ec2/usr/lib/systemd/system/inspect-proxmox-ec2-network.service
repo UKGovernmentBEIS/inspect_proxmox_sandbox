@@ -1,0 +1,12 @@
+[Unit]
+Description=Create the guest NAT bridge and apply NAT/FORWARD rules with current management NIC
+After=network-online.target pve-cluster.service inspect-proxmox-ec2-hostname.service inspect-proxmox-block-cloud-metadata.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/inspect-proxmox/ec2-network
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

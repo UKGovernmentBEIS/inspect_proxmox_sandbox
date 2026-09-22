@@ -1,0 +1,38 @@
+Source: inspect-proxmox-host
+Section: admin
+Priority: optional
+Maintainer: UK AI Security Institute <153507562+art-dsit@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.2
+Homepage: https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox
+Rules-Requires-Root: no
+
+Package: inspect-proxmox-host
+Architecture: all
+Depends: ${misc:Depends},
+         proxmox-ve,
+         pve-qemu-kvm (>= 11.0.3-3+aisi1),
+         libpve-network-perl (>= 1.6.7+aisi1),
+         dnsmasq,
+         iptables,
+         jq
+Description: Proxmox VE host configuration for Inspect sandbox evaluations
+ Everything a Proxmox VE node needs beyond a stock install to host
+ inspect_proxmox_sandbox evaluations: host-isolation firewall rules,
+ link-local and IPv6 forwarding blocks, the optional guest egress lockdown,
+ storage content types, and the .aisiN contract stamp on the reported
+ version. Depends on the AISI rebuilds of pve-qemu-kvm and
+ libpve-network-perl and pins them above upstream.
+
+Package: inspect-proxmox-host-ec2
+Architecture: all
+Depends: ${misc:Depends},
+         inspect-proxmox-host (= ${binary:Version}),
+         curl,
+         openssl
+Description: EC2 boot-time fixups for AMI-launched Proxmox VE hosts
+ Every launch from an AMI gets a new hostname, IP and instance-id. These
+ units pin the node name, regenerate certificates and the root password,
+ create the guest NAT bridge with the current management NIC, point the SDN
+ dnsmasq instances at the VPC resolver, and ship pvestatd metrics to
+ CloudWatch when the CloudWatch agent is installed.
