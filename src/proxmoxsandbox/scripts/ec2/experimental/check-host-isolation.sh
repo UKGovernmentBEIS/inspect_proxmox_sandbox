@@ -94,9 +94,9 @@ node=$(hostname)
 marker=/etc/inspect-proxmox-egress-lockdown
 echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev/null | head -1)"
 
-# The contract stamped by ../userdata.sh. Read locally rather than over the API: if the halt
+# The contract stamped by the inspect-proxmox-host deb. Read locally rather than over the API: if the halt
 # unit has masked pvedaemon, an API read fails and a fine host looks like a stale one.
-WANT_CONTRACT=2
+WANT_CONTRACT=3
 contract=$(pveversion 2>/dev/null | head -1)
 case "$contract" in
     *.aisi[0-9]*) contract=${contract##*.aisi}; contract=${contract%%[!0-9]*} ;;
@@ -104,16 +104,16 @@ case "$contract" in
 esac
 if ! [ "$contract" -ge "$WANT_CONTRACT" ] 2>/dev/null; then
     echo
-    echo "host contract aisi${contract:-0}, need aisi$WANT_CONTRACT; rebuild the AMI from scripts/ec2/userdata.sh"
+    echo "host contract aisi${contract:-0}, need aisi$WANT_CONTRACT; install inspect-proxmox-host $WANT_CONTRACT or later (see host/README.md)"
     exit 2
 fi
 
 echo
 echo "# units (stale-AMI guard)"
-check "host firewall unit: proxmox-ami-fixup-firewall.service" unit_ok proxmox-ami-fixup-firewall.service
+check "host firewall unit: inspect-proxmox-host-configure.service" unit_ok inspect-proxmox-host-configure.service
 check "pve-firewall enabled and running" pvefw_running
 check "IMDS / link-local forwarding block: inspect-proxmox-block-cloud-metadata.service" unit_ok inspect-proxmox-block-cloud-metadata.service
-check "guest NAT/FORWARD rules: proxmox-ami-fixup-nat.service" unit_ok proxmox-ami-fixup-nat.service
+check "guest NAT/FORWARD rules: inspect-proxmox-ec2-network.service" unit_ok inspect-proxmox-ec2-network.service
 check "egress lockdown (internet+DNS): inspect-proxmox-egress-lockdown.service" unit_ok inspect-proxmox-egress-lockdown.service
 check "egress lockdown re-armed periodically: inspect-proxmox-egress-lockdown.timer" systemctl is-active -q inspect-proxmox-egress-lockdown.timer
 check "egress lockdown fails deadly: OnFailure=inspect-proxmox-egress-lockdown-halt.service" \
@@ -122,7 +122,7 @@ check "egress lockdown fails deadly: OnFailure=inspect-proxmox-egress-lockdown-h
 # though a lockdown run failed earlier.
 check "Proxmox API not masked by the halt unit: pveproxy, pvedaemon" not_masked pveproxy.service pvedaemon.service
 check "contract re-stamped after apt runs: /etc/apt/apt.conf.d/80inspect-proxmox-contract" \
-    grep -qF /usr/local/bin/inspect-proxmox-stamp-contract.sh /etc/apt/apt.conf.d/80inspect-proxmox-contract
+    grep -qF /usr/libexec/inspect-proxmox/stamp-contract /etc/apt/apt.conf.d/80inspect-proxmox-contract
 # Without these two, systemd scores a concurrent restart or a burst of starts as a unit
 # failure, and the halt unit masks the API on a host whose lockdown is applied correctly.
 check "halt unit fires only on the lockdown's own verdict: SuccessExitStatus, StartLimitIntervalUSec" \
@@ -227,7 +227,7 @@ check "guest DNS rejected rather than dropped: INPUT tcp/53 -j REJECT" \
 echo
 echo "# AWS-level controls, as seen from the host"
 endpoint_ok() { is_private "$1" && connects "https://$2/"; }
-region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
+region=$(/usr/libexec/inspect-proxmox/imds latest/meta-data/placement/region 2>/dev/null)
 check "region from IMDS" test -n "$region"
 endpoints=""
 if [ -z "$region" ]; then
