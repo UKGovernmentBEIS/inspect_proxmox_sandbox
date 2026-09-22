@@ -16,6 +16,7 @@ from proxmoxsandbox._impl.agent_commands import (
     _is_pid_gone,
     is_transient_qga_error,
 )
+from proxmoxsandbox._impl.qga_responses import ExecStatus
 
 
 def _http_error(status_code: int, message: str = "") -> httpx.HTTPStatusError:
@@ -195,7 +196,7 @@ async def test_exec_status_pid_gone_reports_finished():
     # to a synthetic completed status so exec() reads results from disk.
     api = _FakeApi([_PID_GONE])
     ac = AgentCommands(async_proxmox=api, node="proxmox")  # type: ignore[arg-type]
-    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == {"exited": 1}
+    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == ExecStatus(exited=1)
     assert api.calls == 1
 
 
@@ -204,15 +205,14 @@ async def test_exec_status_recovers_consumed_after_lost_response():
     # finds the PID gone -> fall back to "finished".
     api = _FakeApi([httpx.ReadTimeout(""), _PID_GONE])
     ac = AgentCommands(async_proxmox=api, node="proxmox")  # type: ignore[arg-type]
-    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == {"exited": 1}
+    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == ExecStatus(exited=1)
     assert api.calls == 2
 
 
 async def test_exec_status_returns_status_when_present():
     api = _FakeApi([{"exited": 1, "exitcode": 0}])
     ac = AgentCommands(async_proxmox=api, node="proxmox")  # type: ignore[arg-type]
-    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == {
-        "exited": 1,
-        "exitcode": 0,
-    }
+    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == ExecStatus(
+        exited=1, exitcode=0
+    )
     assert api.calls == 1
