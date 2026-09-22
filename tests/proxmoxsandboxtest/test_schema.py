@@ -83,6 +83,17 @@ def test_healthcheck_interval_must_be_positive():
         HealthCheck(test=("true",), interval=0)
 
 
+def test_healthcheck_schedule_durations_accept_fractional_seconds():
+    hc = HealthCheck(test=("true",), interval=0.5, start_period=1.5)
+    assert (hc.interval, hc.start_period) == (0.5, 1.5)
+
+
+def test_healthcheck_timeout_rejects_fractional_seconds():
+    """Timeout rides exec()'s int-only signature; a silent truncation is worse."""
+    with pytest.raises(ValidationError):
+        HealthCheck(test=("true",), timeout=2.5)
+
+
 def test_healthcheck_rejects_unknown_fields():
     """Typos in a healthcheck should fail loudly, not silently no-op."""
     with pytest.raises(ValidationError):
@@ -144,6 +155,27 @@ def test_unnamed_non_sandbox_vm_rejected_even_before_the_default():
 
 def test_explicit_none_name_means_default():
     assert _vm(None).name == "default"
+
+
+def test_await_before_next_vm_rejected_with_migration_hint():
+    """A config still setting the removed field must fail, not silently no-op."""
+    with pytest.raises(ValidationError, match="await_before_next_vm has been removed"):
+        VmConfig.model_validate(
+            {
+                "vm_source_config": {"built_in": "ubuntu24.04"},
+                "await_before_next_vm": True,
+            }
+        )
+
+
+def test_unknown_vmconfig_fields_still_ignored():
+    """Only the removed field is called out; VmConfig is not extra=forbid."""
+    assert (
+        VmConfig.model_validate(
+            {"vm_source_config": {"built_in": "ubuntu24.04"}, "some_future_field": 1}
+        ).name
+        == "default"
+    )
 
 
 def test_no_sandbox_vm_rejected():

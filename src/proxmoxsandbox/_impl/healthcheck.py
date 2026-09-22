@@ -14,6 +14,7 @@ from typing import Awaitable, Callable, Literal
 import httpx
 from inspect_ai.util import ExecResult, OutputLimitExceededError
 
+from proxmoxsandbox._impl.agent_commands import is_transient_qga_error
 from proxmoxsandbox.schema import HealthCheck
 
 logger = getLogger(__name__)
@@ -36,9 +37,11 @@ class Probe:
     """Result of one healthcheck attempt, with exceptions already classified.
 
     healthy:     the command exited 0.
-    unhealthy:   it exited non-zero or timed out in the guest (counts as a
-                 failed attempt, as in compose).
-    unreachable: the guest agent could not be reached; the service's state is
+    unhealthy:   it exited non-zero, timed out in the guest, or the guest agent
+                 returned a non-transient error (counts as a failed attempt, as
+                 in compose).
+    unreachable: the guest agent could not be reached, per the same transient
+                 classification the executor retries on; the service's state is
                  unknown, so this does not count as a failed attempt.
     """
 
@@ -121,8 +124,18 @@ class HealthCheckRunner:
         """Run the check once and classify what happened."""
         try:
             result = await self.execute(self.spec)
-        except (httpx.TransportError, httpx.HTTPStatusError) as e:
+        except httpx.TransportError as e:
             return Probe("unreachable", type(e).__name__)
+        except httpx.HTTPStatusError as e:
+            if is_transient_qga_error(e):
+                return Probe("unreachable", f"HTTP {e.response.status_code}")
+            # A non-transient status means the agent answered: a missing or
+            # unreadable `test` or result file, or an API error that will not
+            # come good. Either way it is this VM's problem, so spend a retry
+            # rather than the transport budget. The body can quote guest
+            # output, so keep it to debug and report the status code.
+            logger.debug(f"{self.label}: non-transient guest agent error: {e}")
+            return Probe("unhealthy", f"HTTP {e.response.status_code}")
         except TimeoutError:
             return Probe("unhealthy", f"timed out after {self.spec.timeout}s")
         except PermissionError:

@@ -201,8 +201,9 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
 
     Field names follow docker compose's `healthcheck` so the semantics are
     guessable, but the defaults do not: compose's 30s/3-retries gives up after
-    ~90s, far too short for a booting VM. Durations are seconds (floats), not
-    compose duration strings.
+    ~90s, far too short for a booting VM. Durations are seconds, not compose
+    duration strings; `interval` and `start_period` take fractions, `timeout`
+    is whole seconds.
 
     Success is exit code 0. `test` is an argument vector with no CMD/CMD-SHELL
     sentinel; use ("sh", "-c", script) or an explicit PowerShell invocation when
@@ -220,7 +221,7 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     Attributes:
         test: Command to run inside the guest.
         interval: Seconds between attempts.
-        timeout: Per-attempt limit in seconds, enforced inside the guest.
+        timeout: Per-attempt limit in whole seconds, enforced inside the guest.
         retries: Consecutive failures tolerated before the sample fails.
         start_period: Grace window in seconds after the first attempt during which
             failures do not count towards retries.
@@ -228,6 +229,9 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
 
     test: Tuple[str, ...] = Field(min_length=1)
     interval: float = Field(default=5, gt=0)
+    # int, unlike the other durations: it is handed to exec(), whose signature
+    # Inspect's SandboxEnvironment fixes as `timeout: int | None`, and which
+    # enforces it in-guest as `timeout -k 5s {timeout}s`.
     timeout: int = Field(default=30, gt=0)
     retries: int = Field(default=60, gt=0)
     start_period: float = Field(default=0, ge=0)
@@ -307,6 +311,20 @@ class VmConfig(BaseModel, frozen=True):
     cpu: Optional[str] = None
     depends_on: Tuple[str, ...] = ()
     healthcheck: Optional[HealthCheck] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_await_before_next_vm(cls, values: Any) -> Any:
+        # await_before_next_vm was replaced by depends_on/healthcheck. Extra
+        # keys are otherwise ignored, so without this a config that still sets
+        # it would load clean and silently stop waiting.
+        if isinstance(values, dict) and "await_before_next_vm" in values:
+            raise ValueError(
+                "await_before_next_vm has been removed. To make a later VM wait "
+                "for this one, give the later VM depends_on=(<this VM's name>,), "
+                "and give this VM a healthcheck if running is not enough."
+            )
+        return values
 
     @field_validator("name", mode="before")
     @classmethod

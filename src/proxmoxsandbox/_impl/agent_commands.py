@@ -50,6 +50,28 @@ def _is_pid_gone(exc: httpx.HTTPStatusError) -> bool:
     return "does not exist" in str(exc).casefold()
 
 
+def is_transient_qga_error(exc: Exception) -> bool:
+    """Whether an error talking to the QGA is worth retrying."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        if status_code == 500 and (
+            "no such file" in str(exc).casefold()
+            or "failed to open file" in str(exc).casefold()
+            # Guest-side read errno (e.g. "Is a directory", "Permission
+            # denied"): won't change on retry. Transient large-read
+            # failures come back as 596/597, not 500.
+            or "failed to read file" in str(exc).casefold()
+            # exec-status for a finished+already-read PID; not transient.
+            # get_agent_exec_status converts this into a disk fallback.
+            or _is_pid_gone(exc)
+        ):
+            return False
+        return status_code >= 500
+    return False
+
+
 class AgentCommands:
     logger = getLogger(__name__)
 
@@ -69,28 +91,6 @@ class AgentCommands:
         self.node = node
         self._qga_max_retries = qga_max_retries
 
-    @staticmethod
-    def _is_transient_qga_error(exc: Exception) -> bool:
-        """Whether an error talking to the QGA is worth retrying."""
-        if isinstance(exc, httpx.TransportError):
-            return True
-        if isinstance(exc, httpx.HTTPStatusError):
-            status_code = exc.response.status_code
-            if status_code == 500 and (
-                "no such file" in str(exc).casefold()
-                or "failed to open file" in str(exc).casefold()
-                # Guest-side read errno (e.g. "Is a directory", "Permission
-                # denied"): won't change on retry. Transient large-read
-                # failures come back as 596/597, not 500.
-                or "failed to read file" in str(exc).casefold()
-                # exec-status for a finished+already-read PID; not transient.
-                # get_agent_exec_status converts this into a disk fallback.
-                or _is_pid_gone(exc)
-            ):
-                return False
-            return status_code >= 500
-        return False
-
     async def _retry_on_qga_error(self, label: str, coro_fn):
         """Retry a coroutine function on transient QGA / transport errors."""
         max_retries = self._qga_max_retries
@@ -98,7 +98,7 @@ class AgentCommands:
             try:
                 return await coro_fn()
             except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                if attempt < max_retries and self._is_transient_qga_error(e):
+                if attempt < max_retries and is_transient_qga_error(e):
                     delay = min(
                         _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
                         _QGA_RETRY_MAX_DELAY,

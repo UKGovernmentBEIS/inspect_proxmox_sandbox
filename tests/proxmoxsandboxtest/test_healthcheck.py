@@ -44,11 +44,17 @@ def _transport_error() -> httpx.TransportError:
     return httpx.ConnectError("boom")
 
 
-def _http_500() -> httpx.HTTPStatusError:
+def _http_error(status_code: int, message: str = "") -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://pve/x")
     return httpx.HTTPStatusError(
-        "500", request=request, response=httpx.Response(500, request=request)
+        f"{status_code} {message}",
+        request=request,
+        response=httpx.Response(status_code, request=request),
     )
+
+
+def _http_500() -> httpx.HTTPStatusError:
+    return _http_error(500)
 
 
 def _scripted(*outcomes) -> tuple[Callable, list[HealthCheck]]:
@@ -180,15 +186,29 @@ async def test_transport_errors_do_not_count_toward_retries():
     assert clock.sleeps == [1, 1, 1]
 
 
-async def test_http_status_errors_are_transport_errors():
+async def test_transient_http_status_errors_do_not_count_toward_retries():
     clock = FakeClock()
-    request = httpx.Request("POST", "https://pve/x")
-    err = httpx.HTTPStatusError(
-        "500", request=request, response=httpx.Response(500, request=request)
-    )
-    execute, calls = _scripted(err, _ok())
+    execute, calls = _scripted(_http_500(), _ok())
     spec = HealthCheck(test=("x",), interval=1, retries=1)
     await _runner(spec, execute, clock).run()
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _http_error(403, "authentication failure"),
+        _http_error(500, "failed to open file '/tmp/x.stdout' - No such file"),
+    ],
+    ids=["4xx", "guest-side-file-error"],
+)
+async def test_non_transient_agent_errors_count_as_failures(error):
+    """These are the VM's problem, so they spend retries, not transport strikes."""
+    clock = FakeClock()
+    execute, calls = _scripted(error)
+    spec = HealthCheck(test=("x",), interval=1, retries=2)
+    with pytest.raises(HealthCheckFailed, match="healthcheck failed 2"):
+        await _runner(spec, execute, clock).run()
     assert len(calls) == 2
 
 

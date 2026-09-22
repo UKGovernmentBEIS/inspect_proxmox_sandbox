@@ -14,6 +14,7 @@ from proxmoxsandbox._impl.agent_commands import (
     _QGA_MAX_RETRIES,
     AgentCommands,
     _is_pid_gone,
+    is_transient_qga_error,
 )
 
 
@@ -73,7 +74,7 @@ class _FakeApi:
 
 @pytest.fixture
 def agent_commands() -> AgentCommands:
-    # _retry_on_qga_error / _is_transient_qga_error don't touch these.
+    # _retry_on_qga_error doesn't touch these.
     return AgentCommands(async_proxmox=None, node="proxmox")  # type: ignore[arg-type]
 
 
@@ -89,13 +90,13 @@ def _no_sleep(monkeypatch):
 
 
 @pytest.mark.parametrize("exc", TRANSIENT_ERRORS)
-def test_transient_errors_are_retryable(agent_commands, exc):
-    assert agent_commands._is_transient_qga_error(exc) is True
+def test_transient_errors_are_retryable(exc):
+    assert is_transient_qga_error(exc) is True
 
 
 @pytest.mark.parametrize("exc", PERMANENT_ERRORS)
-def test_permanent_errors_are_not_retryable(agent_commands, exc):
-    assert agent_commands._is_transient_qga_error(exc) is False
+def test_permanent_errors_are_not_retryable(exc):
+    assert is_transient_qga_error(exc) is False
 
 
 def test_is_pid_gone():
