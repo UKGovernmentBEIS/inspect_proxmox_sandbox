@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `VmConfig.depends_on`: a VM is created only once the named VMs are ready. See "Dependency-based VM startup" in the README
+- `VmConfig.healthcheck`: compose-style guest command that gates a VM's readiness. See "Healthchecks" in the README
+- **Breaking:** every VM except the first `is_sandbox` VM must be named; that one defaults to `default`. See "VM Names" in the README
+- VM readiness polls are at most 5 s apart, and a VM that never runs or whose guest agent never answers fails with `VmNotRunningError` / `GuestAgentUnavailableError`
 - Reject malformed guest-agent replies with `GuestAgentTamperError`. Limit accepted file data, command output and quoted error text; limit how long commands wait; and close cancelled uploads with a time limit on cleanup.
 - Bundled provisioning scripts: under the egress lockdown the host now REJECTs guest DNS to port 53 instead of accepting it; the lockdown unit only halts the API on its own verdict; hosts carry a `.aisi<N>` contract stamp in the API version that survives `pve-manager` upgrades
 - Every VM now gets a serial port (`serial0: socket`)
@@ -19,7 +23,7 @@
 - Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 - Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
-- Don't wait for a VM to reach "running" before starting the next one (just wait for all of them together at the end). Set `await_before_next_vm=True` on a `VmConfig` if later VMs depend on it having booted first
+- VMs boot concurrently rather than one after another
 
 ## 0.11.0 - 2026-06-01
 

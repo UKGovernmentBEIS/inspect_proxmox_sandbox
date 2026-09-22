@@ -2,6 +2,7 @@
 import os
 import random
 from typing import AsyncGenerator
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -53,6 +54,16 @@ def reset_global_pool_state():
     yield
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
     InfraCommands._instances.clear()
+
+
+@pytest.fixture
+def mock_proxmox_api():
+    """Stand-in for AsyncProxmoxAPI as sample_init constructs it."""
+    with patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI") as mock:
+        api_instance = AsyncMock()
+        api_instance.get.return_value = {"version": "8.0"}
+        mock.return_value = api_instance
+        yield mock
 
 
 @pytest.fixture

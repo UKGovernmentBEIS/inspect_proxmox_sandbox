@@ -2,7 +2,7 @@ import abc
 import re
 import tarfile
 from logging import getLogger
-from typing import Collection, Dict, List, Literal, Set
+from typing import Collection, Dict, List, Literal, Set, Tuple
 
 import httpx
 import tenacity
@@ -16,6 +16,22 @@ from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
+
+# Budgets for the two VM readiness preconditions, in seconds.
+_RUNNING_TIMEOUT = 1200.0
+_AGENT_TIMEOUT = 300.0
+# Uncapped, the backoff reaches 30-50 s gaps after ~70 s; slow (Windows) guests
+# paid that on top of their boot time.
+_POLL_MAX_WAIT = 5.0
+_POLL_WAIT = tenacity.wait_exponential(min=0.1, max=_POLL_MAX_WAIT, exp_base=1.3)
+
+
+class VmNotRunningError(TimeoutError):
+    """Proxmox did not report the VM in the awaited status within the budget."""
+
+
+class GuestAgentUnavailableError(TimeoutError):
+    """The QEMU guest agent never answered a ping within the budget."""
 
 
 class QemuCommands(abc.ABC):
@@ -77,12 +93,26 @@ class QemuCommands(abc.ABC):
     async def await_vm(
         self,
         vm_id: int,
-        is_sandbox: bool,
+        requires_guest_agent: bool,
         status_for_wait: str = "running",
     ) -> None:
+        """Wait for the VM's status and, if required, a guest-agent ping."""
+        await self.await_running(vm_id, status_for_wait=status_for_wait)
+        if requires_guest_agent and status_for_wait == "running":
+            await self.await_agent(vm_id)
+
+    async def await_running(
+        self,
+        vm_id: int,
+        *,
+        status_for_wait: str = "running",
+        timeout: float = _RUNNING_TIMEOUT,
+    ) -> None:
+        """Poll Proxmox until the VM reports `status_for_wait`."""
+
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(1200),
+            wait=_POLL_WAIT,
+            stop=tenacity.stop_before_delay(timeout),
         )
         async def is_in_status() -> None:
             vm_status = await self.async_proxmox.request(
@@ -101,30 +131,42 @@ class QemuCommands(abc.ABC):
             self.TRACE_NAME,
             f"await VM {vm_id} to be in status {status_for_wait}",
         ):
-            await is_in_status()
+            try:
+                await is_in_status()
+            except tenacity.RetryError as e:
+                raise VmNotRunningError(
+                    f"VM {vm_id} did not reach status {status_for_wait!r} "
+                    f"within {timeout:g}s"
+                ) from e
 
-        if is_sandbox and status_for_wait == "running":
-            attempt_count = [0]  # Use list to allow mutation in nested function
+    async def await_agent(self, vm_id: int, *, timeout: float = _AGENT_TIMEOUT) -> None:
+        """Ping the QEMU guest agent until it answers."""
+        attempt_count = [0]  # Use list to allow mutation in nested function
 
-            @tenacity.retry(
-                wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                stop=tenacity.stop_after_delay(300),
-            )
-            async def qemu_agent_reachable() -> None:
-                attempt_count[0] += 1
-                if attempt_count[0] % 10 == 1:  # Log every 10 attempts
-                    self.logger.info(
-                        f"VM {vm_id} QEMU agent ping attempt {attempt_count[0]}"
-                    )
-                await self.ping_qemu_agent(vm_id)
+        @tenacity.retry(
+            wait=_POLL_WAIT,
+            stop=tenacity.stop_before_delay(timeout),
+        )
+        async def qemu_agent_reachable() -> None:
+            attempt_count[0] += 1
+            if attempt_count[0] % 10 == 1:  # Log every 10 attempts
+                self.logger.info(
+                    f"VM {vm_id} QEMU agent ping attempt {attempt_count[0]}"
+                )
+            await self.ping_qemu_agent(vm_id)
 
-            with trace_action(
-                self.logger, self.TRACE_NAME, f"await VM {vm_id} QEMU agent"
-            ):
+        with trace_action(self.logger, self.TRACE_NAME, f"await VM {vm_id} QEMU agent"):
+            try:
                 await qemu_agent_reachable()
-            self.logger.info(
-                f"VM {vm_id} QEMU agent responded after {attempt_count[0]} attempts"
-            )
+            except tenacity.RetryError as e:
+                raise GuestAgentUnavailableError(
+                    f"VM {vm_id} QEMU guest agent did not answer within "
+                    f"{timeout:g}s ({attempt_count[0]} pings). Check that "
+                    f"qemu-guest-agent is installed and running in the guest."
+                ) from e
+        self.logger.info(
+            f"VM {vm_id} QEMU agent responded after {attempt_count[0]} attempts"
+        )
 
     async def destroy_vm(self, vm_id: int) -> None:
         with trace_action(self.logger, self.TRACE_NAME, f"stop VM {vm_id}"):
@@ -176,6 +218,17 @@ class QemuCommands(abc.ABC):
             "GET", f"/nodes/{self.node}/qemu/{vm_id}/config"
         )
 
+    async def vm_bridges(self, vm_id: int) -> Set[str]:
+        """Bridges (VNet IDs) the VM's NICs are attached to."""
+        bridges: Set[str] = set()
+        for key, value in (await self.read_vm(vm_id)).items():
+            if re.fullmatch(r"net\d+", key):
+                # 'virtio=BC:24:11:3E:C3:BA,bridge=tcc919v0'
+                for part in str(value).split(","):
+                    if part.startswith("bridge="):
+                        bridges.add(part.removeprefix("bridge="))
+        return bridges
+
     async def find_next_available_vm_id(self) -> int:
         return await self.async_proxmox.request("GET", "/cluster/nextid")
 
@@ -191,17 +244,9 @@ class QemuCommands(abc.ABC):
 
         await self.task_wrapper.do_action_and_wait_for_tasks(do_start)
 
-    async def start_and_await(
-        self,
-        vm_id: int,
-        is_sandbox: bool,
-    ) -> None:
+    async def start_and_await(self, vm_id: int, requires_guest_agent: bool) -> None:
         await self.start(vm_id=vm_id)
-
-        await self.await_vm(
-            vm_id=vm_id,
-            is_sandbox=is_sandbox,
-        )
+        await self.await_vm(vm_id=vm_id, requires_guest_agent=requires_guest_agent)
 
     def _convert_sdn_vnet_aliases(
         self, sdn_vnet_aliases: VnetAliases
@@ -295,7 +340,6 @@ class QemuCommands(abc.ABC):
         sdn_vnet_aliases: VnetAliases,
         vm_config: VmConfig,
         built_in_vm_ids: Dict[str, int],
-        wait_until_ready: bool,
     ) -> int:
         if (
             vm_config.os_type != "l26"
@@ -306,6 +350,28 @@ class QemuCommands(abc.ABC):
                 "os_type is only supported for OVA or existing_vm_template_tag"
             )
 
+        vm_id_to_clone, preserve_tags = await self._resolve_source_template(
+            vm_config, sdn_vnet_aliases, built_in_vm_ids
+        )
+        return await self.clone_vm_and_start(
+            vm_config=vm_config,
+            vm_id_to_clone=vm_id_to_clone,
+            sdn_vnet_aliases=sdn_vnet_aliases,
+            preserve_tags=preserve_tags,
+        )
+
+    async def _resolve_source_template(
+        self,
+        vm_config: VmConfig,
+        sdn_vnet_aliases: VnetAliases,
+        built_in_vm_ids: Dict[str, int],
+    ) -> Tuple[int, bool]:
+        """Find or make the template this VmConfig clones from.
+
+        Returns (template_id, preserve_tags). An OVA is imported and baked into
+        an inspect-tagged template on first use; the tag encodes the file name
+        and size so later runs reuse it.
+        """
         vm_id_to_clone: int
         preserve_tags: bool
 
@@ -423,17 +489,7 @@ class QemuCommands(abc.ABC):
         else:
             raise NotImplementedError(f"Not supported: {vm_config.vm_source_config=}")
 
-        new_vm_id = await self.clone_vm_and_start(
-            vm_config=vm_config,
-            vm_id_to_clone=vm_id_to_clone,
-            sdn_vnet_aliases=sdn_vnet_aliases,
-            preserve_tags=preserve_tags,
-            wait_until_ready=wait_until_ready,
-        )
-
-        if new_vm_id is None:
-            raise ValueError("No VM ID?")
-        return new_vm_id
+        return vm_id_to_clone, preserve_tags
 
     async def remove_existing_nics(self, vm_id):
         existing_config = await self.read_vm(vm_id)
@@ -553,8 +609,8 @@ class QemuCommands(abc.ABC):
         vm_id_to_clone: int,
         sdn_vnet_aliases: VnetAliases,
         preserve_tags: bool,
-        wait_until_ready: bool,
     ) -> int:
+        """Clone, configure and start a VM; it is tracked for cleanup once cloned."""
         new_vm_id = await self.find_next_available_vm_id()
 
         async def create_clone() -> None:
@@ -564,7 +620,13 @@ class QemuCommands(abc.ABC):
                 json={"newid": new_vm_id, "full": 0, "name": vm_config.name},
             )
 
-        await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
+        with trace_action(
+            self.logger, self.TRACE_NAME, f"clone VM {vm_id_to_clone} -> {new_vm_id}"
+        ):
+            await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
+        # Registered before configure/start so a failure there still gets it
+        # destroyed by task_cleanup.
+        self.register_vm(new_vm_id)
 
         extra_tags = []
         if preserve_tags:
@@ -589,21 +651,17 @@ class QemuCommands(abc.ABC):
         await self.task_wrapper.do_action_and_wait_for_tasks(other_updates)
 
         await self.start(vm_id=new_vm_id)
-        if wait_until_ready:
-            await self.await_vm(
-                vm_id=new_vm_id,
-                is_sandbox=vm_config.is_sandbox,
-            )
         return new_vm_id
 
     def other_config_json(
         self, vm_config: VmConfig, json_for_create: ProxmoxJsonDataType
     ) -> None:
-        json_for_create["agent"] = f"enabled={1 if vm_config.is_sandbox else 0}"
+        json_for_create["agent"] = (
+            f"enabled={1 if vm_config.requires_guest_agent else 0}"
+        )
         json_for_create["memory"] = vm_config.ram_mb
         json_for_create["cores"] = vm_config.vcpus
-        if vm_config.name is not None:
-            json_for_create["name"] = vm_config.name
+        json_for_create["name"] = vm_config.name
         json_for_create["serial0"] = "socket"
         if vm_config.uefi_boot:
             json_for_create["efidisk0"] = (

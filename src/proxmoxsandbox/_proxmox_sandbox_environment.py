@@ -428,11 +428,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     vm_configs_with_ids,
                     sdn_zone_id,
                     ipam_mappings,
-                ) = await infra_commands.create_sdn_and_vms(
-                    proxmox_ids_start,
-                    sdn_config=config.sdn_config,
-                    vms_config=config.vms_config,
-                )
+                ) = await infra_commands.create_sdn_and_vms(proxmox_ids_start, config)
 
             sandboxes: Dict[str, SandboxEnvironment] = {}
 
@@ -440,40 +436,28 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 vm_configs_with_id[0] for vm_configs_with_id in vm_configs_with_ids
             )
 
-            found_default = False
-
             agent_commands = AgentCommands(
                 async_proxmox=infra_commands.async_proxmox, node=instance.node
             )
 
-            for idx, vm_config_and_id in enumerate(vm_configs_with_ids):
+            for vm_id, vm_config in vm_configs_with_ids:
                 vm_sandbox_environment = ProxmoxSandboxEnvironment(
                     infra_commands=infra_commands,
                     agent_commands=agent_commands,
                     ipam_mappings=ipam_mappings,
-                    vm_id=vm_config_and_id[0],
+                    vm_id=vm_id,
                     all_vm_ids=vm_ids,
                     sdn_zone_id=sdn_zone_id,
                     instance=instance,
                     pool_id=pool_id,
-                    os_type=vm_config_and_id[1].os_type,
+                    os_type=vm_config.os_type,
                 )
-                if not found_default and vm_config_and_id[1].is_sandbox:
+                sandboxes[vm_config.name] = vm_sandbox_environment
+                # The first sandbox VM is also Inspect's "default". Config
+                # validation guarantees there is one and that no later VM took
+                # the name.
+                if vm_config.is_sandbox and "default" not in sandboxes:
                     sandboxes["default"] = vm_sandbox_environment
-                    found_default = True
-                else:
-                    sandbox_name = (
-                        vm_config_and_id[1].name
-                        if vm_config_and_id[1].name is not None
-                        else f"vm_{vm_config_and_id[0]}"
-                    )
-                    sandboxes[sandbox_name] = vm_sandbox_environment
-
-            if not found_default:
-                raise ValueError(
-                    "No default sandbox found: at least one VM must have "
-                    "is_sandbox = True"
-                )
 
             # borrowed from k8s provider
             def reorder_default_first(
@@ -1331,4 +1315,4 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
-        await self.qemu_commands.await_vm(vm_id=self.vm_id, is_sandbox=True)
+        await self.qemu_commands.await_vm(vm_id=self.vm_id, requires_guest_agent=True)
