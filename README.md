@@ -533,7 +533,7 @@ Two things worth knowing:
 
 ## Guest-agent replies and command waiting
 
-`exec()` shares a waiting allowance across uploads, retries and result collection: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup can take additional time, and the guest command may keep running after the provider raises `TimeoutError`.
+`exec()` shares a waiting allowance across uploads, retries and result collection: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup gets a separate two-minute allowance per step, and the guest command may keep running after the provider raises `TimeoutError`.
 
 Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
 

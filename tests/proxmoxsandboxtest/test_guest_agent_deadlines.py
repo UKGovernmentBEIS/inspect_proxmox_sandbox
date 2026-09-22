@@ -1,6 +1,8 @@
 """A stalled guest cannot keep a provider call alive by choosing a stage."""
 
 import asyncio
+import base64
+import json
 from functools import partial
 from unittest.mock import patch
 
@@ -67,7 +69,7 @@ def test_large_input_upload_and_its_cleanup_cannot_restart_the_command_budget():
             input="x" * 100_000,
             faults=[
                 Fault(stage="upload", skip_requests=2),
-                Fault(stage="launch", skip_requests=2, elapsed_seconds=20),
+                Fault(stage="launch", skip_requests=2),
             ],
         )
     )
@@ -144,3 +146,61 @@ async def test_cancelled_iso_transfer_is_not_reused_by_the_next_write():
 
     assert replies.seen["iso_attach"] == 1
     assert replies.seen.get("upload", 0) > 0
+
+
+@pytest.mark.parametrize("stage", ["iso_detach", "iso_delete"])
+async def test_slow_successful_iso_cleanup_preserves_the_fast_transfer(stage):
+    replies = GuestReplies(
+        Scenario(
+            operation="exec",
+            fault=Fault(stage=stage, mode="late_success", elapsed_seconds=45),
+        )
+    )
+    api = AsyncProxmoxAPI("proxmox.test:8006", "test-user", "test-password")
+    sandbox = make_sandbox(api)
+    client = partial(httpx.AsyncClient, transport=httpx.MockTransport(replies.handle))
+
+    with patch("httpx.AsyncClient", client), patch("time.monotonic", replies.now):
+        async with local_upload_peer(api, True):
+            await sandbox.write_file("/first", b"x" * 200_000)
+            await sandbox.write_file("/second", b"y" * 200_000)
+
+    assert replies.seen["iso_attach"] == 2
+    assert replies.seen.get("upload", 0) == 0
+
+
+async def test_slow_temporary_file_cleanup_is_allowed_to_finish():
+    class CleanupReplies(GuestReplies):
+        def __init__(self):
+            super().__init__(Scenario(operation="exec"))
+            self.scripts: dict[str, bytes] = {}
+            self.cleaning = False
+            self.cleanup_polls = 0
+            self.cleanup_finished = False
+
+        async def handle(self, request: httpx.Request) -> httpx.Response:
+            route = request.url.path.rsplit("/", 1)[-1]
+            if route == "file-write":
+                data = json.loads(request.content)
+                self.scripts[data["file"]] = base64.b64decode(data["content"])
+            elif route == "exec":
+                self.cleaning = any(
+                    b"rm -rf " in self.scripts.get(arg, b"")
+                    for arg in json.loads(request.content)["command"]
+                )
+            elif route == "exec-status" and self.cleaning:
+                self.cleanup_polls += 1
+                if self.cleanup_polls == 1:
+                    self.elapsed += 45
+                    return httpx.Response(200, json={"data": {"exited": 0}})
+                self.cleanup_finished = True
+            return await super().handle(request)
+
+    replies = CleanupReplies()
+    api = AsyncProxmoxAPI("proxmox.test:8006", "test-user", "test-password")
+    sandbox = make_sandbox(api)
+    client = partial(httpx.AsyncClient, transport=httpx.MockTransport(replies.handle))
+    with patch("httpx.AsyncClient", client), patch("time.monotonic", replies.now):
+        await sandbox.write_file("/sample", b"x" * 100_000)
+
+    assert replies.cleanup_finished

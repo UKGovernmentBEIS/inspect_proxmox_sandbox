@@ -27,7 +27,11 @@ from typing_extensions import override
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.deadline import remaining_budget, within_budget
+from proxmoxsandbox._impl.deadline import (
+    CLEANUP_WAIT_SECONDS,
+    remaining_budget,
+    within_budget,
+)
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
@@ -1239,7 +1243,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 else ["rm", "-rf", temp_dir]
             )
             try:
-                await within_budget(self.exec(cmd=cleanup), 10, independent=True)
+                await within_budget(
+                    self.exec(cmd=cleanup), CLEANUP_WAIT_SECONDS, independent=True
+                )
             except GuestAgentTamperError:
                 raise
             except Exception as ex:

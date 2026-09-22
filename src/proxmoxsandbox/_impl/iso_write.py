@@ -29,7 +29,7 @@ from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.deadline import within_budget
+from proxmoxsandbox._impl.deadline import CLEANUP_WAIT_SECONDS, within_budget
 from proxmoxsandbox._impl.qga_responses import ExecStatus
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 
@@ -161,7 +161,9 @@ class IsoWriter:
             if attached:
                 t0 = time.monotonic()
                 try:
-                    await within_budget(self._detach(vm_id), 5, independent=True)
+                    await within_budget(
+                        self._detach(vm_id), CLEANUP_WAIT_SECONDS, independent=True
+                    )
                 except Exception as ex:
                     cleanup_failed = True
                     logger.warning(f"detach on vm {vm_id} failed: {ex}")
@@ -170,7 +172,9 @@ class IsoWriter:
                 t0 = time.monotonic()
                 try:
                     await within_budget(
-                        self._delete_iso(iso_volid), 5, independent=True
+                        self._delete_iso(iso_volid),
+                        CLEANUP_WAIT_SECONDS,
+                        independent=True,
                     )
                 except Exception as ex:
                     cleanup_failed = True

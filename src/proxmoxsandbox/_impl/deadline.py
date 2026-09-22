@@ -4,6 +4,8 @@ import asyncio
 from contextvars import ContextVar
 from typing import Any, Coroutine, TypeVar
 
+CLEANUP_WAIT_SECONDS = 2 * 60
+
 _T = TypeVar("_T")
 _deadline: ContextVar[float | None] = ContextVar("guest_agent_deadline", default=None)
 
