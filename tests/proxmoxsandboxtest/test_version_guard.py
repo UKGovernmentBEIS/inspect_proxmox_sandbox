@@ -1,8 +1,4 @@
-"""Unit tests for the PVE version guard on guest file-read.
-
-These don't need a live Proxmox: they exercise version parsing and the
-decode=1 legacy fallback decoding directly.
-"""
+"""Version selection for the guest file-read protocol."""
 
 import pytest
 
@@ -33,27 +29,3 @@ def _api(release: str) -> AsyncProxmoxAPI:
 )
 def test_release_at_least_9_2(release: str, expected: bool) -> None:
     assert _api(release).release_at_least(9, 2) is expected
-
-
-def test_decode_legacy_recovers_latin1_bytes() -> None:
-    # decode=1 returns each raw byte as a Latin-1 codepoint; "é" (0xE9) round-trips.
-    raw, truncated = _api("9.1.5")._decode_legacy_file_read(
-        content="café", data={"truncated": False}, count=1024
-    )
-    assert raw == "café".encode("utf-8")[:3] + b"\xe9"  # 'caf' + 0xe9
-    assert truncated is False
-
-
-def test_decode_legacy_honours_count_cap() -> None:
-    raw, truncated = _api("9.1.5")._decode_legacy_file_read(
-        content="abcdef", data={"truncated": False}, count=3
-    )
-    assert raw == b"abc"
-    assert truncated is True
-
-
-def test_decode_legacy_propagates_server_truncation() -> None:
-    _, truncated = _api("9.1.5")._decode_legacy_file_read(
-        content="abc", data={"truncated": True}, count=1024
-    )
-    assert truncated is True

@@ -12,7 +12,6 @@ per-call overhead from ISO upload/attach/mount, so QGA wins for small files).
 from __future__ import annotations
 
 import asyncio
-import os
 import random
 import shlex
 import string
@@ -30,6 +29,8 @@ from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.deadline import CLEANUP_WAIT_SECONDS, within_budget
+from proxmoxsandbox._impl.qga_responses import ExecStatus
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 
 logger = getLogger(__name__)
@@ -51,7 +52,7 @@ def _rand(n: int = 8) -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
-def _build_iso(contents: bytes) -> Path:
+def _build_iso(contents: bytes, path: Path | None = None) -> Path:
     """Build a single-file ISO9660 image and return the local path."""
     iso = pycdlib.PyCdlib()
     iso.new(interchange_level=3, joliet=3, rock_ridge="1.12", vol_ident="WRITEFILE")
@@ -63,9 +64,15 @@ def _build_iso(contents: bytes) -> Path:
         joliet_path=_ISO_PAYLOAD_JOLIET,
         rr_name=_ISO_PAYLOAD_NAME,
     )
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".iso") as tmp:
-        iso.write_fp(cast(BinaryIO, tmp))
-        return Path(tmp.name)
+    try:
+        if path is not None:
+            iso.write(str(path))
+            return path
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".iso") as tmp:
+            iso.write_fp(cast(BinaryIO, tmp))
+            return Path(tmp.name)
+    finally:
+        iso.close()
 
 
 class IsoWriter:
@@ -99,27 +106,32 @@ class IsoWriter:
             await self._do_write(vm_id, filepath, contents)
 
     async def _do_write(self, vm_id: int, filepath: str, contents: bytes) -> None:
-        local_iso: Path | None = None
+        local_dir = tempfile.TemporaryDirectory()
         iso_volid: str | None = None
         attached = False
         timings: dict[str, float] = {}
         t_start = time.monotonic()
         try:
             t0 = time.monotonic()
-            local_iso = await asyncio.to_thread(_build_iso, contents)
+            local_iso = await asyncio.to_thread(
+                _build_iso, contents, Path(local_dir.name) / "payload.iso"
+            )
             timings["build"] = time.monotonic() - t0
 
             t0 = time.monotonic()
             iso_name = f"wf-{vm_id}-{time.time_ns()}-{_rand()}.iso"
+            iso_volid = f"{LOCAL_STORAGE}:iso/{iso_name}"
             # Bypass storage_commands.upload_file_to_storage to skip the
             # task_wrapper wait. For a new random-named ISO, the curl POST
             # returns when the file is on disk; we don't need to wait for
             # Proxmox's content reindex task to complete before we can
             # reference it as a volid.
-            await self.async_proxmox.upload_file_with_curl(
-                self.node, LOCAL_STORAGE, local_iso, "iso", filename=iso_name
+            await within_budget(
+                self.async_proxmox.upload_file_with_curl(
+                    self.node, LOCAL_STORAGE, local_iso, "iso", filename=iso_name
+                ),
+                600,
             )
-            iso_volid = f"{LOCAL_STORAGE}:iso/{iso_name}"
             timings["upload"] = time.monotonic() - t0
 
             # On a freshly-booted VM the kernel sometimes refuses every
@@ -128,8 +140,8 @@ class IsoWriter:
             # media-change event which the kernel then handles cleanly.
             t0 = time.monotonic()
             for attempt in range(2):
-                await self._attach(vm_id, iso_volid)
                 attached = True
+                await self._attach(vm_id, iso_volid)
                 try:
                     await self._copy_in_guest(vm_id, filepath)
                     break
@@ -144,30 +156,37 @@ class IsoWriter:
                     attached = False
             timings["attach_copy"] = time.monotonic() - t0
         finally:
+            local_dir.cleanup()
+            cleanup_failed = False
             if attached:
                 t0 = time.monotonic()
                 try:
-                    await self._detach(vm_id)
+                    await within_budget(
+                        self._detach(vm_id), CLEANUP_WAIT_SECONDS, independent=True
+                    )
                 except Exception as ex:
+                    cleanup_failed = True
                     logger.warning(f"detach on vm {vm_id} failed: {ex}")
                 timings["detach"] = time.monotonic() - t0
             if iso_volid is not None:
                 t0 = time.monotonic()
                 try:
-                    await self._delete_iso(iso_volid)
+                    await within_budget(
+                        self._delete_iso(iso_volid),
+                        CLEANUP_WAIT_SECONDS,
+                        independent=True,
+                    )
                 except Exception as ex:
+                    cleanup_failed = True
                     logger.warning(f"delete iso {iso_volid} failed: {ex}")
                 timings["delete"] = time.monotonic() - t0
-            if local_iso is not None and local_iso.exists():
-                try:
-                    os.unlink(local_iso)
-                except OSError as ex:
-                    logger.warning(f"unlink {local_iso} failed: {ex}")
             total = time.monotonic() - t_start
             parts = " ".join(f"{k}={v:.2f}s" for k, v in timings.items())
             logger.info(
                 f"iso_write vm={vm_id} size={len(contents)} total={total:.2f}s {parts}"
             )
+        if cleanup_failed:
+            raise IOError(f"ISO cleanup was incomplete on VM {vm_id}")
 
     @tenacity.retry(
         wait=tenacity.wait_exponential(min=0.5, exp_base=1.5),
@@ -251,31 +270,26 @@ cp -f {mount_q}/{payload_q} {target_q}
 umount {mount_q}
 rmdir {mount_q}
 """
-        exec_resp = await self.agent_commands.exec_command(
+        pid = await self.agent_commands.exec_command(
             vm_id=vm_id, command=["sh", "-c", script]
         )
-        pid = exec_resp["pid"]
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
             stop=tenacity.stop_after_delay(120),
-            retry=tenacity.retry_if_result(lambda r: r is False),
+            retry=tenacity.retry_if_result(lambda r: r is None),
         )
-        async def wait() -> bool | dict:
+        async def wait() -> ExecStatus | None:
             status = await self.agent_commands.get_agent_exec_status(
                 vm_id=vm_id, pid=pid
             )
-            if status.get("exited") != 1:
-                return False
-            return status
+            return status if status.exited == 1 else None
 
         status = await wait()
-        assert isinstance(status, dict)
-        exitcode = status.get("exitcode", 1)
-        if exitcode != 0:
-            stderr = status.get("err-data", "")
-            stdout = status.get("out-data", "")
+        if status is None:  # tenacity raises RetryError instead; keeps mypy happy
+            raise IOError("iso_write guest copy: no exec status")
+        if status.exitcode != 0:
             raise IOError(
-                f"iso_write guest copy failed (exitcode={exitcode}): "
-                f"stderr={stderr!r} stdout={stdout!r}"
+                f"iso_write guest copy failed (exitcode={status.exitcode}): "
+                f"stderr={status.err_data!r} stdout={status.out_data!r}"
             )
