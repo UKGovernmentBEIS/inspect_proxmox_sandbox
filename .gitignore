@@ -6,3 +6,5 @@ __pycache__/
 .mypy_cache/
 .vscode/
 .ruff_cache
+host/rebuilds/out*
+host/build/

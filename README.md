@@ -44,12 +44,13 @@ host's external NIC. Forwarded traffic can also reach cloud instance metadata
 services. For cyber evals especially, you want those blocked so agents can't
 attack the Proxmox or cloud control planes.
 
-This is **configured on the host at provisioning time, not by this library** — it
-needs the host's live routing table to know which interface external API/SSH
-traffic arrives on, which only the host itself can tell you reliably. The
-provisioning scripts in this repo (`scripts/virtualized_proxmox/build_proxmox_auto.sh`
-and `scripts/ec2/userdata.sh`) set it up automatically, so hosts you create with
-them are isolated out of the box.
+This is **configured on the host, not by this library** — it needs the host's
+live routing table to know which interface external API/SSH traffic arrives on,
+which only the host itself can tell you reliably. The `inspect-proxmox-host` deb
+(see [`host/`](host/README.md)) applies it on every boot, and both provisioning
+scripts in this repo (`scripts/virtualized_proxmox/build_proxmox_auto.sh` and
+`scripts/ec2/userdata.sh`) install that deb, so hosts you create with them are
+isolated out of the box.
 
 If you provision Proxmox some other way, configure equivalent persistent rules
 **on the node**. The Proxmox rules accept management ports only on the
@@ -91,8 +92,9 @@ WireServer at `168.63.129.16` (guest-agent goal state / extension settings). On
 those clouds, add a `-d <ip>/32 -j DROP` raw-table rule for each — the host
 keeps access since its own traffic doesn't traverse `PREROUTING`.
 
-You must persist these rules across reboots (the bundled provisioning scripts do
-this, if you need an example.)
+You must persist these rules across reboots (the deb's
+`inspect-proxmox-host-configure.service` and `inspect-proxmox-block-cloud-metadata.service`
+do this, if you need an example.)
 
 These work under either firewall backend (`pve-firewall` or the nftables
 `proxmox-firewall`); the latter won't touch these chains. On `iptables-legacy`
@@ -100,7 +102,7 @@ hosts they won't show in `nft list ruleset` — use `iptables -t raw -S` / `-S F
 
 ### Optional egress lockdown
 
-The provisioning scripts also install but don't activate an egress lockdown
+The `inspect-proxmox-host` deb also installs but doesn't activate an egress lockdown
 for sandbox guests. When active, all traffic forwarded between guests and
 every interface carrying a default route is dropped, and the per-zone SDN
 `dnsmasq` instances are stopped from recursing to any upstream resolver.

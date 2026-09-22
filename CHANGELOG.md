@@ -7,6 +7,7 @@
 - **Breaking:** every VM except the first `is_sandbox` VM must be named; that one defaults to `default`. See "VM Names" in the README
 - VM readiness polls are at most 5 s apart, and a VM that never runs or whose guest agent never answers fails with `VmNotRunningError` / `GuestAgentUnavailableError`
 - Reject malformed guest-agent replies with `GuestAgentTamperError`. Limit accepted file data, command output and quoted error text; limit how long commands wait; and close cancelled uploads with a time limit on cleanup.
+- Host provisioning moved into Debian packages under `host/` (`inspect-proxmox-host`, `inspect-proxmox-host-ec2`), installed by both provisioning scripts from a GitHub release bundle. The pve-qemu-kvm scsi fixes and the IPAM MAC-reuse patch are now rebuilt Proxmox packages, pinned above upstream, instead of being compiled and `patch`ed on every host. Contract `aisi3`; the stamp now refuses to apply if either patch is missing.
 - Bundled provisioning scripts: under the egress lockdown the host now REJECTs guest DNS to port 53 instead of accepting it; the lockdown unit only halts the API on its own verdict; hosts carry a `.aisi<N>` contract stamp in the API version that survives `pve-manager` upgrades
 - Every VM now gets a serial port (`serial0: socket`)
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work

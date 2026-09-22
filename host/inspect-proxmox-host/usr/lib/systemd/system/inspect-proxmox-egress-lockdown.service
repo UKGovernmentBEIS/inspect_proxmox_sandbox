@@ -1,0 +1,14 @@
+[Unit]
+Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-proxmox-egress-lockdown)
+After=network-online.target pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
+OnFailure=inspect-proxmox-egress-lockdown-halt.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/inspect-proxmox/egress-lockdown
+SuccessExitStatus=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

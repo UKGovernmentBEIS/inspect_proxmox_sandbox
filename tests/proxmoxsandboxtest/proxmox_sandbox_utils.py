@@ -11,13 +11,14 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironmentConfig,
 )
 
-HOST_CONTRACT = 2
+HOST_CONTRACT = 3
 
 
 def host_contract(version: str) -> int:
-    """The `.aisiN` stamp the provisioning scripts write into pvecfg.pm, else 0.
+    """The `.aisiN` stamp inspect-proxmox-host writes into pvecfg.pm, else 0.
 
-    A stock host, or one whose pve-manager has been upgraded since, reads 0.
+    N is that package's version. A stock host reads 0, as does one where a patch
+    the stamp guards has gone missing.
     """
     match = re.search(r"\.aisi(\d+)", version)
     return int(match.group(1)) if match else 0
@@ -31,8 +32,8 @@ async def require_host_contract(
     found = host_contract(version)
     assert found >= want, (
         f"host reports {version}, i.e. contract aisi{found}, but this test asserts"
-        f" behaviour only aisi{want} hosts have. Rebuild the host from"
-        " scripts/ec2/userdata.sh."
+        f" behaviour only aisi{want} hosts have. Install inspect-proxmox-host"
+        f" {want} or later on the host, or rebuild it (see host/README.md)."
     )
 
 

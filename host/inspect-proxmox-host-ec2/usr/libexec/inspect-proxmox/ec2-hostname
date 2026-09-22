@@ -1,0 +1,8 @@
+#!/bin/bash
+# EC2 renames a relaunched AMI to ip-x-x-x-x, which breaks Proxmox node identity, certs
+# and pveproxy. Pin the node name and point it at the current private IP, every boot.
+set -euo pipefail
+PRIVATE_IP=$(hostname -I | awk '{print $1}')
+hostnamectl set-hostname proxmox
+sed -i "/proxmox/d" /etc/hosts
+echo "$PRIVATE_IP proxmox.localdomain proxmox" >> /etc/hosts

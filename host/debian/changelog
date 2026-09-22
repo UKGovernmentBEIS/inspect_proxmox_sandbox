@@ -1,0 +1,9 @@
+inspect-proxmox-host (3) trixie; urgency=medium
+
+  * Initial packaging of what scripts/ec2/userdata.sh and
+    build_proxmox_auto.sh used to write by hand. Contract aisi3: same
+    host behaviour as aisi2, now installed from these packages, with the
+    IPAM patch and the pve-qemu-kvm fixes carried in rebuilt Proxmox
+    packages instead of applied at provisioning time.
+
+ -- UK AI Security Institute <153507562+art-dsit@users.noreply.github.com>  Mon, 21 Sep 2026 12:00:00 +0000

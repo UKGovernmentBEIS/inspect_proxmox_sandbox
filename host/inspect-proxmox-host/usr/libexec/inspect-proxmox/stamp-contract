@@ -1,0 +1,35 @@
+#!/bin/bash
+# Stamp the contract this host provides (.aisiN, N = this package's version) onto the
+# version string pveversion prints and the API serves, so a caller can tell what a host
+# provides before asserting it. pvecfg.pm's sub version() is left alone because Proxmox
+# compares it internally. A pve-manager upgrade replaces the file, so the apt hook in
+# /etc/apt/apt.conf.d/80inspect-proxmox-contract re-runs this after every dpkg run.
+#
+# Refuses to stamp unless the patched behaviour is actually present, so a host that has
+# lost a patch reports contract 0 instead of lying about it.
+set -euo pipefail
+F=/usr/share/perl5/PVE/pvecfg.pm
+N=$(dpkg-query -W -f '${Version}' inspect-proxmox-host)
+N=${N%%[^0-9]*}
+before=$(md5sum < "$F")
+restart_if_changed() {
+    [ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
+}
+
+sed -i -E 's/\.aisi[0-9]+//g' "$F"
+
+ok=1
+/usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -qF quirk_mode_page_set_block_size \
+    || { echo "ERROR: pve-qemu-kvm lacks the scsi-disk quirk patch" >&2; ok=0; }
+grep -qF 'DNS_SETUP:' /usr/share/perl5/PVE/Network/SDN/Subnets.pm \
+    || { echo "ERROR: libpve-network-perl lacks the IPAM MAC-reuse patch" >&2; ok=0; }
+if [ "$ok" = 0 ]; then
+    echo "ERROR: not stamping aisi$N; this host reports contract 0" >&2
+    restart_if_changed
+    exit 1
+fi
+
+sed -i -E "s/('version' => '[0-9.]+)'/\1.aisi$N'/
+           s|(return '[0-9.]+)/|\1.aisi$N/|" "$F"
+grep -q "'version' => '[0-9.]*\.aisi$N'," "$F" || { echo "ERROR: $F not stamped aisi$N" >&2; exit 1; }
+restart_if_changed

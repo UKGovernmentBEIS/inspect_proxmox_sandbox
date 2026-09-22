@@ -1,0 +1,13 @@
+[Unit]
+Description=Configure and start the CloudWatch agent OTel pipeline for pvestatd metrics
+After=network-online.target pve-cluster.service
+Wants=network-online.target
+ConditionPathExists=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/inspect-proxmox/ec2-cloudwatch
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+#!/bin/bash
+# pvestatd -> localhost CloudWatch agent -> CloudWatch OTLP, SigV4-signed with the instance
+# role (403s harmlessly without cloudwatch:PutMetricData). Every boot, so ${env:AWS_REGION}
+# and the Name tag follow an AMI relaunch. fetch-config + append-config is idempotent.
+set -euo pipefail
+IMDS=/usr/libexec/inspect-proxmox/imds
+REGION=$($IMDS latest/meta-data/placement/region)
+echo "AWS_REGION=${REGION}" > /etc/default/amazon-cloudwatch-agent-otel
+# Absent Name tag -> no Name label; instance-id still identifies the box. The launcher
+# must enable InstanceMetadataTags for this to resolve.
+NAME=$($IMDS latest/meta-data/tags/instance/Name 2>/dev/null || true)
+if [ -n "${NAME}" ]; then
+    echo "OTEL_RESOURCE_ATTRIBUTES=ec2.tag.Name=${NAME}" >> /etc/default/amazon-cloudwatch-agent-otel
+fi
+
+# Written directly rather than via `pvesh create /cluster/metrics/server`, which
+# connection-tests the endpoint before the agent is up.
+if ! grep -q '^opentelemetry: cloudwatch-otel' /etc/pve/status.cfg 2>/dev/null; then
+    printf 'opentelemetry: cloudwatch-otel\n\tserver 127.0.0.1\n\tport 4318\n\totel-protocol http\n\totel-path /v1/metrics\n\totel-compression gzip\n' \
+        >> /etc/pve/status.cfg
+fi
+
+export AWS_REGION="${REGION}"
+ctl=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+CFG=/usr/share/inspect-proxmox/cloudwatch
+"$ctl" -a fetch-config -c "file:$CFG/cw-base.json"
+"$ctl" -a append-config -c "file:$CFG/otel-metrics.yaml" -s

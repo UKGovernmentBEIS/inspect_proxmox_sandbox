@@ -1,0 +1,86 @@
+name: host debs
+
+on:
+  pull_request:
+    paths:
+      - "host/**"
+      - ".github/workflows/host-debs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "host/**"
+      - ".github/workflows/host-debs.yml"
+    tags: ["host-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  host-debs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: host/build.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: inspect-proxmox-host
+          path: host/build/*.deb
+          if-no-files-found: error
+
+  rebuilds:
+    # Only the tag build needs these; on PRs they only run when the rebuild inputs change.
+    if: startsWith(github.ref, 'refs/tags/host-v') || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [pve-network, pve-qemu]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - id: changed
+        if: github.event_name == 'pull_request'
+        run: |
+          if git diff --quiet "origin/${{ github.base_ref }}" -- "host/rebuilds/${{ matrix.package }}" host/rebuilds/Dockerfile host/rebuilds/build.sh; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changed.outputs.skip != 'true'
+        run: host/rebuilds/build.sh ${{ matrix.package }}
+      - if: steps.changed.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rebuild-${{ matrix.package }}
+          path: host/rebuilds/out/${{ matrix.package }}/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/host-v')
+    needs: [host-debs, rebuilds]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+      - name: Check the tag matches debian/changelog
+        run: |
+          version=$(head -1 host/debian/changelog | sed -E 's/.*\(([0-9]+)\).*/\1/')
+          [ "${GITHUB_REF_NAME}" = "host-v${version}" ] || { echo "tag ${GITHUB_REF_NAME} but changelog says ${version}" >&2; exit 1; }
+      - name: Bundle
+        run: |
+          host/bundle.sh artifacts/inspect-proxmox-host artifacts/rebuild-*
+          mkdir -p release
+          mv host/build/inspect-proxmox-host-debs.tar release/
+          tar -C release -xf release/inspect-proxmox-host-debs.tar
+          # Source for the GPL rebuilds, alongside the binaries.
+          cp artifacts/rebuild-*/*.dsc artifacts/rebuild-*/*.tar.* release/
+          (cd release && sha256sum -- *.deb *.tar *.tar.* *.dsc > SHA256SUMS)
+          ls -l release
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" \
+            --notes-file <(sed -n '2,/^ -- /p' host/debian/changelog | sed '$d') \
+            release/inspect-proxmox-host-debs.tar release/*.deb release/*.dsc release/*.tar.* release/SHA256SUMS

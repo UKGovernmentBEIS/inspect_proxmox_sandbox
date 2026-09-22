@@ -1,0 +1,27 @@
+#!/bin/bash
+# EC2 only routes traffic to IPs assigned to ENIs, so guests can't sit on the VPC subnet.
+# They get a private 10.10.10.0/24 bridge and NAT out through the host's single NIC.
+# Runs every boot: the NIC name depends on the instance family (enp39s0 on m8i, ens5
+# on m6i), so it can't be baked into the image.
+set -euo pipefail
+NODE=$(hostname)
+
+if ! pvesh get "/nodes/$NODE/network/vmbr0" >/dev/null 2>&1; then
+    pvesh create "/nodes/$NODE/network" --iface vmbr0 --type bridge --autostart 1 --cidr 10.10.10.1/24
+    # pvesh regenerates interfaces.new from its own model; keep cloud-init's NIC config sourced
+    grep -qxF 'source /etc/network/interfaces.d/*' /etc/network/interfaces.new \
+        || sed -i '1s|^|source /etc/network/interfaces.d/*\n\n|' /etc/network/interfaces.new
+    pvesh set "/nodes/$NODE/network"
+fi
+
+MGMT_NIC=$(ip route show default | awk '{print $5}' | head -1)
+if [ -z "$MGMT_NIC" ]; then
+    echo "ERROR: could not determine management NIC from default route" >&2
+    exit 1
+fi
+iptables -w -t nat -C POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE 2>/dev/null \
+    || iptables -w -t nat -A POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE
+iptables -w -C FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT 2>/dev/null \
+    || iptables -w -A FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT
+iptables -w -C FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+    || iptables -w -A FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT

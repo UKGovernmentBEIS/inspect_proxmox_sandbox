@@ -1,0 +1,1 @@
+DPkg::Post-Invoke { "/usr/libexec/inspect-proxmox/stamp-contract || true"; };

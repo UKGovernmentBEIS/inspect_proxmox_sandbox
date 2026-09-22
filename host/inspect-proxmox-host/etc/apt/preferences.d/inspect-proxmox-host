@@ -1,0 +1,5 @@
+# Our rebuilds must win over any upstream version, including a newer one that would
+# silently drop the patches. Removing a rebuild is a deliberate change to this package.
+Package: pve-qemu-kvm libpve-network-perl libpve-network-api-perl
+Pin: version /\+aisi/
+Pin-Priority: 1001

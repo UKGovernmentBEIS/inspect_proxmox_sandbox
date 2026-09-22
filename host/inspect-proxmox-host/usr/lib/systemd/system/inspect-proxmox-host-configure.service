@@ -1,0 +1,12 @@
+[Unit]
+Description=Inspect Proxmox host: storage content types and host-isolation firewall rules
+After=network-online.target pve-cluster.service pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/inspect-proxmox/configure
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -3,8 +3,8 @@
 # It's all in one file so that you can run it in e.g. cloud-init.
 # Note for EC2 users: this is deprecated in favour of the ec2 method.
 #
-# NOTE: The on-first-boot.sh heredoc below shares setup logic with scripts/ec2/userdata.sh.
-# If you change shared logic here, update that file too and vice versa.
+# Host configuration beyond the stock install comes from the inspect-proxmox-host deb,
+# the same one scripts/ec2/userdata.sh installs; see host/README.md.
 #
 # What it does:
 # Using docker, builds a Proxmox auto-install ISO per https://pve.proxmox.com/wiki/Automated_Installation
@@ -156,7 +156,7 @@ EOFANSWERS
 
 cat << 'EOFONFIRSTBOOT' > on-first-boot.sh
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
 # should not be necessary as this should only be run once
 # but for some reason this is not always working
@@ -165,12 +165,13 @@ if [ -f /var/local/inspect-proxmox-on-first-boot.done ]; then
   exit 0
 fi
 
+# Bump with each host/debian/changelog entry; same bundle scripts/ec2/userdata.sh installs.
+INSPECT_PROXMOX_HOST_RELEASE=host-v3
+INSPECT_PROXMOX_HOST_BUNDLE_URL="${INSPECT_PROXMOX_HOST_BUNDLE_URL:-https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/releases/download/$INSPECT_PROXMOX_HOST_RELEASE/inspect-proxmox-host-debs.tar}"
+
 # enable serial console
 systemctl enable serial-getty@ttyS0
 systemctl start serial-getty@ttyS0
-
-# fix up local to allow things we need
-pvesh set /storage/local -content iso,vztmpl,backup,snippets,images,rootdir,import
 
 # set to no-subscription PVE repo
 echo 'Types: deb
@@ -180,326 +181,23 @@ Signed-By: /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
 Components: pve-no-subscription' > /etc/apt/sources.list.d/pve-no-subscription.sources
 rm -f /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 
-# install dnsmasq for SDN, and xterm so we can use the resize command in terminal windows
-apt update
-apt upgrade -y
-apt install -y dnsmasq xterm patch jq
-systemctl disable --now dnsmasq
-
-cat > /root/patch-pve-qemu.sh << 'PVE_QEMU_PATCH'
-#!/bin/bash
-set -euxo pipefail
-
 export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get upgrade -y
+# xterm so we can use the resize command in terminal windows
+apt-get install -y xterm curl
 
-PATCHED_VERSION="11.0.3-3+aisi1"
-PVE_QEMU_BASE_COMMIT="c3b7a675a52c11a1c4a5873ff2bd1696df7bf98c"
-PVE_QEMU_PATCHES_COMMIT="5e08c14024a6646711fc88529942e5296b9cd676"
-BUILD_DIR="/root/pve-qemu-build"
-
-INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
-if /usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -qF quirk_mode_page_set_block_size; then
-    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the scsi-disk quirk patch, nothing to do"
-    exit 0
-fi
-
-apt-get -o DPkg::Lock::Timeout=600 update
-apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends \
-    build-essential devscripts equivs git quilt python3 lintian
-
-rm -rf "$BUILD_DIR"
-git clone https://git.proxmox.com/git/pve-qemu.git "$BUILD_DIR"
-cd "$BUILD_DIR"
-git checkout "$PVE_QEMU_BASE_COMMIT"
-git checkout "$PVE_QEMU_PATCHES_COMMIT" -- \
-    debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
-    debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
-mv debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
-    debian/patches/extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch
-mv debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch \
-    debian/patches/extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
-sed -i '/^extra\/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA\.patch$/a extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch\nextra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch' debian/patches/series
-grep -qF extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch debian/patches/series
-grep -qF extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch debian/patches/series
-sed -i 's|url = ../mirror_qemu|url = https://git.proxmox.com/git/mirror_qemu.git|' .gitmodules
-sed -i 's/clean -xdfi/clean -xdff/' Makefile
-
-mv debian/changelog debian/changelog.orig
-cat > debian/changelog <<'CHANGELOG_END'
-pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
-
-  * backport scsi-disk WRITE SAME out-of-bounds read fix and MODE SELECT
-    block size quirk from pve-qemu master (upstream qemu commits merged
-    2026-08-27), ahead of the official 11.1.1-1 release.
-
- -- AISI <platform@example.com>  Thu, 17 Sep 2026 13:55:04 +0000
-
-CHANGELOG_END
-cat debian/changelog.orig >> debian/changelog
-rm debian/changelog.orig
-
-mk-build-deps -ir -t 'apt-get -o DPkg::Lock::Timeout=600 -y --no-install-recommends' debian/control
-make deb
-
-dpkg -i "pve-qemu-kvm_${PATCHED_VERSION}_amd64.deb"
-/usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -F quirk_mode_page_set_block_size
-
-apt-get -o DPkg::Lock::Timeout=600 -y purge pve-qemu-kvm-build-deps
-apt-get -o DPkg::Lock::Timeout=600 -y autoremove
+# Everything beyond a stock Proxmox: host isolation, egress lockdown, the contract stamp
+# and the rebuilt Proxmox packages. See host/README.md in the repo.
+mkdir -p /tmp/inspect-proxmox-host
+cd /tmp/inspect-proxmox-host
+curl -fsSL "$INSPECT_PROXMOX_HOST_BUNDLE_URL" -o debs.tar
+tar xf debs.tar
+apt-get install -y ./inspect-proxmox-host_*.deb ./pve-qemu-kvm_*.deb ./libpve-network-*.deb
 cd /
-rm -rf "$BUILD_DIR"
-echo "pve-qemu-kvm patched to $(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
-PVE_QEMU_PATCH
-bash /root/patch-pve-qemu.sh
-rm -f /root/patch-pve-qemu.sh
+rm -rf /tmp/inspect-proxmox-host
 
-# Fix IPAM bug, see https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/
-# and https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
-
-cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
---- a/usr/share/perl5/PVE/Network/SDN/Subnets.pm
-+++ b/usr/share/perl5/PVE/Network/SDN/Subnets.pm
-@@ -235,6 +235,30 @@ sub add_next_free_ip {
-     #verify dns zones before ipam
-     verify_dns_zone($dnszone, $dns) if !$skipdns;
- 
-+    if ($mac && $ipamid) {
-+        my ($zoneid) = split(/-/, $subnetid);
-+        my ($existing_ip4, $existing_ip6) = PVE::Network::SDN::Ipams::get_ips_from_mac(
-+            $mac, $zoneid, $zone,
-+        );
-+
-+        my $is_ipv4 = Net::IP::ip_is_ipv4($subnet->{network});
-+        my $existing_ip = $is_ipv4 ? $existing_ip4 : $existing_ip6;
-+
-+        if ($existing_ip) {
-+            my $ip_obj = NetAddr::IP->new($existing_ip);
-+            my $subnet_obj = NetAddr::IP->new($subnet->{cidr});
-+
-+            if ($subnet_obj->contains($ip_obj)) {
-+                $ip = $existing_ip;
-+
-+                eval { PVE::Network::SDN::Ipams::add_cache_mac_ip($mac, $ip); };
-+                warn $@ if $@;
-+
-+                goto DNS_SETUP;
-+            }
-+        }
-+    }
-+
-     if ($ipamid) {
-         my $ipam_cfg = PVE::Network::SDN::Ipams::config();
-         my $plugin_config = $ipam_cfg->{ids}->{$ipamid};
-@@ -267,6 +291,7 @@ sub add_next_free_ip {
-         warn $@ if $@;
-     }
- 
-+DNS_SETUP:
-     eval {
-         my $reversednszone = get_reversedns_zone($subnetid, $subnet, $reversedns, $ip);
- 
-EOFPATCH
-
-STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
-cat > "$STAMP" << 'STAMP_CONTRACT'
-#!/bin/bash
-set -euo pipefail
-C=aisi2
-F=/usr/share/perl5/PVE/pvecfg.pm
-before=$(md5sum < "$F")
-sed -i -E "s/\.aisi[0-9]+//g
-           s/('version' => '[0-9.]+)'/\1.$C'/
-           s|(return '[0-9.]+)/|\1.$C/|" "$F"
-grep -q "'version' => '[0-9.]*\.$C'," "$F" || { echo "ERROR: $F not stamped $C" >&2; exit 1; }
-[ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
-STAMP_CONTRACT
-chmod +x "$STAMP"
-echo "DPkg::Post-Invoke { \"$STAMP || true\"; };" > /etc/apt/apt.conf.d/80inspect-proxmox-contract
-"$STAMP"
-
-# Host isolation - see README
-# Delete our own rules (matched by comment) then recreate, so the rule set
-# converges regardless of prior state.
-# NOTE: keep these rules in sync with the fixup-firewall service in
-# scripts/ec2/userdata.sh.
-NIC=$(ip route show default | awk '{print $5}' | head -1)
-[ -z "$NIC" ] && { echo "ERROR: no default route; cannot isolate host" >&2; exit 1; }
-C="inspect-proxmox-sandbox: host-isolation"
-pvesh get /nodes/proxmox/firewall/rules --output-format json \
-    | jq -r --arg c "$C" 'map(select(.comment == $c)) | sort_by(.pos) | reverse | .[].pos' \
-    | while read -r pos; do pvesh delete /nodes/proxmox/firewall/rules/"$pos"; done
-pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1 --comment "$C"
-pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1 --comment "$C"
-pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$C"
-pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1 --comment "$C"
-pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1 --comment "$C"
-pvesh set /nodes/proxmox/firewall/options --enable 1
-pvesh set /cluster/firewall/options --enable 1
-
-# vnet names are generated per sample, so only default.disable_ipv6 can reach them. The
-# management NIC is already up and keeps its own setting.
-cat > /etc/sysctl.d/99-inspect-proxmox-disable-ipv6.conf << 'SYSCTL_V6'
-net.ipv6.conf.default.disable_ipv6 = 1
-SYSCTL_V6
-
-# Confine sandbox guests at the host's forwarding layer. Re-applied every boot
-# because the template is powered off below and later cloned into fresh instances;
-# iptables rules live in kernel state and don't survive the clone/reboot.
-cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
-#!/bin/bash
-set -euo pipefail
-
-# RFC 3927: a router must not forward IPv4 link-local. The destination drop goes in raw
-# PREROUTING, ahead of any FORWARD ACCEPT; host requests are OUTPUT so unaffected.
-iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
-    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
-# The source drop must be FORWARD, not raw PREROUTING: the latter would also drop the
-# host's own on-link replies (IMDS/DNS) and break it.
-iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
-    || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
-
-# Guest v6 is unsupported; FORWARD sees only transit, so the host's own v6 is intact.
-if command -v ip6tables >/dev/null; then
-    ip6tables -w -C FORWARD -j DROP 2>/dev/null \
-        || ip6tables -w -A FORWARD -j DROP
-fi
-BLOCK_METADATA
-chmod +x /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
-
-cat > /etc/systemd/system/inspect-proxmox-block-cloud-metadata.service << 'BLOCK_METADATA_UNIT'
-[Unit]
-Description=Confine sandbox guests (link-local forwarding block, IPv6 drop)
-After=network-online.target pve-firewall.service proxmox-firewall.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-BLOCK_METADATA_UNIT
-
-# NOTE: keep in sync with scripts/ec2/userdata.sh.
-cat > /usr/local/bin/inspect-proxmox-egress-lockdown.sh << 'EGRESS_LOCKDOWN'
-#!/bin/bash
-set -euo pipefail
-
-MARKER=/etc/inspect-proxmox-egress-lockdown
-COMMENT=inspect-proxmox-egress-lockdown
-RUN_ID="$$.$(date +%s)"
-
-RESOLV=/run/dnsmasq/resolv.conf
-RESOLV_BACKUP=/run/dnsmasq/resolv.conf.inspect-egress-backup
-
-reload_dnsmasq() {
-    pkill -HUP dnsmasq 2>/dev/null || true
-}
-
-gc_stale_rules() {
-    for table in mangle filter; do
-        iptables-save -t "$table" | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
-            case "$rule" in
-                *"$COMMENT $RUN_ID"*) continue ;;
-            esac
-            echo "${rule#-A }" | xargs iptables -w -t "$table" -D || true
-        done
-    done
-}
-
-blank_resolv() {
-    mkdir -p /run/dnsmasq
-    if [ -f "$RESOLV" ] && [ ! -f "$RESOLV_BACKUP" ] && ! grep -q "$COMMENT" "$RESOLV"; then
-        cp -a "$RESOLV" "$RESOLV_BACKUP"
-    fi
-    printf '# %s: upstream DNS recursion disabled while marker present\n' "$COMMENT" > "$RESOLV"
-    reload_dnsmasq
-}
-
-if [ -f "$MARKER" ]; then
-    iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
-    iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
-    MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
-    if [ -z "$MGMT_NICS" ]; then
-        iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
-        gc_stale_rules
-        blank_resolv
-        echo "ERROR: no default-route NIC found; blanket FORWARD drop applied, failing unit" >&2
-        exit 1
-    fi
-    for NIC in $MGMT_NICS; do
-        iptables -w -t mangle -I FORWARD 1 -o "$NIC" -m comment --comment "$COMMENT $RUN_ID" -j DROP
-        iptables -w -t mangle -I FORWARD 1 -i "$NIC" -m comment --comment "$COMMENT $RUN_ID" -j DROP
-        iptables -w -t mangle -I OUTPUT 1 -o "$NIC" -m owner --uid-owner dnsmasq -m comment --comment "$COMMENT $RUN_ID" -j DROP
-    done
-    gc_stale_rules
-    blank_resolv
-else
-    gc_stale_rules
-    if [ -f "$RESOLV_BACKUP" ]; then
-        mv -f "$RESOLV_BACKUP" "$RESOLV"
-        reload_dnsmasq
-    elif [ -f "$RESOLV" ] && grep -q "$COMMENT" "$RESOLV"; then
-        rm -f "$RESOLV"
-        reload_dnsmasq
-    fi
-fi
-EGRESS_LOCKDOWN
-chmod +x /usr/local/bin/inspect-proxmox-egress-lockdown.sh
-
-cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.service << 'EGRESS_LOCKDOWN_UNIT'
-[Unit]
-Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-proxmox-egress-lockdown)
-After=network-online.target pve-firewall.service proxmox-firewall.service
-Wants=network-online.target
-OnFailure=inspect-proxmox-egress-lockdown-halt.service
-StartLimitIntervalSec=0
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
-SuccessExitStatus=SIGTERM
-
-[Install]
-WantedBy=multi-user.target
-EGRESS_LOCKDOWN_UNIT
-
-cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.timer << 'EGRESS_LOCKDOWN_TIMER'
-[Unit]
-Description=Reassert egress lockdown every minute
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
-AccuracySec=15s
-
-[Install]
-WantedBy=timers.target
-EGRESS_LOCKDOWN_TIMER
-
-cat > /etc/systemd/system/inspect-proxmox-egress-lockdown-halt.service << 'EGRESS_LOCKDOWN_HALT_UNIT'
-[Unit]
-Description=Stop the Proxmox API because egress lockdown failed (fail deadly)
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'echo "egress lockdown failed: stopping and masking pveproxy/pvedaemon; see journalctl -u inspect-proxmox-egress-lockdown.service" >&2; systemctl mask --runtime pveproxy.service pvedaemon.service; systemctl stop pveproxy.service pvedaemon.service'
-EGRESS_LOCKDOWN_HALT_UNIT
-
-systemctl daemon-reload
-systemctl enable inspect-proxmox-block-cloud-metadata.service
-systemctl enable inspect-proxmox-egress-lockdown.service
-systemctl enable inspect-proxmox-egress-lockdown.timer
-
-set -o pipefail
-pveum user list --output-format json | jq -r '.[].userid' |
-while IFS= read -r userid; do
-    pveum user token list "$userid" --output-format json | jq -r '.[].tokenid' |
-    while IFS= read -r tokenid; do
-        pveum user token remove "$userid" "$tokenid"
-    done
-done
+inspect-proxmox-host-seal
 
 touch /var/local/inspect-proxmox-on-first-boot.done
 
