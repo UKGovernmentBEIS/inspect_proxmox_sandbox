@@ -133,7 +133,7 @@ class AgentCommands:
         # before exit, so a gone PID just means "finished" - report exited and
         # let exec() read the results from disk. This makes the call idempotent
         # and freely retryable.
-        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        if type(pid) is not int or pid <= 0:
             # Belt and braces: exec_command only hands out validated pids.
             raise ValueError(f"refusing to query exec-status for pid {pid!r}")
         path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec-status?pid={pid}"

@@ -24,20 +24,24 @@ from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
-# Error bodies are matched on short stable substrings and quoted in logs and
-# exceptions; a guest agent's error `desc` is passed through by PVE, so cap it.
+# Error text is matched on short stable substrings and quoted in logs and
+# exceptions; cap both the HTTP reason and body independently.
 _MAX_ERROR_TEXT_CHARS = 8192
+
+
+def _bounded_error_text(text: str) -> str:
+    if len(text) > _MAX_ERROR_TEXT_CHARS:
+        return f"{text[:_MAX_ERROR_TEXT_CHARS]}... ({len(text)} chars)"
+    return text
 
 
 def _http_status_error(response: httpx.Response) -> httpx.HTTPStatusError:
     # Deliberately not response.raise_for_status(): that omits response.text,
     # which callers match on (e.g. "No such file", "Is a directory").
-    message = f"HTTP response error: {response.status_code} {response.reason_phrase}"
+    reason = _bounded_error_text(response.reason_phrase)
+    message = f"HTTP response error: {response.status_code} {reason}"
     if response.text:
-        text = response.text
-        if len(text) > _MAX_ERROR_TEXT_CHARS:
-            text = f"{text[:_MAX_ERROR_TEXT_CHARS]}... ({len(text)} chars)"
-        message += f": {text}"
+        message += f": {_bounded_error_text(response.text)}"
     return httpx.HTTPStatusError(message, request=response.request, response=response)
 
 
