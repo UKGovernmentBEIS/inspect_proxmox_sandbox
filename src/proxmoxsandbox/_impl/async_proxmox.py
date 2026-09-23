@@ -1,7 +1,9 @@
 import asyncio
 import json
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from logging import getLogger
 from pathlib import Path
@@ -375,25 +377,42 @@ class AsyncProxmoxAPI:
             )
 
             curl.setopt(pycurl.CONNECTTIMEOUT, 30)
-            multi = pycurl.CurlMulti()
-            multi.add_handle(curl)
-            try:
-                while True:
-                    code, active = multi.perform()
-                    if code == pycurl.E_CALL_MULTI_PERFORM:
-                        continue
-                    if not active:
-                        break
-                    await asyncio.sleep(0.01)
-                _, _, errors = multi.info_read()
-                if errors:
-                    _, number, message = errors[0]
-                    raise pycurl.error(number, message)
-                status_code = curl.getinfo(pycurl.RESPONSE_CODE)
-            finally:
-                multi.remove_handle(curl)
-                curl.close()
-                multi.close()
+
+            cancelled = threading.Event()
+
+            def transfer() -> int:
+                multi = pycurl.CurlMulti()
+                multi.add_handle(curl)
+                try:
+                    while not cancelled.is_set():
+                        code, active = multi.perform()
+                        if code == pycurl.E_CALL_MULTI_PERFORM:
+                            continue
+                        if not active:
+                            break
+                        multi.select(0.1)
+                    _, _, errors = multi.info_read()
+                    if errors:
+                        _, number, message = errors[0]
+                        raise pycurl.error(number, message)
+                    return curl.getinfo(pycurl.RESPONSE_CODE)
+                finally:
+                    multi.remove_handle(curl)
+                    curl.close()
+                    multi.close()
+
+            loop = asyncio.get_running_loop()
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                transfer_task = loop.run_in_executor(pool, transfer)
+                try:
+                    status_code = await asyncio.shield(transfer_task)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    try:
+                        await transfer_task
+                    except BaseException:
+                        pass
+                    raise
 
             response_data = response_buffer.getvalue().decode("utf-8")
             response_json = json.loads(response_data)
