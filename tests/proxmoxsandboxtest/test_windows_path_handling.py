@@ -19,6 +19,7 @@ def _make_sandbox(os_type=None) -> ProxmoxSandboxEnvironment:
         agent_commands=MagicMock(),
         ipam_mappings=(),
         vm_id=100,
+        name="test-sandbox",
         all_vm_ids=(100,),
         sdn_zone_id=None,
         instance=None,

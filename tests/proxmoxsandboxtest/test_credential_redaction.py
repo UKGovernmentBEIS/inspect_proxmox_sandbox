@@ -73,6 +73,7 @@ async def test_cleanup_failure_log_excludes_instance_password(caplog):
         agent_commands=MagicMock(),
         ipam_mappings=(),
         vm_id=100,
+        name="test-sandbox",
         all_vm_ids=(100,),
         sdn_zone_id="abc123z",
         instance=instance,
