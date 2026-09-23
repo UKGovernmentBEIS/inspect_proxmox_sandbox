@@ -122,12 +122,12 @@ class IsoWriter:
             iso_name = f"wf-{vm_id}-{time.time_ns()}-{_rand()}.iso"
             iso_volid = f"{LOCAL_STORAGE}:iso/{iso_name}"
             # Bypass storage_commands.upload_file_to_storage to skip the
-            # task_wrapper wait. For a new random-named ISO, the curl POST
+            # task_wrapper wait. For a new random-named ISO, the upload POST
             # returns when the file is on disk; we don't need to wait for
             # Proxmox's content reindex task to complete before we can
             # reference it as a volid.
             await within_budget(
-                self.async_proxmox.upload_file_with_curl(
+                self.async_proxmox.upload_file(
                     self.node, LOCAL_STORAGE, local_iso, "iso", filename=iso_name
                 ),
                 600,

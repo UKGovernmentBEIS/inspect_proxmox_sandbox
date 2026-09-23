@@ -202,7 +202,7 @@ def test_invalid_reply_during_iso_upload_stops_the_command():
         Scenario(
             operation="exec",
             command=["echo", "x" * 200_000],
-            local_uploads=True,
+            iso_uploads=True,
             status_replies=[{"exited": "invalid"}],
         )
     )

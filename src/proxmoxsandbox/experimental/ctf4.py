@@ -6,8 +6,8 @@ import tempfile
 import zipfile
 from ipaddress import ip_address, ip_network
 
+import httpx
 import platformdirs
-import pycurl
 from inspect_ai import Task, task
 from inspect_ai.dataset import Sample
 from inspect_ai.scorer import includes
@@ -31,20 +31,12 @@ from proxmoxsandbox.schema import (
 CURRENT_DIRECTORY = pathlib.Path(__file__).parent.resolve()
 
 
-def download_with_pycurl(url, output_path):
-    with open(output_path, "wb") as f:
-        c = pycurl.Curl()
-        c.setopt(c.URL, url)
-        c.setopt(c.WRITEDATA, f)
-        c.setopt(c.FOLLOWLOCATION, True)
-        c.setopt(c.FAILONERROR, True)
-        try:
-            c.perform()
-            status_code = c.getinfo(c.RESPONSE_CODE)
-            if status_code >= 400:
-                raise ValueError(f"Download failed with status code: {status_code}")
-        finally:
-            c.close()
+def download_file(url: str, output_path: pathlib.Path) -> None:
+    with httpx.stream("GET", url, follow_redirects=True, timeout=300) as response:
+        response.raise_for_status()
+        with open(output_path, "wb") as f:
+            for chunk in response.iter_bytes():
+                f.write(chunk)
 
 
 @task
@@ -62,11 +54,10 @@ def ctf4() -> Task:
         if not zip_path.exists():
             print(f"Downloading {zip_url}...")
             try:
-                download_with_pycurl(zip_url, zip_path)
-            except pycurl.error as e:
+                download_file(zip_url, zip_path)
+            except httpx.HTTPStatusError as e:
                 zip_path.unlink(missing_ok=True)
-                # pycurl 22 = CURLE_HTTP_RETURNED_ERROR (FAILONERROR triggered)
-                if e.args[0] == 22 and "403" in str(e):
+                if e.response.status_code == 403:
                     raise RuntimeError(
                         f"VulnHub returned 403 for {zip_url}"
                         " (automated downloads are blocked).\n"

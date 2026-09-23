@@ -73,16 +73,34 @@ def test_request_headers_include_extras_and_keep_proxmox_auth():
     assert headers["CSRFPreventionToken"] == "csrf-456"
 
 
-def test_curl_upload_headers_include_extras_and_keep_proxmox_auth():
+@pytest.mark.asyncio
+async def test_upload_sends_extras_and_proxmox_auth(monkeypatch, tmp_path):
+    seen: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.headers)
+        return httpx.Response(200, json={"data": "UPID:pve1:0:0:0:imgcopy::root@pam:"})
+
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        kwargs.pop("verify", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_with_mock_transport)
+
     api = AsyncProxmoxAPI.from_instance_config(_instance_config())
     api.ticket = "ticket-123"
+    api.ticket_date = float("inf")
     api.csrf_token = "csrf-456"
+    payload = tmp_path / "payload.iso"
+    payload.write_bytes(b"sample upload")
 
-    headers = api._curl_headers()
+    await api.upload_file("pve1", "local", payload, "iso")
 
-    assert f"Authorization: {HEADER_SENTINEL}" in headers
-    assert "Cookie: PVEAuthCookie=ticket-123" in headers
-    assert "CSRFPreventionToken: csrf-456" in headers
+    assert seen["authorization"] == HEADER_SENTINEL
+    assert seen["cookie"] == "PVEAuthCookie=ticket-123"
+    assert seen["csrfpreventiontoken"] == "csrf-456"
 
 
 @pytest.mark.parametrize("name", ["Cookie", "cookie", "CSRFPreventionToken"])

@@ -1,16 +1,10 @@
-import asyncio
-import json
 import re
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 from logging import getLogger
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
-import pycurl
 from inspect_ai.util import (
     trace_action,
 )
@@ -310,15 +304,7 @@ class AsyncProxmoxAPI:
         truncated = bool(parsed.truncated) or len(parsed.content) > count
         return raw, truncated
 
-    def _curl_headers(self) -> List[str]:
-        """Request headers for the pycurl upload path."""
-        return [
-            *(f"{name}: {value}" for name, value in self.extra_headers.items()),
-            f"Cookie: PVEAuthCookie={self.ticket}",
-            f"CSRFPreventionToken: {self.csrf_token}",
-        ]
-
-    async def upload_file_with_curl(
+    async def upload_file(
         self,
         node: str,
         storage: str,
@@ -326,9 +312,10 @@ class AsyncProxmoxAPI:
         content_type: Literal["iso", "vztmpl", "import"],
         filename: Optional[str] = None,
     ) -> dict:
-        """Upload a file to Proxmox storage using pycurl.
+        """Upload a file to Proxmox storage.
 
-        This is better for large file uploads than async libraries, in my experience.
+        The body is streamed from disk with a Content-Length, which pveproxy
+        requires (it rejects chunked uploads).
 
         Args:
             node: The node name
@@ -340,84 +327,32 @@ class AsyncProxmoxAPI:
         Returns:
             The API response data
         """
-        with trace_action(self.logger, self.TRACE_NAME, "upload_file_with_curl"):
+        with trace_action(self.logger, self.TRACE_NAME, "upload_file"):
             if not file.exists():
                 raise FileNotFoundError(f"File not found: {file}")
 
             actual_filename = filename or file.name
 
-            curl = pycurl.Curl()
-            response_buffer = BytesIO()
+            async with httpx.AsyncClient(
+                verify=self.verify_tls,
+                # pveproxy answers with a task UPID as soon as the body has
+                # landed, so the read timeout only has to cover that hand-off.
+                timeout=httpx.Timeout(connect=30, read=300, write=60, pool=60),
+            ) as client:
+                if not self.ticket or self._ticket_near_expiry():
+                    await self._login(client)
 
-            curl.setopt(
-                pycurl.URL, f"{self.api_base_url}/nodes/{node}/storage/{storage}/upload"
-            )
-            curl.setopt(pycurl.WRITEDATA, response_buffer)
+                with file.open("rb") as file_handle:
+                    response = await client.post(
+                        f"{self.api_base_url}/nodes/{node}/storage/{storage}/upload",
+                        headers=self._prepare_headers("POST", None),
+                        data={"content": content_type},
+                        files={"filename": (actual_filename, file_handle)},
+                    )
 
-            if not self.verify_tls:
-                curl.setopt(pycurl.SSL_VERIFYPEER, 0)
-                curl.setopt(pycurl.SSL_VERIFYHOST, 0)
+            response_json = response.json()
 
-            curl.setopt(pycurl.HTTPHEADER, self._curl_headers())
-
-            curl.setopt(
-                pycurl.HTTPPOST,
-                [
-                    ("content", content_type),
-                    (
-                        "filename",
-                        (
-                            pycurl.FORM_FILE,
-                            str(file),
-                            pycurl.FORM_FILENAME,
-                            actual_filename,
-                        ),
-                    ),
-                ],
-            )
-
-            curl.setopt(pycurl.CONNECTTIMEOUT, 30)
-
-            cancelled = threading.Event()
-
-            def transfer() -> int:
-                multi = pycurl.CurlMulti()
-                multi.add_handle(curl)
-                try:
-                    while not cancelled.is_set():
-                        code, active = multi.perform()
-                        if code == pycurl.E_CALL_MULTI_PERFORM:
-                            continue
-                        if not active:
-                            break
-                        multi.select(0.1)
-                    _, _, errors = multi.info_read()
-                    if errors:
-                        _, number, message = errors[0]
-                        raise pycurl.error(number, message)
-                    return curl.getinfo(pycurl.RESPONSE_CODE)
-                finally:
-                    multi.remove_handle(curl)
-                    curl.close()
-                    multi.close()
-
-            loop = asyncio.get_running_loop()
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                transfer_task = loop.run_in_executor(pool, transfer)
-                try:
-                    status_code = await asyncio.shield(transfer_task)
-                except asyncio.CancelledError:
-                    cancelled.set()
-                    try:
-                        await transfer_task
-                    except BaseException:
-                        pass
-                    raise
-
-            response_data = response_buffer.getvalue().decode("utf-8")
-            response_json = json.loads(response_data)
-
-            if status_code >= 400:
+            if response.is_error:
                 raise ValueError(f"Error uploading file: {response_json}")
 
             return response_json.get("data", {})
