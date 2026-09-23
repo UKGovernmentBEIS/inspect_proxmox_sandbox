@@ -130,6 +130,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     task_wrapper: TaskWrapper
     all_ipam_mappings: Tuple[IpamMapping, ...]
     vm_id: int
+    name: str
     all_vm_ids: Tuple[int, ...]
     sdn_zone_id: str | None
     # Multi-instance pool fields
@@ -147,10 +148,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
     def __init__(
         self,
+        *,
         infra_commands: InfraCommands,
         agent_commands: AgentCommands,
         ipam_mappings: Tuple[IpamMapping, ...],
         vm_id: int,
+        name: str,
         all_vm_ids: Tuple[int, ...],
         sdn_zone_id: str | None,
         instance: ProxmoxInstanceConfig | None = None,
@@ -163,6 +166,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.task_wrapper = infra_commands.task_wrapper
         self.all_ipam_mappings = ipam_mappings
         self.vm_id = vm_id
+        self.name = name
         self.all_vm_ids = all_vm_ids
         self.sdn_zone_id = sdn_zone_id
         self.instance = instance
@@ -446,6 +450,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     agent_commands=agent_commands,
                     ipam_mappings=ipam_mappings,
                     vm_id=vm_id,
+                    name=vm_config.name,
                     all_vm_ids=vm_ids,
                     sdn_zone_id=sdn_zone_id,
                     instance=instance,
@@ -1315,4 +1320,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
-        await self.qemu_commands.await_vm(vm_id=self.vm_id, requires_guest_agent=True)
+        await self.qemu_commands.await_vm(
+            vm_id=self.vm_id,
+            requires_guest_agent=True,
+            label=f"{self.name} (ID={self.vm_id})",
+        )

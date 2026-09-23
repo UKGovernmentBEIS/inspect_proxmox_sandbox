@@ -479,6 +479,9 @@ runcmd:
         built_in: str,
         import_source: str,
     ) -> None:
+        name = f"inspect-{built_in}"
+        label = f"{name} (ID={next_available_vm_id})"
+
         with trace_action(
             self.logger,
             TRACE_NAME,
@@ -491,7 +494,7 @@ runcmd:
                     f"/nodes/{self.node}/qemu",
                     json={
                         "vmid": next_available_vm_id,
-                        "name": f"inspect-{built_in}",
+                        "name": name,
                         "node": self.node,
                         "cpu": "host",
                         "memory": 8192,
@@ -525,8 +528,9 @@ runcmd:
 
             await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
 
-            await self.qemu_commands.start_and_await(
-                vm_id=next_available_vm_id, requires_guest_agent=True
+            await self.qemu_commands.start(vm_id=next_available_vm_id)
+            await self.qemu_commands.await_vm(
+                vm_id=next_available_vm_id, requires_guest_agent=True, label=label
             )
 
             # now wait for cloud-init to finish
@@ -568,6 +572,7 @@ runcmd:
             await self.qemu_commands.await_vm(
                 vm_id=next_available_vm_id,
                 requires_guest_agent=True,
+                label=label,
                 status_for_wait="stopped",
             )
 

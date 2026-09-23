@@ -232,6 +232,7 @@ def make_sandbox(
         agent_commands=AgentCommands(api, "test-node"),
         ipam_mappings=(),
         vm_id=100,
+        name="test-sandbox",
         all_vm_ids=(100,),
         sdn_zone_id=None,
         os_type=os_type,

@@ -93,18 +93,21 @@ class QemuCommands(abc.ABC):
     async def await_vm(
         self,
         vm_id: int,
+        *,
         requires_guest_agent: bool,
+        label: str,
         status_for_wait: str = "running",
     ) -> None:
         """Wait for the VM's status and, if required, a guest-agent ping."""
-        await self.await_running(vm_id, status_for_wait=status_for_wait)
+        await self.await_running(vm_id, status_for_wait=status_for_wait, label=label)
         if requires_guest_agent and status_for_wait == "running":
-            await self.await_agent(vm_id)
+            await self.await_agent(vm_id, label=label)
 
     async def await_running(
         self,
         vm_id: int,
         *,
+        label: str,
         status_for_wait: str = "running",
         timeout: float = _RUNNING_TIMEOUT,
     ) -> None:
@@ -121,25 +124,27 @@ class QemuCommands(abc.ABC):
             current_status = vm_status["status"]
             if current_status != status_for_wait:
                 self.logger.debug(
-                    f"VM {vm_id} status is {current_status}, "
+                    f"VM {label} status is {current_status}, "
                     f"waiting for {status_for_wait}"
                 )
-                raise ValueError(f"vm {vm_id} not {status_for_wait}")
+                raise ValueError(f"vm {label} not {status_for_wait}")
 
         with trace_action(
             self.logger,
             self.TRACE_NAME,
-            f"await VM {vm_id} to be in status {status_for_wait}",
+            f"await VM {label} to be in status {status_for_wait}",
         ):
             try:
                 await is_in_status()
             except tenacity.RetryError as e:
                 raise VmNotRunningError(
-                    f"VM {vm_id} did not reach status {status_for_wait!r} "
+                    f"VM {label} did not reach status {status_for_wait!r} "
                     f"within {timeout:g}s"
                 ) from e
 
-    async def await_agent(self, vm_id: int, *, timeout: float = _AGENT_TIMEOUT) -> None:
+    async def await_agent(
+        self, vm_id: int, *, label: str, timeout: float = _AGENT_TIMEOUT
+    ) -> None:
         """Ping the QEMU guest agent until it answers."""
         attempt_count = [0]  # Use list to allow mutation in nested function
 
@@ -151,21 +156,21 @@ class QemuCommands(abc.ABC):
             attempt_count[0] += 1
             if attempt_count[0] % 10 == 1:  # Log every 10 attempts
                 self.logger.info(
-                    f"VM {vm_id} QEMU agent ping attempt {attempt_count[0]}"
+                    f"VM {label} QEMU agent ping attempt {attempt_count[0]}"
                 )
             await self.ping_qemu_agent(vm_id)
 
-        with trace_action(self.logger, self.TRACE_NAME, f"await VM {vm_id} QEMU agent"):
+        with trace_action(self.logger, self.TRACE_NAME, f"await VM {label} QEMU agent"):
             try:
                 await qemu_agent_reachable()
             except tenacity.RetryError as e:
                 raise GuestAgentUnavailableError(
-                    f"VM {vm_id} QEMU guest agent did not answer within "
+                    f"VM {label} QEMU guest agent did not answer within "
                     f"{timeout:g}s ({attempt_count[0]} pings). Check that "
                     f"qemu-guest-agent is installed and running in the guest."
                 ) from e
         self.logger.info(
-            f"VM {vm_id} QEMU agent responded after {attempt_count[0]} attempts"
+            f"VM {label} QEMU agent responded after {attempt_count[0]} attempts"
         )
 
     async def destroy_vm(self, vm_id: int) -> None:
@@ -243,10 +248,6 @@ class QemuCommands(abc.ABC):
             )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(do_start)
-
-    async def start_and_await(self, vm_id: int, requires_guest_agent: bool) -> None:
-        await self.start(vm_id=vm_id)
-        await self.await_vm(vm_id=vm_id, requires_guest_agent=requires_guest_agent)
 
     def _convert_sdn_vnet_aliases(
         self, sdn_vnet_aliases: VnetAliases
