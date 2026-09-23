@@ -195,7 +195,7 @@ async def local_upload_peer(api: AsyncProxmoxAPI, enabled: bool):
         yield
         return
 
-    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             headers = await reader.readuntil(b"\r\n\r\n")
             length = next(

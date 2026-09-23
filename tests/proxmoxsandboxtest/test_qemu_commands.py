@@ -302,7 +302,7 @@ async def test_disk_controller_mismatch_from_template_tag_raises(
         )
 
 
-async def test_from_ova_local(qemu_commands: QemuCommands):
+async def test_from_ova_local(qemu_commands: QemuCommands) -> None:
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=[],
         vm_config=VmConfig(
@@ -337,7 +337,7 @@ async def test_from_ova_local(qemu_commands: QemuCommands):
 # AISI has one internally which can be provided on request, but it is
 # nearly 1GB in size and hence not checked in to this repo.
 @pytest.mark.skip
-async def test_from_ova_uefi_sandbox(qemu_commands: QemuCommands):
+async def test_from_ova_uefi_sandbox(qemu_commands: QemuCommands) -> None:
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=[],
         vm_config=VmConfig(
