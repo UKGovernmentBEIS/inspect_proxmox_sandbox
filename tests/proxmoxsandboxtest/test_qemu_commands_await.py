@@ -123,7 +123,7 @@ async def test_await_agent_raises_actionable_error_on_timeout():
     assert isinstance(exc_info.value, TimeoutError)
 
 
-async def test_await_vm_with_agent_runs_both_preconditions():
+async def test_await_vm_with_agent_runs_both_preconditions() -> None:
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
@@ -132,7 +132,7 @@ async def test_await_vm_with_agent_runs_both_preconditions():
     qemu.await_agent.assert_awaited_once()
 
 
-async def test_await_vm_without_agent_skips_ping():
+async def test_await_vm_without_agent_skips_ping() -> None:
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
@@ -141,7 +141,7 @@ async def test_await_vm_without_agent_skips_ping():
     qemu.await_agent.assert_not_awaited()
 
 
-async def test_await_vm_stopped_never_pings_agent():
+async def test_await_vm_stopped_never_pings_agent() -> None:
     """built_in_vm waits for 'stopped' on a sandbox template; no agent then."""
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
@@ -161,14 +161,14 @@ async def test_await_vm_stopped_never_pings_agent():
 _SOURCE = VmSourceConfig(built_in="ubuntu24.04")
 
 
-def test_agent_enabled_for_sandbox():
+def test_agent_enabled_for_sandbox() -> None:
     json: dict = {}
     _qemu().other_config_json(VmConfig(vm_source_config=_SOURCE), json)
     assert json["agent"] == "enabled=1"
     assert json["sata5"] == "none,media=cdrom"
 
 
-def test_agent_disabled_for_plain_non_sandbox():
+def test_agent_disabled_for_plain_non_sandbox() -> None:
     json: dict = {}
     _qemu().other_config_json(
         VmConfig(vm_source_config=_SOURCE, is_sandbox=False), json
@@ -177,7 +177,7 @@ def test_agent_disabled_for_plain_non_sandbox():
     assert "sata5" not in json
 
 
-def test_agent_enabled_for_non_sandbox_with_healthcheck():
+def test_agent_enabled_for_non_sandbox_with_healthcheck() -> None:
     """A healthcheck needs QGA; the ISO fast-path CD-ROM stays sandbox-only."""
     json: dict = {}
     _qemu().other_config_json(

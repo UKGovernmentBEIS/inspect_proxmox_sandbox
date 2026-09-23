@@ -31,7 +31,7 @@ def _instance_config() -> ProxmoxInstanceConfig:
     )
 
 
-def test_passwords_are_redacted_in_config_representations():
+def test_passwords_are_redacted_in_config_representations() -> None:
     """Config repr, str, and JSON serialization must not contain passwords."""
     config = _instance_config()
 
@@ -42,7 +42,7 @@ def test_passwords_are_redacted_in_config_representations():
     assert PASSWORD_SENTINEL not in config.model_dump_json()
 
 
-def test_validation_error_messages_hide_raw_instance_config():
+def test_validation_error_messages_hide_raw_instance_config() -> None:
     """Rendered validation errors must not include raw credentials."""
     with pytest.raises(ValidationError) as exc_info:
         ProxmoxInstanceConfig.model_validate({"password": PASSWORD_SENTINEL})
@@ -53,7 +53,7 @@ def test_validation_error_messages_hide_raw_instance_config():
     assert "input_value=" not in message
 
 
-def test_password_is_unwrapped_only_for_api_authentication():
+def test_password_is_unwrapped_only_for_api_authentication() -> None:
     """The API client still receives the configured plaintext credential."""
     api = AsyncProxmoxAPI.from_instance_config(_instance_config())
 
@@ -61,7 +61,7 @@ def test_password_is_unwrapped_only_for_api_authentication():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_failure_log_excludes_instance_password(caplog):
+async def test_cleanup_failure_log_excludes_instance_password(caplog) -> None:
     """A cleanup warning contains safe instance context but no credential."""
     instance = _instance_config()
     infra_commands = MagicMock()
