@@ -940,7 +940,7 @@ requires-dist = [
     { name = "pydantic-extra-types", specifier = ">=2.10.2" },
     { name = "rich", specifier = ">=13.9" },
     { name = "tenacity", specifier = ">=9.0.0" },
-    { name = "websockets", specifier = ">=16.1.1" },
+    { name = "websockets", specifier = ">=14" },
 ]
 
 [package.metadata.requires-dev]
