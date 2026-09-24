@@ -52,7 +52,7 @@ async def test_await_running_returns_once_running():
     qemu.async_proxmox.request = AsyncMock(
         side_effect=[{"status": "stopped"}, {"status": "running"}]
     )
-    await qemu.await_running(100, label="vm-100 (ID=100)", timeout=_TWO_ATTEMPTS)
+    await qemu.await_running(100, name="vm-100", timeout=_TWO_ATTEMPTS)
     assert qemu.async_proxmox.request.await_count == 2
     method, path = qemu.async_proxmox.request.await_args_list[0].args
     assert (method, path) == ("GET", "/nodes/pve/qemu/100/status/current")
@@ -62,7 +62,7 @@ async def test_await_running_raises_domain_error_on_timeout():
     qemu = _qemu()
     qemu.async_proxmox.request = AsyncMock(return_value={"status": "stopped"})
     with pytest.raises(VmNotRunningError, match=r"VM vm-100 \(ID=100\)") as exc_info:
-        await qemu.await_running(100, label="vm-100 (ID=100)", timeout=_TINY)
+        await qemu.await_running(100, name="vm-100", timeout=_TINY)
     assert isinstance(exc_info.value, TimeoutError)
 
 
@@ -70,14 +70,14 @@ async def test_await_running_honours_status_for_wait():
     qemu = _qemu()
     qemu.async_proxmox.request = AsyncMock(return_value={"status": "stopped"})
     await qemu.await_running(
-        100, label="vm-100 (ID=100)", status_for_wait="stopped", timeout=_TINY
+        100, name="vm-100", status_for_wait="stopped", timeout=_TINY
     )
 
 
 async def test_await_agent_returns_on_first_successful_ping():
     qemu = _qemu()
     qemu.async_proxmox.request = AsyncMock(side_effect=[_http_500(), None])
-    await qemu.await_agent(100, label="vm-100 (ID=100)", timeout=_TWO_ATTEMPTS)
+    await qemu.await_agent(100, name="vm-100", timeout=_TWO_ATTEMPTS)
     assert qemu.async_proxmox.request.await_count == 2
     method, path = qemu.async_proxmox.request.await_args_list[-1].args
     assert (method, path) == ("POST", "/nodes/pve/qemu/100/agent/ping")
@@ -107,7 +107,7 @@ async def test_await_agent_sleeps_follow_the_poll_schedule(monkeypatch):
     qemu = _qemu()
     qemu.async_proxmox.request = AsyncMock(side_effect=_http_500)
     with pytest.raises(GuestAgentUnavailableError):
-        await qemu.await_agent(100, label="vm-100 (ID=100)", timeout=_TWO_ATTEMPTS)
+        await qemu.await_agent(100, name="vm-100", timeout=_TWO_ATTEMPTS)
     assert sleeps == [1.0]
     assert max(sleeps) <= _POLL_MAX_WAIT
 
@@ -118,7 +118,7 @@ async def test_await_agent_raises_actionable_error_on_timeout():
     with pytest.raises(
         GuestAgentUnavailableError, match="qemu-guest-agent"
     ) as exc_info:
-        await qemu.await_agent(100, label="vm-100 (ID=100)", timeout=_TINY)
+        await qemu.await_agent(100, name="vm-100", timeout=_TINY)
     assert "VM vm-100 (ID=100)" in str(exc_info.value)
     assert isinstance(exc_info.value, TimeoutError)
 
@@ -127,7 +127,7 @@ async def test_await_vm_with_agent_runs_both_preconditions() -> None:
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
-    await qemu.await_vm(100, label="vm-100 (ID=100)", requires_guest_agent=True)
+    await qemu.await_vm(100, name="vm-100", requires_guest_agent=True)
     qemu.await_running.assert_awaited_once()
     qemu.await_agent.assert_awaited_once()
 
@@ -136,7 +136,7 @@ async def test_await_vm_without_agent_skips_ping() -> None:
     qemu = _qemu()
     qemu.await_running = AsyncMock()  # type: ignore[method-assign]
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
-    await qemu.await_vm(100, label="vm-100 (ID=100)", requires_guest_agent=False)
+    await qemu.await_vm(100, name="vm-100", requires_guest_agent=False)
     qemu.await_running.assert_awaited_once()
     qemu.await_agent.assert_not_awaited()
 
@@ -148,12 +148,12 @@ async def test_await_vm_stopped_never_pings_agent() -> None:
     qemu.await_agent = AsyncMock()  # type: ignore[method-assign]
     await qemu.await_vm(
         100,
-        label="vm-100 (ID=100)",
+        name="vm-100",
         requires_guest_agent=True,
         status_for_wait="stopped",
     )
     qemu.await_running.assert_awaited_once_with(
-        100, status_for_wait="stopped", label="vm-100 (ID=100)"
+        100, status_for_wait="stopped", name="vm-100"
     )
     qemu.await_agent.assert_not_awaited()
 
