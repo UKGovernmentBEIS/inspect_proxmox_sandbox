@@ -22,7 +22,7 @@ from rich.table import Table
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.healthcheck import HealthCheckExecutor, HealthCheckRunner
-from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.qemu_commands import QemuCommands, vm_label
 from proxmoxsandbox._impl.sdn_commands import (
     IpamMapping,
     SdnCommands,
@@ -106,7 +106,7 @@ class InfraCommands(abc.ABC):
 
     def deregister_resources(
         self,
-        vm_ids: Tuple[int, ...],
+        vm_ids: Collection[int],
         sdn_zone_id: str | None,
         ipam_mappings: Sequence[IpamMapping],
     ) -> None:
@@ -224,7 +224,7 @@ class InfraCommands(abc.ABC):
         self, scheduler: VmScheduler, vm_config: VmConfig, vm_id: int
     ) -> None:
         """Wait for a VM's preconditions and healthcheck, then tell the scheduler."""
-        label = f"{vm_config.name} (ID={vm_id})"
+        label = vm_label(name=vm_config.name, vm_id=vm_id)
         self.logger.info(f"Waiting for VM {label}")
         try:
             await self.qemu_commands.await_vm(
@@ -269,7 +269,7 @@ class InfraCommands(abc.ABC):
             ipam_mappings=(),
             vm_id=vm_id,
             name=vm_config.name,
-            all_vm_ids=(vm_id,),
+            all_vms={vm_id: vm_config},
             sdn_zone_id=None,
             os_type=vm_config.os_type,
         )
@@ -283,10 +283,12 @@ class InfraCommands(abc.ABC):
         self,
         sdn_zone_id: str | None,
         ipam_mappings: Sequence[IpamMapping],
-        vm_ids: Tuple[int, ...],
+        vms: dict[int, VmConfig],
     ):
-        for vm_id in vm_ids:
-            await self.qemu_commands.destroy_vm(vm_id=vm_id)
+        for vm_id, vm_config in vms.items():
+            await self.qemu_commands.destroy_vm(
+                vm_id=vm_id, label=vm_label(name=vm_config.name, vm_id=vm_id)
+            )
         if sdn_zone_id is not None:
             await self.sdn_commands.tear_down_sdn_zone_and_vnet(
                 sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings
@@ -454,7 +456,9 @@ class InfraCommands(abc.ABC):
                 return
 
         for vm in noticed_vms:
-            await self.qemu_commands.destroy_vm(vm["vmid"])
+            vm_id = vm["vmid"]
+            label = vm_label(name=vm.get("name", "<unnamed>"), vm_id=vm_id)
+            await self.qemu_commands.destroy_vm(vm_id=vm_id, label=label)
         await self.sdn_commands.tear_down_sdn_zones_and_vnets(
             zones_to_delete, noticed_ipam_mappings
         )

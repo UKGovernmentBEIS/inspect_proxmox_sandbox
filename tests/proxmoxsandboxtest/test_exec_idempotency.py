@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 pytestmark = pytest.mark.skipif(
     shutil.which("flock") is None or shutil.which("sh") is None,
@@ -33,7 +34,12 @@ def _make_sandbox() -> ProxmoxSandboxEnvironment:
         ipam_mappings=(),
         vm_id=100,
         name="test-sandbox",
-        all_vm_ids=(100,),
+        all_vms={
+            100: VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                name="test-sandbox",
+            )
+        },
         sdn_zone_id=None,
         instance=None,
         pool_id=None,

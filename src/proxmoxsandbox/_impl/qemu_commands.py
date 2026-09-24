@@ -26,6 +26,11 @@ _POLL_MAX_WAIT = 5.0
 _POLL_WAIT = tenacity.wait_exponential(min=0.1, max=_POLL_MAX_WAIT, exp_base=1.3)
 
 
+def vm_label(*, name: str, vm_id: int) -> str:
+    """Human-readable VM identifier for log messages and errors."""
+    return f"{name} (ID={vm_id})"
+
+
 class VmNotRunningError(TimeoutError):
     """Proxmox did not report the VM in the awaited status within the budget."""
 
@@ -44,7 +49,7 @@ class QemuCommands(abc.ABC):
     image_storage: str
     storage_commands: LocalStorageCommands
     node: str
-    _tracked_vm_ids: Set[int]
+    _tracked_vms: dict[int, VmConfig]
 
     def __init__(
         self,
@@ -59,22 +64,28 @@ class QemuCommands(abc.ABC):
         self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
-        self._tracked_vm_ids: Set[int] = set()
+        self._tracked_vms: dict[int, VmConfig] = {}
 
-    def register_vm(self, vm_id: int) -> None:
-        self._tracked_vm_ids.add(vm_id)
+    def register_vm(self, *, vm_id: int, vm_config: VmConfig) -> None:
+        self._tracked_vms[vm_id] = vm_config
+
+    def deregister_vm(self, vm_id: int) -> None:
+        # Tolerate untracked IDs: sample_cleanup deregisters after destroying
+        # VMs that a task_cleanup sweep may already have dropped.
+        self._tracked_vms.pop(vm_id, None)
 
     def deregister_vms(self, vm_ids: Collection[int]) -> None:
         for vm_id in vm_ids:
-            self._tracked_vm_ids.discard(vm_id)
+            self.deregister_vm(vm_id)
 
     async def task_cleanup(self) -> None:
-        self.logger.debug(f"qemu_commands task_cleanup; vms={self._tracked_vm_ids}")
-        for vm_id in list(self._tracked_vm_ids):
-            self.logger.debug(f"task_cleanup: destroy_vm {vm_id=}")
+        self.logger.debug(f"qemu_commands task_cleanup; vms={list(self._tracked_vms)}")
+        for vm_id, vm_config in list(self._tracked_vms.items()):
+            label = vm_label(name=vm_config.name, vm_id=vm_id)
+            self.logger.debug(f"task_cleanup: destroy_vm {label}")
             try:
-                await self.destroy_vm(vm_id)
-                self._tracked_vm_ids.discard(vm_id)
+                await self.destroy_vm(vm_id=vm_id, label=label)
+                self.deregister_vm(vm_id)
             except httpx.HTTPStatusError as e:
                 # Proxmox returns 500 (not 404) when a VM config file is missing
                 already_gone = (
@@ -82,13 +93,13 @@ class QemuCommands(abc.ABC):
                     and "does not exist" in e.response.text
                 )
                 if already_gone:
-                    self._tracked_vm_ids.discard(vm_id)
+                    self.deregister_vm(vm_id)
                 else:
                     self.logger.warning(
-                        f"task_cleanup: failed to destroy VM {vm_id}: {e}"
+                        f"task_cleanup: failed to destroy VM {label}: {e}"
                     )
             except Exception as e:
-                self.logger.warning(f"task_cleanup: failed to destroy VM {vm_id}: {e}")
+                self.logger.warning(f"task_cleanup: failed to destroy VM {label}: {e}")
 
     async def await_vm(
         self,
@@ -173,8 +184,8 @@ class QemuCommands(abc.ABC):
             f"VM {label} QEMU agent responded after {attempt_count[0]} attempts"
         )
 
-    async def destroy_vm(self, vm_id: int) -> None:
-        with trace_action(self.logger, self.TRACE_NAME, f"stop VM {vm_id}"):
+    async def destroy_vm(self, *, vm_id: int, label: str) -> None:
+        with trace_action(self.logger, self.TRACE_NAME, f"stop VM {label}"):
             await self.async_proxmox.request(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
@@ -188,12 +199,12 @@ class QemuCommands(abc.ABC):
                 "GET", f"/nodes/{self.node}/qemu/{vm_id}/status/current"
             )
             if vm_status["status"] != "stopped":
-                raise ValueError(f"vm {vm_id} still running")
+                raise ValueError(f"vm {label} still running")
 
-        with trace_action(self.logger, self.TRACE_NAME, f"await VM {vm_id} stopped"):
+        with trace_action(self.logger, self.TRACE_NAME, f"await VM {label} stopped"):
             await is_not_running()
 
-        with trace_action(self.logger, self.TRACE_NAME, f"delete VM {vm_id}"):
+        with trace_action(self.logger, self.TRACE_NAME, f"delete VM {label}"):
             await self.async_proxmox.request(
                 "DELETE", f"/nodes/{self.node}/qemu/{vm_id}"
             )
@@ -209,9 +220,9 @@ class QemuCommands(abc.ABC):
                 raise_errors=False,
             )
             if "vmid" in current:
-                raise ValueError(f"vm {vm_id} still exists")
+                raise ValueError(f"vm {label} still exists")
 
-        with trace_action(self.logger, self.TRACE_NAME, f"await VM {vm_id} deleted"):
+        with trace_action(self.logger, self.TRACE_NAME, f"await VM {label} deleted"):
             await vm_deleted()
 
     async def list_vms(self):
@@ -627,7 +638,7 @@ class QemuCommands(abc.ABC):
             await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
         # Registered before configure/start so a failure there still gets it
         # destroyed by task_cleanup.
-        self.register_vm(new_vm_id)
+        self.register_vm(vm_id=new_vm_id, vm_config=vm_config)
 
         extra_tags = []
         if preserve_tags:

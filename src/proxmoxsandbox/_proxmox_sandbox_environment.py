@@ -34,7 +34,7 @@ from proxmoxsandbox._impl.deadline import (
 )
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.iso_write import IsoWriter
-from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.qemu_commands import QemuCommands, vm_label
 from proxmoxsandbox._impl.qga_responses import ExecStatus, GuestAgentTamperError
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, is_ephemeral_zone
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
@@ -43,6 +43,7 @@ from proxmoxsandbox.schema import (
     OsType,
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
+    VmConfig,
 )
 
 # Above this many raw stdin bytes, exec() writes stdin to a file and redirects
@@ -131,7 +132,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     all_ipam_mappings: Tuple[IpamMapping, ...]
     vm_id: int
     name: str
-    all_vm_ids: Tuple[int, ...]
+    all_vms: dict[int, VmConfig]
     sdn_zone_id: str | None
     # Multi-instance pool fields
     instance: ProxmoxInstanceConfig | None
@@ -154,7 +155,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         ipam_mappings: Tuple[IpamMapping, ...],
         vm_id: int,
         name: str,
-        all_vm_ids: Tuple[int, ...],
+        all_vms: dict[int, VmConfig],
         sdn_zone_id: str | None,
         instance: ProxmoxInstanceConfig | None = None,
         pool_id: str | None = None,
@@ -167,7 +168,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.all_ipam_mappings = ipam_mappings
         self.vm_id = vm_id
         self.name = name
-        self.all_vm_ids = all_vm_ids
+        self.all_vms = all_vms
         self.sdn_zone_id = sdn_zone_id
         self.instance = instance
         self.pool_id = pool_id
@@ -436,14 +437,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
             sandboxes: Dict[str, SandboxEnvironment] = {}
 
-            vm_ids = tuple(
-                vm_configs_with_id[0] for vm_configs_with_id in vm_configs_with_ids
-            )
-
             agent_commands = AgentCommands(
                 async_proxmox=infra_commands.async_proxmox, node=instance.node
             )
 
+            all_vms = dict(vm_configs_with_ids)
             for vm_id, vm_config in vm_configs_with_ids:
                 vm_sandbox_environment = ProxmoxSandboxEnvironment(
                     infra_commands=infra_commands,
@@ -451,7 +449,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     ipam_mappings=ipam_mappings,
                     vm_id=vm_id,
                     name=vm_config.name,
-                    all_vm_ids=vm_ids,
+                    all_vms=all_vms,
                     sdn_zone_id=sdn_zone_id,
                     instance=instance,
                     pool_id=pool_id,
@@ -599,10 +597,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 await any_vm_sandbox_environment.infra_commands.delete_sdn_and_vms(
                     sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
                     ipam_mappings=any_vm_sandbox_environment.all_ipam_mappings,
-                    vm_ids=any_vm_sandbox_environment.all_vm_ids,
+                    vms=any_vm_sandbox_environment.all_vms,
                 )
                 any_vm_sandbox_environment.infra_commands.deregister_resources(
-                    vm_ids=any_vm_sandbox_environment.all_vm_ids,
+                    vm_ids=any_vm_sandbox_environment.all_vms.keys(),
                     sdn_zone_id=any_vm_sandbox_environment.sdn_zone_id,
                     ipam_mappings=any_vm_sandbox_environment.all_ipam_mappings,
                 )
@@ -1323,5 +1321,5 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         await self.qemu_commands.await_vm(
             vm_id=self.vm_id,
             requires_guest_agent=True,
-            label=f"{self.name} (ID={self.vm_id})",
+            label=vm_label(name=self.name, vm_id=self.vm_id),
         )
