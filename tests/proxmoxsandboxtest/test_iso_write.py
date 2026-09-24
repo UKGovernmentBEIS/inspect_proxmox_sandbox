@@ -18,6 +18,7 @@ from proxmoxsandbox._impl.iso_write import (
     _build_iso,
 )
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 
 class TestBuildIso:
@@ -85,7 +86,12 @@ def _make_env() -> ProxmoxSandboxEnvironment:
         ipam_mappings=(),
         vm_id=100,
         name="test-sandbox",
-        all_vm_ids=(100,),
+        all_vms={
+            100: VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                name="test-sandbox",
+            )
+        },
         sdn_zone_id=None,
         instance=None,
         pool_id=None,

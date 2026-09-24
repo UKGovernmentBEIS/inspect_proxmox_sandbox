@@ -12,6 +12,8 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
 )
 from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
+    VmConfig,
+    VmSourceConfig,
 )
 
 PASSWORD_SENTINEL = "audit-password-sentinel-do-not-log"
@@ -74,7 +76,12 @@ async def test_cleanup_failure_log_excludes_instance_password(caplog) -> None:
         ipam_mappings=(),
         vm_id=100,
         name="test-sandbox",
-        all_vm_ids=(100,),
+        all_vms={
+            100: VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                name="test-sandbox",
+            )
+        },
         sdn_zone_id="abc123z",
         instance=instance,
         pool_id=instance.pool_id,

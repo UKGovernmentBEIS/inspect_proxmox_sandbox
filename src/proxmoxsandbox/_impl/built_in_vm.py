@@ -17,7 +17,7 @@ from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.qemu_commands import QemuCommands, vm_label
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
@@ -264,8 +264,10 @@ runcmd:
                             )
 
             existing_vms = await self.known_builtins()
-            for existing_vm in existing_vms:
-                await self.qemu_commands.destroy_vm(vm_id=existing_vms[existing_vm])
+            for built_in, vm_id in existing_vms.items():
+                await self.qemu_commands.destroy_vm(
+                    vm_id=vm_id, label=vm_label(name=f"inspect-{built_in}", vm_id=vm_id)
+                )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(inner_clear_builtins)
 
@@ -480,7 +482,7 @@ runcmd:
         import_source: str,
     ) -> None:
         name = f"inspect-{built_in}"
-        label = f"{name} (ID={next_available_vm_id})"
+        label = vm_label(name=name, vm_id=next_available_vm_id)
 
         with trace_action(
             self.logger,
