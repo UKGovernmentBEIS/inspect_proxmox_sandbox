@@ -84,7 +84,7 @@ class QemuCommands(abc.ABC):
             label = vm_label(name=vm_config.name, vm_id=vm_id)
             self.logger.debug(f"task_cleanup: destroy_vm {label}")
             try:
-                await self.destroy_vm(vm_id=vm_id, label=label)
+                await self.destroy_vm(vm_id=vm_id, name=vm_config.name)
                 self.deregister_vm(vm_id)
             except httpx.HTTPStatusError as e:
                 # Proxmox returns 500 (not 404) when a VM config file is missing
@@ -106,23 +106,24 @@ class QemuCommands(abc.ABC):
         vm_id: int,
         *,
         requires_guest_agent: bool,
-        label: str,
+        name: str,
         status_for_wait: str = "running",
     ) -> None:
         """Wait for the VM's status and, if required, a guest-agent ping."""
-        await self.await_running(vm_id, status_for_wait=status_for_wait, label=label)
+        await self.await_running(vm_id, status_for_wait=status_for_wait, name=name)
         if requires_guest_agent and status_for_wait == "running":
-            await self.await_agent(vm_id, label=label)
+            await self.await_agent(vm_id, name=name)
 
     async def await_running(
         self,
         vm_id: int,
         *,
-        label: str,
+        name: str,
         status_for_wait: str = "running",
         timeout: float = _RUNNING_TIMEOUT,
     ) -> None:
         """Poll Proxmox until the VM reports `status_for_wait`."""
+        label = vm_label(name=name, vm_id=vm_id)
 
         @tenacity.retry(
             wait=_POLL_WAIT,
@@ -154,9 +155,10 @@ class QemuCommands(abc.ABC):
                 ) from e
 
     async def await_agent(
-        self, vm_id: int, *, label: str, timeout: float = _AGENT_TIMEOUT
+        self, vm_id: int, *, name: str, timeout: float = _AGENT_TIMEOUT
     ) -> None:
         """Ping the QEMU guest agent until it answers."""
+        label = vm_label(name=name, vm_id=vm_id)
         attempt_count = [0]  # Use list to allow mutation in nested function
 
         @tenacity.retry(
@@ -184,7 +186,8 @@ class QemuCommands(abc.ABC):
             f"VM {label} QEMU agent responded after {attempt_count[0]} attempts"
         )
 
-    async def destroy_vm(self, *, vm_id: int, label: str) -> None:
+    async def destroy_vm(self, *, vm_id: int, name: str) -> None:
+        label = vm_label(name=name, vm_id=vm_id)
         with trace_action(self.logger, self.TRACE_NAME, f"stop VM {label}"):
             await self.async_proxmox.request(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"

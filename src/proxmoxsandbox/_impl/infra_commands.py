@@ -230,7 +230,7 @@ class InfraCommands(abc.ABC):
             await self.qemu_commands.await_vm(
                 vm_id,
                 requires_guest_agent=vm_config.requires_guest_agent,
-                label=label,
+                name=vm_config.name,
             )
             if vm_config.healthcheck is not None:
                 await HealthCheckRunner(
@@ -286,9 +286,7 @@ class InfraCommands(abc.ABC):
         vms: dict[int, VmConfig],
     ):
         for vm_id, vm_config in vms.items():
-            await self.qemu_commands.destroy_vm(
-                vm_id=vm_id, label=vm_label(name=vm_config.name, vm_id=vm_id)
-            )
+            await self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
         if sdn_zone_id is not None:
             await self.sdn_commands.tear_down_sdn_zone_and_vnet(
                 sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings
@@ -456,9 +454,9 @@ class InfraCommands(abc.ABC):
                 return
 
         for vm in noticed_vms:
-            vm_id = vm["vmid"]
-            label = vm_label(name=vm.get("name", "<unnamed>"), vm_id=vm_id)
-            await self.qemu_commands.destroy_vm(vm_id=vm_id, label=label)
+            await self.qemu_commands.destroy_vm(
+                vm_id=vm["vmid"], name=vm.get("name", "<unnamed>")
+            )
         await self.sdn_commands.tear_down_sdn_zones_and_vnets(
             zones_to_delete, noticed_ipam_mappings
         )

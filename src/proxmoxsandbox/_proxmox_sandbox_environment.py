@@ -34,7 +34,7 @@ from proxmoxsandbox._impl.deadline import (
 )
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.iso_write import IsoWriter
-from proxmoxsandbox._impl.qemu_commands import QemuCommands, vm_label
+from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.qga_responses import ExecStatus, GuestAgentTamperError
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, is_ephemeral_zone
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
@@ -1321,5 +1321,5 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         await self.qemu_commands.await_vm(
             vm_id=self.vm_id,
             requires_guest_agent=True,
-            label=vm_label(name=self.name, vm_id=self.vm_id),
+            name=self.name,
         )
