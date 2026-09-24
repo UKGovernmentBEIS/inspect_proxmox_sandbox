@@ -420,7 +420,7 @@ class InfraCommands(abc.ABC):
         vms_table.add_column("VM ID")
         vms_table.add_column("VM Name")
         for vm in noticed_vms:
-            vms_table.add_row(str(vm["vmid"]), vm["name"])
+            vms_table.add_row(str(vm["vmid"]), vm.get("name", "<unnamed>"))
         if not noticed_vms:
             vms_table.add_row("(none)", "(none)")
         print(vms_table)
