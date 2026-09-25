@@ -503,6 +503,7 @@ runcmd:
                         "scsihw": "virtio-scsi-single",
                         "net0": f"virtio,bridge={STATIC_VNET_ID}",
                         "serial0": "socket",
+                        "vga": "none",
                         "start": False,
                         "agent": "enabled=1",
                     },

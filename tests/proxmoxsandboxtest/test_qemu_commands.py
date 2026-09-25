@@ -44,6 +44,7 @@ async def test_simple_vm_non_sandbox(
     assert new_vm["cores"] == 3
     assert new_vm["agent"] == "enabled=0"
     assert new_vm["serial0"] == "socket"
+    assert new_vm["vga"] == "none"
     assert "net0" in new_vm
     assert "inspect" in new_vm["tags"]
     assert "ubuntu24.04" not in new_vm["tags"]

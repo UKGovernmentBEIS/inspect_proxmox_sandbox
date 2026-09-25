@@ -275,6 +275,8 @@ class VmConfig(BaseModel, frozen=True):
             This is required for proper VM isolation. Defaults to False.
         os_type: The OS type. If unset, defaults to "l26". Only for OVA. See
             https://pve.proxmox.com/wiki/Manual:_qm.conf for more details
+        vga: The emulated display device. Defaults to "none" (no display); set
+            to "std" for guests that need a graphical console. See "Note on vga".
         cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
             defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
             panic on nested virtualization with "host"; use "qemu64" for those.
@@ -295,6 +297,14 @@ class VmConfig(BaseModel, frozen=True):
             the NICs will be left as configured in the template.
         If the vm_source_config is ova or built_in, it will be connected to the first
             VNet.
+
+    Note on vga:
+    - Defaults to "none": no emulated display device. This closes the QEMU VGA
+        out-of-bounds write path (gitlab.com/qemu-project/qemu/-/work_items/4215),
+        which a privileged guest can trigger regardless of whether a console is
+        attached. Serial-console access is unaffected (every VM gets serial0).
+    - Set to "std" only for guests that require a graphical console (e.g. Windows
+        installs with no serial login). This re-adds the vulnerable device.
     """
 
     vm_source_config: VmSourceConfig
@@ -308,6 +318,7 @@ class VmConfig(BaseModel, frozen=True):
     nic_controller: Optional[Literal["virtio", "e1000"]] = None
     firewall: bool = False
     os_type: Optional[OsType] = "l26"
+    vga: Literal["none", "std"] = "none"
     cpu: Optional[str] = None
     depends_on: Tuple[str, ...] = ()
     healthcheck: Optional[HealthCheck] = None
