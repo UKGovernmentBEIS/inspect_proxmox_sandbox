@@ -663,6 +663,7 @@ class QemuCommands(abc.ABC):
         json_for_create["cores"] = vm_config.vcpus
         json_for_create["name"] = vm_config.name
         json_for_create["serial0"] = "socket"
+        json_for_create["vga"] = vm_config.vga
         if vm_config.uefi_boot:
             json_for_create["efidisk0"] = (
                 f"{self.image_storage}:0,efitype=4m,pre-enrolled-keys=0"
@@ -682,4 +683,9 @@ class QemuCommands(abc.ABC):
         )
 
     async def connection_url(self, vm_id: int) -> str:
+        vm = await self.read_vm(vm_id)
+        # Headless VMs (vga=none) have only a serial console. console=kvm scopes
+        # it to the VM; console=serial would open the node's host shell instead.
+        if str(vm.get("vga", "")) == "none":
+            return f"{self.async_proxmox.base_url}/?console=kvm&xtermjs=1&vmid={vm_id}&node={self.node}"  # noqa: E501
         return f"{self.async_proxmox.base_url}/?console=kvm&novnc=1&vmid={vm_id}&node={self.node}"  # noqa: E501

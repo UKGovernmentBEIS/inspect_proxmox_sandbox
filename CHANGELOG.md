@@ -10,6 +10,7 @@
 - Reject malformed guest-agent replies with `GuestAgentTamperError`. Limit accepted file data, command output and quoted error text; limit how long commands wait; and close cancelled uploads with a time limit on cleanup.
 - Bundled provisioning scripts: under the egress lockdown the host now REJECTs guest DNS to port 53 instead of accepting it; the lockdown unit only halts the API on its own verdict; hosts carry a `.aisi<N>` contract stamp in the API version that survives `pve-manager` upgrades
 - Every VM now gets a serial port (`serial0: socket`)
+- VMs no longer get an emulated VGA device by default (`vga: none`), closing the QEMU display out-of-bounds write path (gitlab.com/qemu-project/qemu/-/work_items/4215) that a privileged guest can trigger even with no console attached. Guests that need a graphical console (e.g. Windows without a serial login) can opt back in with `VmConfig(vga="std")`. Headless VMs' console link now points at the xterm.js serial terminal instead of noVNC. Note: for a template supplied via `existing_vm_template_tag`, the clone's display is overridden to `none`, so a Windows/GUI template needs `vga="std"`; and Proxmox drops SMM (`smm=off`) for SeaBIOS guests that have no VGA
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.

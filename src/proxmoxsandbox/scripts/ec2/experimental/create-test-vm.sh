@@ -68,7 +68,8 @@ qm create "$VMID" \
     --net0 "virtio,bridge=$VNET" \
     --scsihw virtio-scsi-single \
     --agent enabled=1 \
-    --serial0 socket
+    --serial0 socket \
+    --vga none
 
 qm importdisk "$VMID" "$IMG_PATH" "$STORAGE" --format qcow2
 qm set "$VMID" \
