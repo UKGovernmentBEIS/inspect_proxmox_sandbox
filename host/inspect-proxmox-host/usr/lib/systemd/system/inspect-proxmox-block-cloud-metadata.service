@@ -1,0 +1,12 @@
+[Unit]
+Description=Confine sandbox guests (link-local forwarding block, IPv6 drop)
+After=network-online.target pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/inspect-proxmox/block-cloud-metadata
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

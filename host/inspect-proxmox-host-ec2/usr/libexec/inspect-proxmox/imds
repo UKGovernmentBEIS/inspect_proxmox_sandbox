@@ -1,0 +1,6 @@
+#!/bin/bash
+# IMDSv2 GET. Usage: imds latest/meta-data/instance-id
+set -euo pipefail
+TOKEN=$(curl -sf -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+    http://169.254.169.254/latest/api/token)
+curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/$1"

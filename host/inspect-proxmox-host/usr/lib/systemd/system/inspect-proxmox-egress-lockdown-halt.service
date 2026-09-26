@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop the Proxmox API because egress lockdown failed (fail deadly)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo "egress lockdown failed: stopping and masking pveproxy/pvedaemon; see journalctl -u inspect-proxmox-egress-lockdown.service" >&2; systemctl mask --runtime pveproxy.service pvedaemon.service; systemctl stop pveproxy.service pvedaemon.service'

@@ -1,0 +1,3 @@
+# Deliberate: the pin keeps the AISI rebuilds of pve-qemu-kvm and libpve-network-perl
+# ahead of upstream, which would otherwise silently drop the patches on upgrade.
+inspect-proxmox-host: package-installs-apt-preferences [etc/apt/preferences.d/inspect-proxmox-host]

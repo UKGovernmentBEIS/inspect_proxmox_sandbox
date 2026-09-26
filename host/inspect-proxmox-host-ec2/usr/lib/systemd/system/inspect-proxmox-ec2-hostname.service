@@ -1,0 +1,13 @@
+[Unit]
+Description=Fix hostname and /etc/hosts for AMI-launched Proxmox
+Before=pve-cluster.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/inspect-proxmox/ec2-hostname
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

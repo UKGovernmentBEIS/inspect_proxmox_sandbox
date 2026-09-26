@@ -1,0 +1,23 @@
+#!/bin/bash
+# Node-level config that needs pmxcfs up. Re-applied every boot so it converges whatever
+# the node or NIC is called (both change per launch on EC2).
+set -euo pipefail
+NODE=$(hostname)
+
+pvesm set local --content images,rootdir,vztmpl,backup,iso,snippets,import
+
+# Host isolation. See the root README, "Host firewall isolation".
+NIC=$(ip route show default | awk '{print $5}' | head -1)
+[ -z "$NIC" ] && { echo "ERROR: no default route; cannot isolate host" >&2; exit 1; }
+C="inspect-proxmox-sandbox: host-isolation"
+# Delete any of our existing rules first, descending pos (deletes renumber).
+pvesh get "/nodes/$NODE/firewall/rules" --output-format json \
+    | jq -r --arg c "$C" 'map(select(.comment == $c)) | sort_by(.pos) | reverse | .[].pos' \
+    | while read -r pos; do pvesh delete "/nodes/$NODE/firewall/rules/$pos"; done
+pvesh create "/nodes/$NODE/firewall/rules" --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1 --comment "$C"
+pvesh create "/nodes/$NODE/firewall/rules" --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1 --comment "$C"
+pvesh create "/nodes/$NODE/firewall/rules" --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$C"
+pvesh create "/nodes/$NODE/firewall/rules" --type in --action ACCEPT --proto tcp --dport 53 --enable 1 --comment "$C"
+pvesh create "/nodes/$NODE/firewall/rules" --type in --action ACCEPT --proto udp --dport 67 --enable 1 --comment "$C"
+pvesh set "/nodes/$NODE/firewall/options" --enable 1
+pvesh set /cluster/firewall/options --enable 1

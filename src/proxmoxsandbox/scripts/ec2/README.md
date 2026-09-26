@@ -205,25 +205,26 @@ Routes to peered VPCs, transit gateways and on-prem survive all of this, and a g
 reaches one is off the host. Nothing in the AMI knows those addresses; pass them to
 `check-guest-isolation.sh` as `--unreachable IP[:PORT]` and it asserts they're dead.
 
-## EC2-specific bits handled by `userdata.sh`
+## What `userdata.sh` does
 
-- SSM agent (not in Debian 13 by default) — installed in stage 1.
-- EC2 Instance Connect (no Debian 13 package) — sshd configured manually with
-  an `AuthorizedKeysCommand` that fetches keys from IMDS.
-- `grub-pc` install device preseeded for NVMe.
-- `postfix` mailer type / mailname preseeded before `proxmox-ve` installs.
-- IPAM patch so static-DHCP-by-MAC works
-  (see <https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/>).
-- `/run/dnsmasq/resolv.conf` shim for SDN dnsmasq DNS forwarding.
-- AMI fixup services for hostname + SSL cert + root password regeneration on every boot.
-- A boot-time firewall rule blocking sandbox forwarding to EC2 instance metadata.
-- CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
-- A `.aisi<N>` contract stamp on the version `pveversion` prints and the API serves, so a
-  caller can tell what a host provides before asserting it. Bumped when a host-side file
-  something off-host asserts changes. A `pve-manager` upgrade replaces the stamped file, so an
-  apt hook re-applies it after every dpkg run. Only the API's `version` field and
-  `pveversion`'s text carry it; pvecfg.pm's `sub version()` is left alone because Proxmox
-  compares it internally.
+Stage 1, on the stock Debian 13 AMI: SSM agent (not in Debian 13 by default), EC2
+Instance Connect (no Debian 13 package, so sshd gets an `AuthorizedKeysCommand` that
+fetches keys from IMDS), the Proxmox repo, `grub-pc` preseeded for NVMe, the Proxmox
+kernel, reboot. Stage 2: `proxmox-ve` with `postfix` preseeded, the CloudWatch agent
+binary, then the `inspect-proxmox-host-debs.tar` bundle pinned by
+`INSPECT_PROXMOX_HOST_RELEASE`, `inspect-proxmox-host-seal`, reboot.
+
+Everything else described in this README lives in that bundle, see
+[`host/README.md`](../../../../host/README.md): the boot-time units that fix hostname,
+certs, root password and NAT bridge per launch; the IPAM patch (as a rebuilt
+`libpve-network-perl`); the `/run/dnsmasq/resolv.conf` shim; the metadata forwarding block
+and egress lockdown; the CloudWatch OTel pipeline; and the `.aisi<N>` contract stamp on the
+version `pveversion` prints and the API serves (N is the deb's version, so a caller can tell
+what a host provides before asserting it; a `pve-manager` upgrade replaces the stamped file,
+so an apt hook re-applies it after every dpkg run).
+
+To build against a bundle that isn't a GitHub release yet, e.g. an S3 presigned URL, set
+`INSPECT_PROXMOX_HOST_BUNDLE_URL` at the top of `userdata.sh` before launching.
 
 ## Other scripts
 

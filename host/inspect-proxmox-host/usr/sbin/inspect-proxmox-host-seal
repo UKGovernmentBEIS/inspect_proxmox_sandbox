@@ -1,0 +1,11 @@
+#!/bin/bash
+# Run before snapshotting a host into an image: removes every API token so none leaks
+# into hosts launched from the image.
+set -euo pipefail
+pveum user list --output-format json | jq -r '.[].userid' |
+while IFS= read -r userid; do
+    pveum user token list "$userid" --output-format json | jq -r '.[].tokenid' |
+    while IFS= read -r tokenid; do
+        pveum user token remove "$userid" "$tokenid"
+    done
+done

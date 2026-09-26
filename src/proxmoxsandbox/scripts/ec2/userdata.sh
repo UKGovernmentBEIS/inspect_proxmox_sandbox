@@ -1,39 +1,47 @@
 #!/bin/bash
-# Installs SSM agent on Debian 13 (not included by default), then installs Proxmox VE.
-# Follows https://pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_13_Trixie
-# with workarounds for non-interactive EC2 environments.
-#
-# NOTE: This script shares setup logic with scripts/virtualized_proxmox/build_proxmox_auto.
-# If you change shared logic here, update that file too and vice versa.
+# Installs the SSM agent on Debian 13 (not included by default), then Proxmox VE, then the
+# inspect-proxmox-host packages. Follows
+# https://pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_13_Trixie with workarounds for
+# non-interactive EC2 environments. Everything a sandbox host needs beyond a stock Proxmox
+# lives in the debs (see host/README.md in the repo), so this file is only the install.
 set -euxo pipefail
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
 
+# Bump with each host/debian/changelog entry. The bundle holds inspect-proxmox-host,
+# inspect-proxmox-host-ec2 and the AISI rebuilds of pve-qemu-kvm and libpve-network-perl.
+INSPECT_PROXMOX_HOST_RELEASE=host-v3
+INSPECT_PROXMOX_HOST_BUNDLE_URL="${INSPECT_PROXMOX_HOST_BUNDLE_URL:-https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/releases/download/$INSPECT_PROXMOX_HOST_RELEASE/inspect-proxmox-host-debs.tar}"
+echo "INSPECT_PROXMOX_HOST_BUNDLE_URL='$INSPECT_PROXMOX_HOST_BUNDLE_URL'" > /root/proxmox-install.env
+
 apt-get update -y
 apt-get install -y wget curl
-cat > /usr/local/bin/call-ec2-hypervisor << 'CALL_EC2_HYPERVISOR'
-#!/bin/bash
-set -euo pipefail
-TOKEN=$(curl -sf -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
-    http://169.254.169.254/latest/api/token)
-curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
-    "http://169.254.169.254/$1"
-CALL_EC2_HYPERVISOR
-chmod 755 /usr/local/bin/call-ec2-hypervisor
+
+imds() {
+    local token
+    token=$(curl -sf -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+        http://169.254.169.254/latest/api/token)
+    curl -sf -H "X-aws-ec2-metadata-token: $token" "http://169.254.169.254/$1"
+}
 
 # Pull from the in-region bucket so the build doesn't pay cross-region S3 egress.
-REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
+REGION=$(imds latest/meta-data/placement/region)
 wget -q "https://s3.${REGION}.amazonaws.com/amazon-ssm-${REGION}/latest/debian_amd64/amazon-ssm-agent.deb" \
     -O /tmp/amazon-ssm-agent.deb
 dpkg -i /tmp/amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent
 systemctl start amazon-ssm-agent
 
+# EC2 Instance Connect has no Debian 13 package, so sshd fetches the pushed keys itself.
 cat > /usr/local/bin/eic_authorized_keys << 'EICSCRIPT'
 #!/bin/bash
-exec /usr/local/bin/call-ec2-hypervisor "latest/meta-data/managed-ssh-keys/active-keys/${1}/"
+set -euo pipefail
+TOKEN=$(curl -sf -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+    http://169.254.169.254/latest/api/token)
+exec curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
+    "http://169.254.169.254/latest/meta-data/managed-ssh-keys/active-keys/${1}/"
 EICSCRIPT
 chmod 755 /usr/local/bin/eic_authorized_keys
-cat >> /etc/ssh/sshd_config << 'SSHDCONF'
+cat > /etc/ssh/sshd_config.d/60-ec2-instance-connect.conf << 'SSHDCONF'
 AuthorizedKeysCommand /usr/local/bin/eic_authorized_keys %u
 AuthorizedKeysCommandUser nobody
 SSHDCONF
@@ -108,620 +116,41 @@ UNIT
 cat > /root/proxmox-install-stage2.sh << 'STAGE2'
 #!/bin/bash
 set -euxo pipefail
+export DEBIAN_FRONTEND=noninteractive
+source /root/proxmox-install.env
 
 echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selections
 echo "postfix postfix/mailname string proxmox.localdomain" | debconf-set-selections
-DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi chrony
+apt-get install -y proxmox-ve postfix open-iscsi chrony
 
 rm -vf /etc/apt/sources.list.d/{pve-enterprise,ceph}.sources
 
-cat > /root/patch-pve-qemu.sh << 'PVE_QEMU_PATCH'
-#!/bin/bash
-set -euxo pipefail
-
-export DEBIAN_FRONTEND=noninteractive
-
-PATCHED_VERSION="11.0.3-3+aisi1"
-PVE_QEMU_BASE_COMMIT="c3b7a675a52c11a1c4a5873ff2bd1696df7bf98c"
-PVE_QEMU_PATCHES_COMMIT="5e08c14024a6646711fc88529942e5296b9cd676"
-BUILD_DIR="/root/pve-qemu-build"
-
-INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
-if /usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -qF quirk_mode_page_set_block_size; then
-    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the scsi-disk quirk patch, nothing to do"
-    exit 0
-fi
-
-apt-get -o DPkg::Lock::Timeout=600 update
-apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends \
-    build-essential devscripts equivs git quilt python3 lintian
-
-rm -rf "$BUILD_DIR"
-git clone https://git.proxmox.com/git/pve-qemu.git "$BUILD_DIR"
-cd "$BUILD_DIR"
-git checkout "$PVE_QEMU_BASE_COMMIT"
-git checkout "$PVE_QEMU_PATCHES_COMMIT" -- \
-    debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
-    debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
-mv debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
-    debian/patches/extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch
-mv debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch \
-    debian/patches/extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
-sed -i '/^extra\/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA\.patch$/a extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch\nextra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch' debian/patches/series
-grep -qF extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch debian/patches/series
-grep -qF extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch debian/patches/series
-sed -i 's|url = ../mirror_qemu|url = https://git.proxmox.com/git/mirror_qemu.git|' .gitmodules
-sed -i 's/clean -xdfi/clean -xdff/' Makefile
-
-mv debian/changelog debian/changelog.orig
-cat > debian/changelog <<'CHANGELOG_END'
-pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
-
-  * backport scsi-disk WRITE SAME out-of-bounds read fix and MODE SELECT
-    block size quirk from pve-qemu master (upstream qemu commits merged
-    2026-08-27), ahead of the official 11.1.1-1 release.
-
- -- AISI <platform@example.com>  Thu, 17 Sep 2026 13:55:04 +0000
-
-CHANGELOG_END
-cat debian/changelog.orig >> debian/changelog
-rm debian/changelog.orig
-
-mk-build-deps -ir -t 'apt-get -o DPkg::Lock::Timeout=600 -y --no-install-recommends' debian/control
-make deb
-
-dpkg -i "pve-qemu-kvm_${PATCHED_VERSION}_amd64.deb"
-/usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -F quirk_mode_page_set_block_size
-
-apt-get -o DPkg::Lock::Timeout=600 -y purge pve-qemu-kvm-build-deps
-apt-get -o DPkg::Lock::Timeout=600 -y autoremove
-cd /
-rm -rf "$BUILD_DIR"
-echo "pve-qemu-kvm patched to $(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
-PVE_QEMU_PATCH
-bash /root/patch-pve-qemu.sh
-rm -f /root/patch-pve-qemu.sh
-
-DEBIAN_FRONTEND=noninteractive apt-get remove -y linux-image-amd64 'linux-image-6.12*' os-prober
+apt-get remove -y linux-image-amd64 'linux-image-6.12*' os-prober
 update-grub
 
-# dnsmasq: needed for SDN DHCP/IPAM; disable the system service (PVE manages per-zone instances)
-DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq patch jq
-systemctl disable --now dnsmasq
-# frr: needed for SDN routing (EVPN/OSPF zones); installed with proxmox-ve but not enabled.
-# Not needed for simple zones (the default), only for EVPN/OSPF.
-# systemctl enable frr
-
-cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
---- a/usr/share/perl5/PVE/Network/SDN/Subnets.pm
-+++ b/usr/share/perl5/PVE/Network/SDN/Subnets.pm
-@@ -235,6 +235,30 @@ sub add_next_free_ip {
-     #verify dns zones before ipam
-     verify_dns_zone($dnszone, $dns) if !$skipdns;
-
-+    if ($mac && $ipamid) {
-+        my ($zoneid) = split(/-/, $subnetid);
-+        my ($existing_ip4, $existing_ip6) = PVE::Network::SDN::Ipams::get_ips_from_mac(
-+            $mac, $zoneid, $zone,
-+        );
-+
-+        my $is_ipv4 = Net::IP::ip_is_ipv4($subnet->{network});
-+        my $existing_ip = $is_ipv4 ? $existing_ip4 : $existing_ip6;
-+
-+        if ($existing_ip) {
-+            my $ip_obj = NetAddr::IP->new($existing_ip);
-+            my $subnet_obj = NetAddr::IP->new($subnet->{cidr});
-+
-+            if ($subnet_obj->contains($ip_obj)) {
-+                $ip = $existing_ip;
-+
-+                eval { PVE::Network::SDN::Ipams::add_cache_mac_ip($mac, $ip); };
-+                warn $@ if $@;
-+
-+                goto DNS_SETUP;
-+            }
-+        }
-+    }
-+
-     if ($ipamid) {
-         my $ipam_cfg = PVE::Network::SDN::Ipams::config();
-         my $plugin_config = $ipam_cfg->{ids}->{$ipamid};
-@@ -267,6 +291,7 @@ sub add_next_free_ip {
-         warn $@ if $@;
-     }
-
-+DNS_SETUP:
-     eval {
-         my $reversednszone = get_reversedns_zone($subnetid, $subnet, $reversedns, $ip);
-
-EOFPATCH
-
-STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
-cat > "$STAMP" << 'STAMP_CONTRACT'
-#!/bin/bash
-set -euo pipefail
-C=aisi2
-F=/usr/share/perl5/PVE/pvecfg.pm
-before=$(md5sum < "$F")
-sed -i -E "s/\.aisi[0-9]+//g
-           s/('version' => '[0-9.]+)'/\1.$C'/
-           s|(return '[0-9.]+)/|\1.$C/|" "$F"
-grep -q "'version' => '[0-9.]*\.$C'," "$F" || { echo "ERROR: $F not stamped $C" >&2; exit 1; }
-[ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
-STAMP_CONTRACT
-chmod +x "$STAMP"
-echo "DPkg::Post-Invoke { \"$STAMP || true\"; };" > /etc/apt/apt.conf.d/80inspect-proxmox-contract
-"$STAMP"
-
-# PVE launches per-zone dnsmasq with -r /run/dnsmasq/resolv.conf for upstream DNS.
-# On EC2 that file doesn't exist, so dnsmasq can't forward queries and VMs have
-# no working DNS. Point it at the VPC resolver (second IP in the VPC CIDR).
-cat > /etc/tmpfiles.d/dnsmasq-resolv.conf <<'EOF'
-d /run/dnsmasq 0755 root root -
-f /run/dnsmasq/resolv.conf 0644 root root - nameserver 169.254.169.253
-EOF
-systemd-tmpfiles --create /etc/tmpfiles.d/dnsmasq-resolv.conf
-
-# VMs can't use IPs directly on the VPC subnet (EC2 only routes traffic to
-# IPs assigned to ENIs), so we give VMs a private 10.10.10.0/24 network and
-# NAT their traffic through the host's single NIC.
-pvesh create /nodes/proxmox/network \
-    --iface vmbr0 --type bridge \
-    --autostart 1 \
-    --cidr 10.10.10.1/24
-grep -qxF 'source /etc/network/interfaces.d/*' /etc/network/interfaces.new \
-    || sed -i '1s|^|source /etc/network/interfaces.d/*\n\n|' /etc/network/interfaces.new
-
-# NAT/FORWARD rules are applied at boot by proxmox-ami-fixup-nat.service below,
-# which resolves the management NIC name dynamically (it differs across EC2
-# instance families: enp39s0 on m8i, ens5 on m6i, etc., so it can't be baked
-# into the AMI).
-echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/99-vm-nat.conf
-sysctl -w net.ipv4.ip_forward=1
-
-pvesm set local --content images,rootdir,vztmpl,backup,iso,snippets,import
-
-# When an AMI is launched with a new IP, EC2 changes the hostname to ip-x-x-x-x,
-# breaking Proxmox node identity, SSL certs, and pveproxy. These services fix
-# that on every boot. The password fixup additionally detects fresh launches
-# (by EC2 instance-id) and regenerates the root password so credentials don't
-# leak across instances launched from the same AMI.
-NODE_NAME="proxmox"
-
-cat > /usr/local/bin/proxmox-ami-fixup-hostname.sh << 'FIXUP_HOSTNAME'
-#!/bin/bash
-set -euo pipefail
-PRIVATE_IP=$(hostname -I | awk '{print $1}')
-hostnamectl set-hostname proxmox
-sed -i "/proxmox/d" /etc/hosts
-echo "$PRIVATE_IP proxmox.localdomain proxmox" >> /etc/hosts
-FIXUP_HOSTNAME
-chmod +x /usr/local/bin/proxmox-ami-fixup-hostname.sh
-
-cat > /etc/systemd/system/proxmox-ami-fixup-hostname.service << 'FIXUP_HOSTNAME_UNIT'
-[Unit]
-Description=Fix hostname and /etc/hosts for AMI-launched Proxmox
-Before=pve-cluster.service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/proxmox-ami-fixup-hostname.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-FIXUP_HOSTNAME_UNIT
-
-cat > /usr/local/bin/proxmox-ami-fixup-certs.sh << 'FIXUP_CERTS'
-#!/bin/bash
-set -euo pipefail
-pvecm updatecerts --force
-FIXUP_CERTS
-chmod +x /usr/local/bin/proxmox-ami-fixup-certs.sh
-
-cat > /etc/systemd/system/proxmox-ami-fixup-certs.service << 'FIXUP_CERTS_UNIT'
-[Unit]
-Description=Regenerate Proxmox SSL certs with current IP
-After=pve-cluster.service
-Before=pvedaemon.service pveproxy.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/proxmox-ami-fixup-certs.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-FIXUP_CERTS_UNIT
-
-# Keyed on the EC2 instance-id, so every launch from an AMI gets its own password rather
-# than sharing the one set during the build run.
-cat > /usr/local/bin/proxmox-ami-fixup-password.sh << 'FIXUP_PASSWORD'
-#!/bin/bash
-set -euo pipefail
-CURRENT_ID=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/instance-id)
-SAVED_ID=$(cat /root/.last-instance-id 2>/dev/null || true)
-if [ "$CURRENT_ID" = "$SAVED_ID" ] && [ -s /root/root-password ]; then
-    exit 0
-fi
-( umask 077
-  PASSWORD=$(openssl rand -base64 18)
-  echo "root:$PASSWORD" | chpasswd
-  echo "$PASSWORD" > /root/root-password
-  echo "$CURRENT_ID" > /root/.last-instance-id
-)
-FIXUP_PASSWORD
-chmod +x /usr/local/bin/proxmox-ami-fixup-password.sh
-
-cat > /etc/systemd/system/proxmox-ami-fixup-password.service << 'FIXUP_PASSWORD_UNIT'
-[Unit]
-Description=Regenerate root password when EC2 instance-id changes
-After=network-online.target
-Wants=network-online.target
-Before=pveproxy.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/proxmox-ami-fixup-password.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-FIXUP_PASSWORD_UNIT
-
-# At boot, not baked in: the NIC name (enp39s0, ens5, ...) depends on instance family.
-cat > /usr/local/bin/proxmox-ami-fixup-nat.sh << 'FIXUP_NAT'
-#!/bin/bash
-set -euo pipefail
-MGMT_NIC=$(ip route show default | awk '{print $5}' | head -1)
-if [ -z "$MGMT_NIC" ]; then
-    echo "ERROR: could not determine management NIC from default route" >&2
-    exit 1
-fi
-iptables -w -t nat -C POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE 2>/dev/null \
-    || iptables -w -t nat -A POSTROUTING -s 10.10.10.0/24 -o "$MGMT_NIC" -j MASQUERADE
-iptables -w -C FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT 2>/dev/null \
-    || iptables -w -A FORWARD -i vmbr0 -o "$MGMT_NIC" -j ACCEPT
-iptables -w -C FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
-    || iptables -w -A FORWARD -i "$MGMT_NIC" -o vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-FIXUP_NAT
-chmod +x /usr/local/bin/proxmox-ami-fixup-nat.sh
-
-cat > /etc/systemd/system/proxmox-ami-fixup-nat.service << 'FIXUP_NAT_UNIT'
-[Unit]
-Description=Apply NAT/FORWARD iptables rules with current management NIC
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/proxmox-ami-fixup-nat.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-FIXUP_NAT_UNIT
-
-# vnet names are generated per sample, so only default.disable_ipv6 can reach them. The
-# management NIC is already up and keeps its own setting.
-cat > /etc/sysctl.d/99-inspect-proxmox-disable-ipv6.conf << 'SYSCTL_V6'
-net.ipv6.conf.default.disable_ipv6 = 1
-SYSCTL_V6
-
-# Confine sandbox guests at the host's forwarding layer. Kept identical to the
-# on-first-boot heredoc in scripts/virtualized_proxmox/build_proxmox_auto.sh.
-cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
-#!/bin/bash
-set -euo pipefail
-
-# RFC 3927: a router must not forward IPv4 link-local. The destination drop goes in raw
-# PREROUTING, ahead of any FORWARD ACCEPT; host requests are OUTPUT so unaffected.
-iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
-    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
-# The source drop must be FORWARD, not raw PREROUTING: the latter would also drop the
-# host's own on-link replies (IMDS/DNS) and break it.
-iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
-    || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
-
-# Guest v6 is unsupported; FORWARD sees only transit, so the host's own v6 is intact.
-if command -v ip6tables >/dev/null; then
-    ip6tables -w -C FORWARD -j DROP 2>/dev/null \
-        || ip6tables -w -A FORWARD -j DROP
-fi
-BLOCK_METADATA
-chmod +x /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
-
-cat > /etc/systemd/system/inspect-proxmox-block-cloud-metadata.service << 'BLOCK_METADATA_UNIT'
-[Unit]
-Description=Confine sandbox guests (link-local forwarding block, IPv6 drop)
-After=network-online.target pve-firewall.service proxmox-firewall.service
-Wants=network-online.target
-Before=proxmox-ami-fixup-nat.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-BLOCK_METADATA_UNIT
-
-# NOTE: keep in sync with scripts/virtualized_proxmox/build_proxmox_auto.sh.
-cat > /usr/local/bin/inspect-proxmox-egress-lockdown.sh << 'EGRESS_LOCKDOWN'
-#!/bin/bash
-set -euo pipefail
-
-MARKER=/etc/inspect-proxmox-egress-lockdown
-COMMENT=inspect-proxmox-egress-lockdown
-RUN_ID="$$.$(date +%s)"
-
-RESOLV=/run/dnsmasq/resolv.conf
-RESOLV_BACKUP=/run/dnsmasq/resolv.conf.inspect-egress-backup
-
-reload_dnsmasq() {
-    pkill -HUP dnsmasq 2>/dev/null || true
-}
-
-gc_stale_rules() {
-    for table in mangle filter; do
-        iptables-save -t "$table" | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
-            case "$rule" in
-                *"$COMMENT $RUN_ID"*) continue ;;
-            esac
-            echo "${rule#-A }" | xargs iptables -w -t "$table" -D || true
-        done
-    done
-}
-
-blank_resolv() {
-    mkdir -p /run/dnsmasq
-    if [ -f "$RESOLV" ] && [ ! -f "$RESOLV_BACKUP" ] && ! grep -q "$COMMENT" "$RESOLV"; then
-        cp -a "$RESOLV" "$RESOLV_BACKUP"
-    fi
-    printf '# %s: upstream DNS recursion disabled while marker present\n' "$COMMENT" > "$RESOLV"
-    reload_dnsmasq
-}
-
-if [ -f "$MARKER" ]; then
-    iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
-    iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
-    MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
-    if [ -z "$MGMT_NICS" ]; then
-        iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
-        gc_stale_rules
-        blank_resolv
-        echo "ERROR: no default-route NIC found; blanket FORWARD drop applied, failing unit" >&2
-        exit 1
-    fi
-    for NIC in $MGMT_NICS; do
-        iptables -w -t mangle -I FORWARD 1 -o "$NIC" -m comment --comment "$COMMENT $RUN_ID" -j DROP
-        iptables -w -t mangle -I FORWARD 1 -i "$NIC" -m comment --comment "$COMMENT $RUN_ID" -j DROP
-        iptables -w -t mangle -I OUTPUT 1 -o "$NIC" -m owner --uid-owner dnsmasq -m comment --comment "$COMMENT $RUN_ID" -j DROP
-    done
-    gc_stale_rules
-    blank_resolv
-else
-    gc_stale_rules
-    if [ -f "$RESOLV_BACKUP" ]; then
-        mv -f "$RESOLV_BACKUP" "$RESOLV"
-        reload_dnsmasq
-    elif [ -f "$RESOLV" ] && grep -q "$COMMENT" "$RESOLV"; then
-        rm -f "$RESOLV"
-        reload_dnsmasq
-    fi
-fi
-EGRESS_LOCKDOWN
-chmod +x /usr/local/bin/inspect-proxmox-egress-lockdown.sh
-
-cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.service << 'EGRESS_LOCKDOWN_UNIT'
-[Unit]
-Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-proxmox-egress-lockdown)
-After=network-online.target pve-firewall.service proxmox-firewall.service
-Wants=network-online.target
-OnFailure=inspect-proxmox-egress-lockdown-halt.service
-StartLimitIntervalSec=0
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
-SuccessExitStatus=SIGTERM
-
-[Install]
-WantedBy=multi-user.target
-EGRESS_LOCKDOWN_UNIT
-
-cat > /etc/systemd/system/inspect-proxmox-egress-lockdown.timer << 'EGRESS_LOCKDOWN_TIMER'
-[Unit]
-Description=Reassert egress lockdown every minute
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
-AccuracySec=15s
-
-[Install]
-WantedBy=timers.target
-EGRESS_LOCKDOWN_TIMER
-
-cat > /etc/systemd/system/inspect-proxmox-egress-lockdown-halt.service << 'EGRESS_LOCKDOWN_HALT_UNIT'
-[Unit]
-Description=Stop the Proxmox API because egress lockdown failed (fail deadly)
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'echo "egress lockdown failed: stopping and masking pveproxy/pvedaemon; see journalctl -u inspect-proxmox-egress-lockdown.service" >&2; systemctl mask --runtime pveproxy.service pvedaemon.service; systemctl stop pveproxy.service pvedaemon.service'
-EGRESS_LOCKDOWN_HALT_UNIT
-
-# Host isolation. See root README.
-# Re-applied every boot: node and NIC names change per launch, so AMI-baked node-scoped
-# rules are orphaned. Delete ours (matched by comment) and recreate, so state converges.
-# NOTE: keep these rules in sync with the on-first-boot heredoc in
-# scripts/virtualized_proxmox/build_proxmox_auto.sh.
-cat > /usr/local/bin/proxmox-ami-fixup-firewall.sh << 'FIXUP_FIREWALL'
-#!/bin/bash
-set -euo pipefail
-NIC=$(ip route show default | awk '{print $5}' | head -1)
-[ -z "$NIC" ] && { echo "ERROR: no default route; cannot isolate host" >&2; exit 1; }
-NODE=$(hostname)
-C="inspect-proxmox-sandbox: host-isolation"
-# Delete any of our existing rules first, descending pos (deletes renumber).
-pvesh get /nodes/$NODE/firewall/rules --output-format json \
-    | jq -r --arg c "$C" 'map(select(.comment == $c)) | sort_by(.pos) | reverse | .[].pos' \
-    | while read -r pos; do pvesh delete /nodes/$NODE/firewall/rules/"$pos"; done
-pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1 --comment "$C"
-pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1 --comment "$C"
-pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1 --comment "$C"
-pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1 --comment "$C"
-pvesh create /nodes/$NODE/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1 --comment "$C"
-pvesh set /nodes/$NODE/firewall/options --enable 1
-pvesh set /cluster/firewall/options --enable 1
-FIXUP_FIREWALL
-chmod +x /usr/local/bin/proxmox-ami-fixup-firewall.sh
-
-cat > /etc/systemd/system/proxmox-ami-fixup-firewall.service << 'FIXUP_FIREWALL_UNIT'
-[Unit]
-Description=Enable Proxmox host firewall isolation with current management NIC
-# After the hostname fixup so rules are created under the final node name, not
-# the transient EC2 ip-x-x-x-x hostname.
-After=proxmox-ami-fixup-hostname.service pve-cluster.service network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/proxmox-ami-fixup-firewall.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-FIXUP_FIREWALL_UNIT
-
-systemctl daemon-reload
-systemctl enable proxmox-ami-fixup-hostname.service
-systemctl enable proxmox-ami-fixup-certs.service
-systemctl enable proxmox-ami-fixup-nat.service
-systemctl enable proxmox-ami-fixup-password.service
-systemctl enable proxmox-ami-fixup-firewall.service
-systemctl enable inspect-proxmox-block-cloud-metadata.service
-systemctl enable inspect-proxmox-egress-lockdown.service
-systemctl enable inspect-proxmox-egress-lockdown.timer
-
-# pvestatd -> localhost CloudWatch agent -> CloudWatch OTLP, SigV4-signed with the instance
-# role (403s harmlessly without cloudwatch:PutMetricData). The build only stages files; the
-# agent is configured and started at first boot, so the endpoint is never tested here.
-# cumulativetodelta is required: PVE emits cumulative sums without StartTimeUnixNano.
-# The instance Name comes from IMDS via OTEL_RESOURCE_ATTRIBUTES and resourcedetection's env
-# detector (the launcher must enable InstanceMetadataTags). Do NOT use the ec2 detector's
-# tags_from_imds: the agent's embedded collector rejects that key.
+# Third-party binary; the ec2 deb configures it (pvestatd -> OTLP -> CloudWatch).
 curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/debian/amd64/latest/amazon-cloudwatch-agent.deb" \
     -o /tmp/cwagent.deb
 dpkg -i /tmp/cwagent.deb
 
-cat > /opt/aws/amazon-cloudwatch-agent/etc/otel-metrics.yaml << 'OTELYAML'
-receivers:
-  otlp/cwagent:
-    protocols:
-      http:
-        endpoint: 127.0.0.1:4318
-processors:
-  resourcedetection/cwagent:
-    # env reads ec2.tag.Name from OTEL_RESOURCE_ATTRIBUTES (set at boot from IMDS);
-    # ec2 adds instance-id/region/AZ/type.
-    detectors: [env, ec2]
-    timeout: 5s
-  # pvestatd emits ~1400 datapoints/cycle, past CloudWatch's 1000-per-request limit, mostly
-  # per-VM-per-disk proxmox_vm_blockstat_*. Of those keep rd/wr operations + total_time_ns
-  # per device (IOPS, and latency = Dtime/Dops); the [a-z]+[0-9]+ match deliberately excludes
-  # failed_/invalid_ counters. pressureio* is io PSI. Everything else is dropped.
-  filter/cwagent:
-    error_mode: ignore
-    metrics:
-      metric:
-        - 'not IsMatch(name, "^(proxmox_vm_(cpu|cpus|mem|maxmem|memhost|balloon|freemem|disk|maxdisk)|proxmox_vm_pressureio(full|some)|proxmox_vm_blockstat_[a-z]+[0-9]+_(rd|wr)_(operations|total_time_ns)_total|proxmox_node_(memory|cpustat|blockstat)_.+|proxmox_storage_(used|total|avail))$")'
-  cumulativetodelta/cwagent: {}
-  # Backstop for the 1000-datapoint limit if the guest count outgrows the filter.
-  batch/cwagent:
-    send_batch_size: 1000
-    send_batch_max_size: 1000
-exporters:
-  otlphttp/cwagent:
-    metrics_endpoint: "https://monitoring.${env:AWS_REGION}.amazonaws.com/v1/metrics"
-    compression: gzip
-    auth: { authenticator: sigv4auth/cwagent }
-extensions:
-  sigv4auth/cwagent: { service: monitoring, region: "${env:AWS_REGION}" }
-service:
-  extensions: [sigv4auth/cwagent]
-  pipelines:
-    metrics/cwagent:
-      receivers: [otlp/cwagent]
-      processors: [filter/cwagent, resourcedetection/cwagent, cumulativetodelta/cwagent, batch/cwagent]
-      exporters: [otlphttp/cwagent]
-OTELYAML
-echo '{"agent":{}}' > /opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
+# Everything beyond a stock Proxmox. The postinst refuses unless the rebuilt Proxmox
+# packages are in place, so a partial bundle fails here rather than producing a host
+# that reports contract 0.
+mkdir -p /tmp/inspect-proxmox-host
+cd /tmp/inspect-proxmox-host
+curl -fsSL "$INSPECT_PROXMOX_HOST_BUNDLE_URL" -o debs.tar
+tar xf debs.tar
+apt-get install -y ./*.deb
+cd /
+rm -rf /tmp/inspect-proxmox-host
 
-# pvestatd -> local collector. Write status.cfg directly: `pvesh create` connection-tests
-# the endpoint, which isn't running at build time. Persists in pmxcfs (baked in).
-printf 'opentelemetry: cloudwatch-otel\n\tserver 127.0.0.1\n\tport 4318\n\totel-protocol http\n\totel-path /v1/metrics\n\totel-compression gzip\n' >> /etc/pve/status.cfg
-
-# Every boot, so ${env:AWS_REGION} and Name follow an AMI relaunch. fetch-config(base) +
-# append-config is idempotent, so re-running doesn't duplicate the pipeline.
-cat > /usr/local/bin/cloudwatch-otel-apply.sh << 'OTELAPPLY'
-#!/bin/bash
-set -euo pipefail
-REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
-echo "AWS_REGION=${REGION}" > /etc/default/amazon-cloudwatch-agent-otel
-# Absent Name tag -> no Name label; instance-id still identifies the box.
-NAME=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/tags/instance/Name 2>/dev/null || true)
-if [ -n "${NAME}" ]; then
-    echo "OTEL_RESOURCE_ATTRIBUTES=ec2.tag.Name=${NAME}" >> /etc/default/amazon-cloudwatch-agent-otel
-fi
-export AWS_REGION="${REGION}"
-ctl=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
-"$ctl" -a fetch-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
-"$ctl" -a append-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/otel-metrics.yaml -s
-OTELAPPLY
-chmod +x /usr/local/bin/cloudwatch-otel-apply.sh
-
-# The agent service reads AWS_REGION (written above) so otelcol resolves ${env:AWS_REGION}.
-mkdir -p /etc/systemd/system/amazon-cloudwatch-agent.service.d
-cat > /etc/systemd/system/amazon-cloudwatch-agent.service.d/otel-region.conf << 'OTELDROPIN'
-[Service]
-EnvironmentFile=/etc/default/amazon-cloudwatch-agent-otel
-OTELDROPIN
-
-cat > /etc/systemd/system/cloudwatch-otel-apply.service << 'OTELAPPLYUNIT'
-[Unit]
-Description=Configure and start the CloudWatch agent OTel pipeline
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/cloudwatch-otel-apply.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-OTELAPPLYUNIT
-systemctl daemon-reload
-systemctl enable cloudwatch-otel-apply.service
-
-pveum user list --output-format json | jq -r '.[].userid' |
-while IFS= read -r userid; do
-    pveum user token list "$userid" --output-format json | jq -r '.[].tokenid' |
-    while IFS= read -r tokenid; do
-        pveum user token remove "$userid" "$tokenid"
-    done
-done
+inspect-proxmox-host-seal
 
 echo "PROXMOX INSTALL COMPLETE: $(pveversion)"
 
-# Final reboot: pvenetcommit.service will promote interfaces.new -> interfaces
-# and ifreload will bring up vmbr0 cleanly before networking.service runs.
-echo "Stage 2 complete. Rebooting to apply network config..."
+# Final reboot: vmbr0 was created by inspect-proxmox-ec2-network at install; a clean boot
+# runs every boot-time unit once before the host is snapshotted.
+echo "Stage 2 complete. Rebooting..."
 systemctl reboot
 STAGE2
 
