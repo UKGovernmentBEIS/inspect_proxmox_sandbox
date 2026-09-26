@@ -23,6 +23,7 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 
 class Fault(BaseModel):
@@ -195,7 +196,7 @@ async def local_upload_peer(api: AsyncProxmoxAPI, enabled: bool):
         yield
         return
 
-    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             headers = await reader.readuntil(b"\r\n\r\n")
             length = next(
@@ -232,7 +233,13 @@ def make_sandbox(
         agent_commands=AgentCommands(api, "test-node"),
         ipam_mappings=(),
         vm_id=100,
-        all_vm_ids=(100,),
+        name="test-sandbox",
+        all_vms={
+            100: VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                name="test-sandbox",
+            )
+        },
         sdn_zone_id=None,
         os_type=os_type,
     )

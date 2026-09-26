@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 pytestmark = pytest.mark.skipif(
     shutil.which("flock") is None or shutil.which("sh") is None,
@@ -32,7 +33,13 @@ def _make_sandbox() -> ProxmoxSandboxEnvironment:
         agent_commands=MagicMock(),
         ipam_mappings=(),
         vm_id=100,
-        all_vm_ids=(100,),
+        name="test-sandbox",
+        all_vms={
+            100: VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                name="test-sandbox",
+            )
+        },
         sdn_zone_id=None,
         instance=None,
         pool_id=None,
@@ -66,7 +73,7 @@ async def _run(tmp_start: str) -> int:
     return await proc.wait()
 
 
-async def test_concurrent_double_launch_runs_command_once(tmp_path):
+async def test_concurrent_double_launch_runs_command_once(tmp_path) -> None:
     marker = tmp_path / "marker"
     # `echo side >> marker` is an observable side effect, separate from the
     # command's stdout (which the wrapper redirects to script.stdout).
@@ -82,7 +89,7 @@ async def test_concurrent_double_launch_runs_command_once(tmp_path):
     assert Path(f"{tmp_start}script.returncode").read_text() == "0"
 
 
-async def test_single_launch_still_works(tmp_path):
+async def test_single_launch_still_works(tmp_path) -> None:
     marker = tmp_path / "marker"
     tmp_start = _write_script(tmp_path, f"echo side >> {marker}; echo out")
 

@@ -264,8 +264,10 @@ runcmd:
                             )
 
             existing_vms = await self.known_builtins()
-            for existing_vm in existing_vms:
-                await self.qemu_commands.destroy_vm(vm_id=existing_vms[existing_vm])
+            for built_in, vm_id in existing_vms.items():
+                await self.qemu_commands.destroy_vm(
+                    vm_id=vm_id, name=f"inspect-{built_in}"
+                )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(inner_clear_builtins)
 
@@ -479,6 +481,8 @@ runcmd:
         built_in: str,
         import_source: str,
     ) -> None:
+        name = f"inspect-{built_in}"
+
         with trace_action(
             self.logger,
             TRACE_NAME,
@@ -491,7 +495,7 @@ runcmd:
                     f"/nodes/{self.node}/qemu",
                     json={
                         "vmid": next_available_vm_id,
-                        "name": f"inspect-{built_in}",
+                        "name": name,
                         "node": self.node,
                         "cpu": "host",
                         "memory": 8192,
@@ -526,8 +530,9 @@ runcmd:
 
             await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
 
-            await self.qemu_commands.start_and_await(
-                vm_id=next_available_vm_id, requires_guest_agent=True
+            await self.qemu_commands.start(vm_id=next_available_vm_id)
+            await self.qemu_commands.await_vm(
+                vm_id=next_available_vm_id, requires_guest_agent=True, name=name
             )
 
             # now wait for cloud-init to finish
@@ -569,6 +574,7 @@ runcmd:
             await self.qemu_commands.await_vm(
                 vm_id=next_available_vm_id,
                 requires_guest_agent=True,
+                name=name,
                 status_for_wait="stopped",
             )
 
