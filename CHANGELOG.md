@@ -3,13 +3,22 @@
 ## Unreleased
 
 - The `kali2025.4` built-in now installs `kali-linux-everything` on a 64 GiB disk. Hosts that already have a `builtin-kali2025.4` template must `qm destroy` it.
+- Fix: run large storage uploads off the asyncio event loop again (in a worker thread, while staying cancellable), so concurrent VM provisioning no longer starves the loop and times out other Proxmox API calls with `ConnectTimeout`
+- `VmConfig.depends_on`: a VM is created only once the named VMs are ready. See "Dependency-based VM startup" in the README
+- `VmConfig.healthcheck`: compose-style guest command that gates a VM's readiness. See "Healthchecks" in the README
+- **Breaking:** every VM except the first `is_sandbox` VM must be named; that one defaults to `default`. See "VM Names" in the README
+- VM readiness polls are at most 5 s apart, and a VM that never runs or whose guest agent never answers fails with `VmNotRunningError` / `GuestAgentUnavailableError`
+- Reject malformed guest-agent replies with `GuestAgentTamperError`. Limit accepted file data, command output and quoted error text; limit how long commands wait; and close cancelled uploads with a time limit on cleanup.
+- Bundled provisioning scripts: under the egress lockdown the host now REJECTs guest DNS to port 53 instead of accepting it; the lockdown unit only halts the API on its own verdict; hosts carry a `.aisi<N>` contract stamp in the API version that survives `pve-manager` upgrades
+- Every VM now gets a serial port (`serial0: socket`)
+- VMs no longer get an emulated VGA device by default (`vga: none`), closing the QEMU display out-of-bounds write path (gitlab.com/qemu-project/qemu/-/work_items/4215) that a privileged guest can trigger even with no console attached. Guests that need a graphical console (e.g. Windows without a serial login) can opt back in with `VmConfig(vga="std")`. Headless VMs' console link now points at the xterm.js serial terminal instead of noVNC. Note: for a template supplied via `existing_vm_template_tag`, the clone's display is overridden to `none`, so a Windows/GUI template needs `vga="std"`; and Proxmox drops SMM (`smm=off`) for SeaBIOS guests that have no VGA
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
 - Move the `image_storage` field from `ProxmoxSandboxEnvironmentConfig` to `ProxmoxInstanceConfig`.
 - Remove the unused single-instance fields (`host` etc.) from `ProxmoxSandboxEnvironmentConfig`; infrastructure is configured via `PROXMOX_CONFIG_FILE` or `PROXMOX_*` environment variables only. Passing these fields is now silently ignored (pydantic drops extra kwargs), and old `.eval` logs still deserialize.
 - Log the acquired pool instance (`host`/`port`/`node`) at `INFO`
-- Opt logger into `INFO` level for consistency with Inspect core
+- Opt logger into `INFO` level for consistency with Inspect core, also supporting `debug`/`trace` output when a lower `--log-level` is set
 - Prevent VMs from accessing cloud instance metadata credentials, disable IPv6 for sandbox guests (when using the bundled provisioning scripts)
 - Optional egress lockdown for sandbox guests (when using the bundled provisioning scripts): drops forwarded guest traffic and stops the SDN `dnsmasq` instances recursing upstream. Installed inert, so nothing changes until `/etc/inspect-proxmox-egress-lockdown` is created; see the README
 - Fix: guest file / command-output reads work again on Proxmox < 9.2.
@@ -17,7 +26,7 @@
 - Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 - Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
-- Don't wait for a VM to reach "running" before starting the next one (just wait for all of them together at the end). Set `await_before_next_vm=True` on a `VmConfig` if later VMs depend on it having booted first
+- VMs boot concurrently rather than one after another
 
 ## 0.11.0 - 2026-06-01
 

@@ -48,16 +48,6 @@ def _make_mock_infra():
 
 
 @pytest.fixture
-def mock_proxmox_api():
-    """Mock AsyncProxmoxAPI."""
-    with patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI") as mock:
-        api_instance = AsyncMock()
-        api_instance.get.return_value = {"version": "8.0"}
-        mock.return_value = api_instance
-        yield mock
-
-
-@pytest.fixture
 def mock_infra_commands():
     """Mock InfraCommands.get_instance and build classmethods."""
     infra = _make_mock_infra()

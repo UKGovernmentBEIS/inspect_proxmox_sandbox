@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import errno
+import os
 import re
 import shlex
 import time
@@ -8,6 +9,7 @@ from logging import INFO, NOTSET, getLogger
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Generator, List, Tuple, Type, Union
 
+import httpx
 import tenacity
 from inspect_ai.util import (
     ExecResult,
@@ -25,9 +27,15 @@ from typing_extensions import override
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.deadline import (
+    CLEANUP_WAIT_SECONDS,
+    remaining_budget,
+    within_budget,
+)
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.qga_responses import ExecStatus, GuestAgentTamperError
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, is_ephemeral_zone
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
@@ -36,15 +44,6 @@ from proxmoxsandbox.schema import (
     ProxmoxInstanceConfig,
     ProxmoxSandboxEnvironmentConfig,
 )
-
-# Inspect only lowers its own package loggers below the root WARNING default, so a
-# third-party provider's INFO never reaches the .eval transcript. As an Inspect
-# extension we opt our own logger in; a user can still silence it with
-# --log-level-transcript warning (that gate is downstream of this level).
-# Guarded on NOTSET so we never clobber a level a host application set before
-# this module was imported (e.g. someone who wants proxmoxsandbox at DEBUG).
-if getLogger("proxmoxsandbox").level == NOTSET:
-    getLogger("proxmoxsandbox").setLevel(INFO)
 
 # Above this many raw stdin bytes, exec() writes stdin to a file and redirects
 # from it instead of inlining base64 into the shell script — see exec() below.
@@ -78,6 +77,36 @@ def _split_chunks(
 # Poll past the in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s` SIGKILL (at timeout+5s)
 # so we observe the real exit instead of catching the command mid-shutdown.
 _EXEC_POLL_GRACE_SECONDS = _IN_GUEST_KILL_GRACE + 3
+
+# Keep untimed commands bounded on the host; adding a guest-side timeout
+# would require flags absent from BusyBox and could kill legitimate long work.
+_EXEC_UNTIMED_WAIT_SECONDS = 4 * 60 * 60
+
+# Shared communication allowance accommodates intermittent Windows QGA failures.
+_EXEC_AGENT_BUDGET_SECONDS = 180
+
+# Poll backoff is capped so a finished command is noticed within this, and so
+# the deadlines above are honoured to within it.
+_EXEC_POLL_MAX_INTERVAL_SECONDS = 30
+
+
+def _exec_untimed_wait() -> int:
+    seconds = int(
+        os.environ.get("PROXMOX_EXEC_UNTIMED_WAIT_SECONDS", _EXEC_UNTIMED_WAIT_SECONDS)
+    )
+    if seconds <= 0:
+        raise ValueError("PROXMOX_EXEC_UNTIMED_WAIT_SECONDS must be positive")
+    return seconds
+
+
+def _status_returncode(status: ExecStatus, *, windows: bool = False) -> int:
+    if status.exitcode is not None:
+        return status.exitcode
+    if status.signal:
+        if windows:
+            return status.signal if status.signal < 2**31 else status.signal - 2**32
+        return 128 + status.signal
+    return 1
 
 
 class ReturnCodeNotWritten(Exception):
@@ -305,10 +334,24 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         return cls.proxmox_pool.default_concurrency()
 
     @classmethod
+    def _init_package_log_level(cls) -> None:
+        """Set the package logger to INFO, or the root's level if lower.
+
+        Must run after Inspect's `init_logger`; extensions are imported
+        earlier, during `platform_init()`, when the root is still at its
+        default.
+        """
+        if getLogger("proxmoxsandbox").level == NOTSET:
+            getLogger("proxmoxsandbox").setLevel(
+                min(INFO, getLogger().getEffectiveLevel())
+            )
+
+    @classmethod
     @override
     async def task_init(
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
+        cls._init_package_log_level()
         # Pool creation only depends on infrastructure config (PROXMOX_CONFIG_FILE),
         # not on eval-specific config. Config may be None when the task delegates
         # per-sample config to sample_init.
@@ -385,11 +428,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     vm_configs_with_ids,
                     sdn_zone_id,
                     ipam_mappings,
-                ) = await infra_commands.create_sdn_and_vms(
-                    proxmox_ids_start,
-                    sdn_config=config.sdn_config,
-                    vms_config=config.vms_config,
-                )
+                ) = await infra_commands.create_sdn_and_vms(proxmox_ids_start, config)
 
             sandboxes: Dict[str, SandboxEnvironment] = {}
 
@@ -397,40 +436,28 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 vm_configs_with_id[0] for vm_configs_with_id in vm_configs_with_ids
             )
 
-            found_default = False
-
             agent_commands = AgentCommands(
                 async_proxmox=infra_commands.async_proxmox, node=instance.node
             )
 
-            for idx, vm_config_and_id in enumerate(vm_configs_with_ids):
+            for vm_id, vm_config in vm_configs_with_ids:
                 vm_sandbox_environment = ProxmoxSandboxEnvironment(
                     infra_commands=infra_commands,
                     agent_commands=agent_commands,
                     ipam_mappings=ipam_mappings,
-                    vm_id=vm_config_and_id[0],
+                    vm_id=vm_id,
                     all_vm_ids=vm_ids,
                     sdn_zone_id=sdn_zone_id,
                     instance=instance,
                     pool_id=pool_id,
-                    os_type=vm_config_and_id[1].os_type,
+                    os_type=vm_config.os_type,
                 )
-                if not found_default and vm_config_and_id[1].is_sandbox:
+                sandboxes[vm_config.name] = vm_sandbox_environment
+                # The first sandbox VM is also Inspect's "default". Config
+                # validation guarantees there is one and that no later VM took
+                # the name.
+                if vm_config.is_sandbox and "default" not in sandboxes:
                     sandboxes["default"] = vm_sandbox_environment
-                    found_default = True
-                else:
-                    sandbox_name = (
-                        vm_config_and_id[1].name
-                        if vm_config_and_id[1].name is not None
-                        else f"vm_{vm_config_and_id[0]}"
-                    )
-                    sandboxes[sandbox_name] = vm_sandbox_environment
-
-            if not found_default:
-                raise ValueError(
-                    "No default sandbox found: at least one VM must have "
-                    "is_sandbox = True"
-                )
 
             # borrowed from k8s provider
             def reorder_default_first(
@@ -652,6 +679,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     @classmethod
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
+        cls._init_package_log_level()
         if id is None:
             await cls.create_proxmox_instance_pools()
             for instance in cls.proxmox_pool.all_instances():
@@ -698,17 +726,20 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         else:
             tmp_start = f"/tmp/{__name__}{time.time_ns()}_"
 
+        poll_timeout = timeout if timeout is not None else remaining_budget()
+        if poll_timeout is None:
+            poll_timeout = _exec_untimed_wait()
+
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(timeout + _EXEC_POLL_GRACE_SECONDS)
-            if timeout is not None
-            else tenacity.stop_never,
-            retry=tenacity.retry_if_result(lambda x: x is False),
+            wait=tenacity.wait_exponential(
+                min=0.1, max=_EXEC_POLL_MAX_INTERVAL_SECONDS, exp_base=1.3
+            ),
+            stop=tenacity.stop_after_delay(poll_timeout + _EXEC_POLL_GRACE_SECONDS),
+            retry=tenacity.retry_if_result(lambda x: x is None),
         )
-        async def wait_for_exec(vm_id: int, exec_response_pid: int) -> bool | Dict:
-            # TODO check return code of exec - even if the command failed
-            # it should always be timeout or success
-            #
+        async def wait_for_exec(
+            vm_id: int, exec_response_pid: int
+        ) -> ExecStatus | None:
             # Note: get_agent_exec_status can only be called once
             # per PID after the process is complete.
             # Do not, for example, try to debug the value of the get_agent_exec_status
@@ -716,12 +747,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             exec_status = await self.agent_commands.get_agent_exec_status(
                 vm_id=vm_id, pid=exec_response_pid
             )
+            return exec_status if exec_status.exited == 1 else None
 
-            if exec_status["exited"] != 1:
-                return False
-            else:
-                return exec_status
-
+        stdin_upload: tuple[str, bytes] | None = None
         if is_windows:
             script = self._build_batch_script(
                 tmp_start=tmp_start,
@@ -733,12 +761,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 timeout=timeout,
             )
             script_path = f"{tmp_start}script.bat"
-            launch = await self._upload_exec_script(
-                script_path, script, is_windows=True
-            )
-            exec_post_response = await self.agent_commands.exec_command(
-                vm_id=self.vm_id, command=launch
-            )
         else:
             # Inlined stdin is base64-encoded into the script, which itself
             # gets base64-encoded into the agent/file-write `content` field.
@@ -761,7 +783,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 )
                 if len(input_bytes) > _INLINE_STDIN_LIMIT:
                     stdin_file = f"{tmp_start}stdin"
-                    await self.write_file(stdin_file, input_bytes)
+                    stdin_upload = (stdin_file, input_bytes)
                     stdin_for_script = None
 
             script = self._build_shell_script(
@@ -774,97 +796,125 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 timeout=timeout,
                 stdin_file=stdin_file,
             )
+            script_path = f"{tmp_start}script.sh"
+
+        # Uploads and result collection share the command's waiting allowance;
+        # nested retries must not restart it.
+        waiting_allowance = (
+            poll_timeout + _EXEC_POLL_GRACE_SECONDS + _EXEC_AGENT_BUDGET_SECONDS
+        )
+        launched_pid: int | None = None
+
+        async def launch_and_collect() -> ExecResult[str]:
+            nonlocal launched_pid
+            if stdin_upload is not None:
+                await self.write_file(*stdin_upload)
             launch = await self._upload_exec_script(
-                f"{tmp_start}script.sh", script, is_windows=False
+                script_path, script, is_windows=is_windows
             )
-            exec_post_response = await self.agent_commands.exec_command(
+            exec_response_pid = await self.agent_commands.exec_command(
                 vm_id=self.vm_id, command=launch
             )
-
-        exec_response_pid = exec_post_response["pid"]
-
-        assert isinstance(exec_response_pid, int)
-        self.logger.debug(f"VM {self.vm_id} exec pid={exec_response_pid}: {cmd[:100]}")
-
-        with trace_action(
-            self.logger,
-            self.TRACE_NAME,
-            f"exec_command {self.vm_id=} {exec_response_pid=}",
-        ):
-            try:
-                exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
-            except tenacity.RetryError as ex:
-                # Grace margin should prevent this; reaching here means the guest
-                # agent never confirmed completion within timeout+grace. Surface
-                # it clearly, not as RetryError.
-                raise TimeoutError(
-                    f"Command did not complete within {timeout}s "
-                    f"(+{_EXEC_POLL_GRACE_SECONDS}s guest-agent grace) on VM "
-                    f"{self.vm_id}, pid {exec_response_pid}. The QEMU guest "
-                    f"agent did not report the process as finished. "
-                    f"Command: {shlex.join(cmd)[:200]}"
-                ) from ex
-
-        if exec_status and isinstance(exec_status, Dict) and "err-data" in exec_status:
-            # Something went wrong with the wrapper script, not the actual command
-            # Possibly user not found. We'll return the error of the wrapper script,
-            # in case that's helpful
-            stdout = exec_status.get("out-data", "")
-            stderr = exec_status.get("err-data", "")
-            returncode = exec_status["exitcode"]
-            exec_response = ExecResult(
-                success=False,
-                returncode=returncode,
-                stdout=stdout,
-                stderr=stderr,
+            launched_pid = exec_response_pid
+            self.logger.debug(
+                f"VM {self.vm_id} exec pid={exec_response_pid}: {cmd[:100]}"
             )
-        else:
-            # TODO: consider reading all files at once?
-            stdout = await self._read_exec_output(f"{tmp_start}script.stdout")
-            stderr = await self._read_exec_output(f"{tmp_start}script.stderr")
-            try:
-                returncode = await self._read_return_code(tmp_start)
-                exec_response = ExecResult(
-                    success=returncode == 0,
-                    returncode=returncode,
-                    stdout=stdout,
-                    stderr=stderr,
-                )
-            except ReturnCodeNotWritten:
-                # exec exited but the wrapper never wrote its returncode file: it was
-                # killed before completion.
-                signal_num = (
-                    exec_status.get("signal") if isinstance(exec_status, Dict) else None
-                )
-                returncode = 128 + signal_num if signal_num else 137
-                if signal_num:
-                    killed_note = (
-                        f"proxmox sandbox: command-runner wrapper terminated by signal "
-                        f"{signal_num} before completion; reporting code {returncode}."
-                    )
-                else:
-                    killed_note = (
-                        "proxmox sandbox: command-runner wrapper terminated before "
-                        "writing an exit code (likely killed by the command itself)."
-                    )
+
+            with trace_action(
+                self.logger,
+                self.TRACE_NAME,
+                f"exec_command {self.vm_id=} {exec_response_pid=}",
+            ):
+                exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
+            if exec_status is None:  # tenacity only returns a non-None result
+                raise RuntimeError("exec-status poll returned without a status")
+
+            if exec_status.err_data is not None:
+                # QGA stderr comes from the wrapper; command stderr is in its file.
                 exec_response = ExecResult(
                     success=False,
-                    returncode=returncode,
-                    stdout=stdout,
-                    stderr=f"{stderr}\n{killed_note}" if stderr else killed_note,
+                    returncode=_status_returncode(exec_status, windows=is_windows),
+                    stdout=exec_status.out_data or "",
+                    stderr=exec_status.err_data,
                 )
+            else:
+                # TODO: consider reading all files at once?
+                stdout = await self._read_exec_output(f"{tmp_start}script.stdout")
+                stderr = await self._read_exec_output(f"{tmp_start}script.stderr")
+                try:
+                    returncode = await self._read_return_code(tmp_start)
+                    exec_response = ExecResult(
+                        success=returncode == 0,
+                        returncode=returncode,
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+                except ReturnCodeNotWritten:
+                    # exec exited but the wrapper never wrote its returncode file:
+                    # it was killed before completion.
+                    signal_num = exec_status.signal
+                    returncode = (
+                        _status_returncode(exec_status, windows=is_windows)
+                        if signal_num
+                        else 137
+                    )
+                    if signal_num:
+                        termination = "exception" if is_windows else "signal"
+                        killed_note = (
+                            f"proxmox sandbox: command-runner wrapper terminated by "
+                            f"{termination} {signal_num} before completion; "
+                            f"reporting code {returncode}."
+                        )
+                    else:
+                        killed_note = (
+                            "proxmox sandbox: command-runner wrapper terminated "
+                            "before writing an exit code (likely killed by the "
+                            "command itself)."
+                        )
+                    exec_response = ExecResult(
+                        success=False,
+                        returncode=returncode,
+                        stdout=stdout,
+                        stderr=f"{stderr}\n{killed_note}" if stderr else killed_note,
+                    )
 
-        # cleanup - we don't need to wait for the result of this
-        if is_windows:
-            await self.agent_commands.exec_command(
-                vm_id=self.vm_id,
-                command=["cmd.exe", "/c", f'del /f /q "{tmp_start}*" 2>nul'],
+            # cleanup - we don't need to wait for the result of this
+            if is_windows:
+                await self.agent_commands.exec_command(
+                    vm_id=self.vm_id,
+                    command=["cmd.exe", "/c", f'del /f /q "{tmp_start}*" 2>nul'],
+                )
+            else:
+                await self.agent_commands.exec_command(
+                    vm_id=self.vm_id,
+                    command=["sh", "-c", f"rm -f {tmp_start}*"],
+                )
+            return exec_response
+
+        try:
+            exec_response = await within_budget(launch_and_collect(), waiting_allowance)
+        except tenacity.RetryError as ex:
+            untimed_note = (
+                " (the wait for an exec without a timeout; see "
+                "PROXMOX_EXEC_UNTIMED_WAIT_SECONDS)"
+                if timeout is None
+                else ""
             )
-        else:
-            await self.agent_commands.exec_command(
-                vm_id=self.vm_id,
-                command=["sh", "-c", f"rm -f {tmp_start}*"],
-            )
+            raise TimeoutError(
+                f"Command did not complete within {poll_timeout}s{untimed_note} "
+                f"(+{_EXEC_POLL_GRACE_SECONDS}s guest-agent grace) on VM "
+                f"{self.vm_id}, pid {launched_pid}. The QEMU guest "
+                f"agent did not report the process as finished. "
+                f"Command: {shlex.join(cmd)[:200]}"
+            ) from ex
+        except TimeoutError as ex:
+            raise TimeoutError(
+                f"The QEMU guest agent on VM {self.vm_id} did not deliver the result "
+                f"of pid {launched_pid} within {waiting_allowance}s ({poll_timeout}s "
+                f"timeout + {_EXEC_POLL_GRACE_SECONDS}s grace + "
+                f"{_EXEC_AGENT_BUDGET_SECONDS}s agent budget): the agent is stalled "
+                f"or tampered. Command: {shlex.join(cmd)[:200]}"
+            ) from ex
 
         if exec_response.returncode == 124:
             raise TimeoutError("Command timed out")
@@ -881,9 +931,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         return exec_response
 
+    _RETURNCODE_RE = re.compile(r"-?\d{1,10}")
+
     @tenacity.retry(
         wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
         stop=tenacity.stop_after_delay(2),
+        retry=tenacity.retry_if_exception_type(ReturnCodeNotWritten),
         reraise=True,
     )
     async def _read_return_code(self, tmp_start) -> int:
@@ -895,10 +948,17 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 _PVE_FILE_READ_MAX,
             ),
         )
-        returncode_string_stripped = raw.decode("utf-8", errors="replace").strip()
-        if len(returncode_string_stripped) == 0:
+        text = raw.decode("utf-8", errors="replace").strip()
+        if not text:
             raise ReturnCodeNotWritten()
-        return int(returncode_string_stripped)
+        if self._RETURNCODE_RE.fullmatch(text) is None:
+            # The guest owns this file, so this is a forged result rather than
+            # tamper evidence; just fail with the VM named instead of a bare int().
+            raise ValueError(
+                f"VM {self.vm_id}: returncode file did not contain an exit code: "
+                f"{text[:64]!r}"
+            )
+        return int(text)
 
     async def _read_exec_output(self, filepath: str) -> str:
         # decode=0 gives raw bytes; decode UTF-8 errors="replace" (output is
@@ -937,7 +997,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 else contents.encode("UTF-8"),
                 filepath=file,
             )
-        except Exception as ex:
+        except httpx.HTTPStatusError as ex:
             if "Agent error" in str(ex):
                 ex_str = str(ex)
                 matched = next(
@@ -1010,15 +1070,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     ISO_WRITE_THRESHOLD_BYTES = 128 * 1024
 
     async def _try_iso_write(self, file: str, contents: str | bytes) -> bool:
-        """Attempt the Linux ISO9660 hot-plug fast path. True iff fully written via ISO.
+        """Attempt ISO transfer; return False on ordinary failures or when skipped.
 
-        Bootstrap-safe: IsoWriter uses only QGA + storage HTTP and does its own
-        in-guest parent mkdir, so this is safe to call from the exec() path (no
-        self.exec re-entry).
-
-        Returns False when skipped (Windows / sub-threshold / already disabled) or
-        when the ISO attempt fails — in which case the fast path is disabled for the
-        rest of this VM's life and the caller falls through to chunked QGA.
+        Cancellation and malformed replies propagate and disable future ISO writes.
         """
         if (
             self._is_windows()
@@ -1048,6 +1102,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 )
                 await iso_writer.write_file(self.vm_id, file, content_bytes)
                 return True
+            except (asyncio.CancelledError, GuestAgentTamperError):
+                self._iso_fast_path_disabled = True
+                raise
             except Exception as ex:
                 # Persistent failure (iso_write already retried the first-call
                 # "Can't open blockdev" race internally via detach + re-attach).
@@ -1164,10 +1221,21 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 await self.exec(cmd=["sh", combine_script_path])
 
         finally:
-            if is_windows:
-                await self.exec(cmd=["cmd.exe", "/c", f'rmdir /s /q "{temp_dir}"'])
-            else:
-                await self.exec(cmd=["rm", "-rf", temp_dir])
+            cleanup = (
+                ["cmd.exe", "/c", f'rmdir /s /q "{temp_dir}"']
+                if is_windows
+                else ["rm", "-rf", temp_dir]
+            )
+            try:
+                await within_budget(
+                    self.exec(cmd=cleanup), CLEANUP_WAIT_SECONDS, independent=True
+                )
+            except GuestAgentTamperError:
+                raise
+            except Exception as ex:
+                self.logger.warning(
+                    "Temporary-file cleanup on VM %s failed: %s", self.vm_id, ex
+                )
 
     @override
     async def read_file(self, file: str, text: bool = True) -> Union[str | bytes]:  # type: ignore
@@ -1187,7 +1255,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 filepath=file,
                 count=cap,
             )
-        except Exception as ex:
+        except httpx.HTTPStatusError as ex:
             if "Agent error" in str(ex):
                 ex_str = str(ex)
                 matched = next(
@@ -1247,4 +1315,4 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
-        await self.qemu_commands.await_vm(vm_id=self.vm_id, is_sandbox=True)
+        await self.qemu_commands.await_vm(vm_id=self.vm_id, requires_guest_agent=True)

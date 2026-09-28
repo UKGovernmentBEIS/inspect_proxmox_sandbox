@@ -98,6 +98,10 @@ ssh root@<proxmox-host> 'rm /etc/inspect-proxmox-egress-lockdown && systemctl st
 Remember the last step: leaving the marker in place breaks the rest of the
 integration suite.
 
+The test asserts the host rejects port 53, which arrived with contract `aisi2`,
+so it fails up front on a host built before that rather than reporting the
+missing rules as a lapse in isolation. Rebuild the host to clear it.
+
 ### Debug logging
 
 To see debug-level log output while running tests:

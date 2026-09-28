@@ -536,6 +536,7 @@ runcmd:
                         "scsihw": "virtio-scsi-single",
                         "net0": f"virtio,bridge={STATIC_VNET_ID}",
                         "serial0": "socket",
+                        "vga": "none",
                         "start": False,
                         "agent": "enabled=1",
                     },
@@ -571,13 +572,13 @@ runcmd:
             await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
 
             await self.qemu_commands.start_and_await(
-                vm_id=next_available_vm_id, is_sandbox=True
+                vm_id=next_available_vm_id, requires_guest_agent=True
             )
 
             # now wait for cloud-init to finish
 
             agent_commands = AgentCommands(self.async_proxmox, self.node)
-            res = await agent_commands.exec_command(
+            cloud_init_pid = await agent_commands.exec_command(
                 vm_id=next_available_vm_id,
                 command=["cloud-init", "status", "--wait"],
             )
@@ -590,18 +591,17 @@ runcmd:
             )
             async def wait_for_cloud_init() -> bool:
                 exec_status = await agent_commands.get_agent_exec_status(
-                    vm_id=next_available_vm_id, pid=res["pid"]
+                    vm_id=next_available_vm_id, pid=cloud_init_pid
                 )
-                if exec_status["exited"] == 1:
+                if exec_status.exited == 1:
+                    out_data = exec_status.out_data or ""
                     # `cloud-init status --wait` prints progress dots before the
                     # final status line, so match the trailing token, not the whole
                     # output (status: error/degraded still fall through to the raise).
-                    if exec_status["out-data"].strip().endswith("status: done"):
+                    if out_data.strip().endswith("status: done"):
                         return True
                     else:
-                        raise ValueError(
-                            f"cloud-init failed: {exec_status['out-data']}"
-                        )
+                        raise ValueError(f"cloud-init failed: {out_data}")
                 else:
                     return False
 
@@ -614,7 +614,7 @@ runcmd:
 
             await self.qemu_commands.await_vm(
                 vm_id=next_available_vm_id,
-                is_sandbox=True,
+                requires_guest_agent=True,
                 status_for_wait="stopped",
             )
 
