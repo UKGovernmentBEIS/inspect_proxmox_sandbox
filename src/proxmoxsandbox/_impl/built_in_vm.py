@@ -596,7 +596,7 @@ runcmd:
                     "GET",
                     f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
                 )
-                return current_config["template"] == 1
+                return current_config.get("template") == 1
 
             await is_template()
 
