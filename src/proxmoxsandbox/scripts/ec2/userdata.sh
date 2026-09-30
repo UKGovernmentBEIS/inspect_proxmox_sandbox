@@ -121,14 +121,14 @@ set -euxo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-PATCHED_VERSION="11.0.3-3+aisi1"
+PATCHED_VERSION="11.0.3-3+aisi2"
 PVE_QEMU_BASE_COMMIT="c3b7a675a52c11a1c4a5873ff2bd1696df7bf98c"
 PVE_QEMU_PATCHES_COMMIT="5e08c14024a6646711fc88529942e5296b9cd676"
 BUILD_DIR="/root/pve-qemu-build"
 
 INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
-if /usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -qF quirk_mode_page_set_block_size; then
-    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the scsi-disk quirk patch, nothing to do"
+if dpkg --compare-versions "$INSTALLED_VERSION" ge "$PATCHED_VERSION"; then
+    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the backported fixes, nothing to do"
     exit 0
 fi
 
@@ -140,21 +140,40 @@ rm -rf "$BUILD_DIR"
 git clone https://git.proxmox.com/git/pve-qemu.git "$BUILD_DIR"
 cd "$BUILD_DIR"
 git checkout "$PVE_QEMU_BASE_COMMIT"
-git checkout "$PVE_QEMU_PATCHES_COMMIT" -- \
-    debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
-    debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
-mv debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
-    debian/patches/extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch
-mv debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch \
-    debian/patches/extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
-sed -i '/^extra\/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA\.patch$/a extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch\nextra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch' debian/patches/series
-grep -qF extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch debian/patches/series
-grep -qF extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch debian/patches/series
+upstream="$PVE_QEMU_PATCHES_COMMIT:debian/patches/extra"
+patches="debian/patches/extra"
+git show "$upstream/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch" \
+    > "$patches/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch"
+git show "$upstream/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch" \
+    > "$patches/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch"
+git show "$upstream/0009-vapic-confine-the-VAPIC-region-to-0xc0000.0xe0000.patch" \
+    > "$patches/0029-vapic-confine-the-VAPIC-region-to-0xc0000.0xe0000.patch"
+git show "$upstream/0010-i386-vapic-unref-MemoryRegion-if-vapic_map_rom_writa.patch" \
+    > "$patches/0030-i386-vapic-unref-MemoryRegion-if-vapic_map_rom_writa.patch"
+git show "$upstream/0011-io-channel-socket-do-not-treat-a-zero-length-write-a.patch" \
+    > "$patches/0031-io-channel-socket-do-not-treat-a-zero-length-write-a.patch"
+
+anchor="extra/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA.patch"
+grep -qxF "$anchor" debian/patches/series
+sed -i "\|^$anchor\$|a\\
+extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch\\
+extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch\\
+extra/0029-vapic-confine-the-VAPIC-region-to-0xc0000.0xe0000.patch\\
+extra/0030-i386-vapic-unref-MemoryRegion-if-vapic_map_rom_writa.patch\\
+extra/0031-io-channel-socket-do-not-treat-a-zero-length-write-a.patch" debian/patches/series
 sed -i 's|url = ../mirror_qemu|url = https://git.proxmox.com/git/mirror_qemu.git|' .gitmodules
 sed -i 's/clean -xdfi/clean -xdff/' Makefile
 
 mv debian/changelog debian/changelog.orig
 cat > debian/changelog <<'CHANGELOG_END'
+pve-qemu-kvm (11.0.3-3+aisi2) trixie; urgency=high
+
+  * backport VAPIC region confinement, the matching MemoryRegion unref fix
+    and the io-channel-socket zero-length write fix (CVE-2026-84788) from
+    pve-qemu master, ahead of the official 11.1.1-1 release.
+
+ -- AISI <platform@example.com>  Tue, 30 Sep 2026 10:00:00 +0000
+
 pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
 
   * backport scsi-disk WRITE SAME out-of-bounds read fix and MODE SELECT
