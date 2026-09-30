@@ -172,7 +172,7 @@ pve-qemu-kvm (11.0.3-3+aisi2) trixie; urgency=high
     and the io-channel-socket zero-length write fix (CVE-2026-84788) from
     pve-qemu master, ahead of the official 11.1.1-1 release.
 
- -- AISI <platform@example.com>  Tue, 30 Sep 2026 10:00:00 +0000
+ -- AISI <coretech@dsit.gov.uk>  Tue, 30 Sep 2026 10:00:00 +0000
 
 pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
 
@@ -180,7 +180,7 @@ pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
     block size quirk from pve-qemu master (upstream qemu commits merged
     2026-08-27), ahead of the official 11.1.1-1 release.
 
- -- AISI <platform@example.com>  Thu, 17 Sep 2026 13:55:04 +0000
+ -- AISI <coretech@dsit.gov.uk>  Thu, 17 Sep 2026 13:55:04 +0000
 
 CHANGELOG_END
 cat debian/changelog.orig >> debian/changelog
