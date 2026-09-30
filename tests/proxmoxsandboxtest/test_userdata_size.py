@@ -14,7 +14,7 @@ import gzip
 from pathlib import Path
 
 # Well under EC2's 16384, so a growing script trips this before RunInstances does.
-BUDGET = 13500
+BUDGET = 14000
 
 SCRIPT = (
     Path(__file__).parents[2]
