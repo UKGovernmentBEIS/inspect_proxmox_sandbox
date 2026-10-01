@@ -13,7 +13,6 @@ dependencies = [
     "pydantic>=2.10.6",
     "pycdlib>=1.14.0",
     "pydantic-extra-types>=2.10.2",
-    "pycurl>=7.45.0",
     "inspect_ai>=0.3.261",
     "rich>=13.9",
     "platformdirs>=4.3.7",
@@ -76,5 +75,4 @@ dev = [
     "pytest>=8.3.4",
     "pytest-asyncio>=0.25.3",
     "ruff>=0.9.3",
-    "types-pycurl>=7.45.0",
 ]

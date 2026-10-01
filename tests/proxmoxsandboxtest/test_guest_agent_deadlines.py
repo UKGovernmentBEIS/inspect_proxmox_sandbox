@@ -17,7 +17,6 @@ from .guest_agent_fixture import (
     Scenario,
     exercise,
     isolated,
-    local_upload_peer,
     make_sandbox,
 )
 
@@ -116,7 +115,7 @@ def test_iso_cleanup_cannot_hold_the_command_open_indefinitely(stage):
         Scenario(
             operation="exec",
             command=["echo", "x" * 200_000],
-            local_uploads=True,
+            iso_uploads=True,
             faults=[Fault(stage="status"), Fault(stage=stage)],
         )
     )
@@ -124,7 +123,9 @@ def test_iso_cleanup_cannot_hold_the_command_open_indefinitely(stage):
 
 
 async def test_cancelled_iso_transfer_is_not_reused_by_the_next_write():
-    replies = GuestReplies(Scenario(operation="exec", fault=Fault(stage="iso_attach")))
+    replies = GuestReplies(
+        Scenario(operation="exec", iso_uploads=True, fault=Fault(stage="iso_attach"))
+    )
     api = AsyncProxmoxAPI("proxmox.test:8006", "test-user", "test-password")
     sandbox = make_sandbox(api)
     client = partial(httpx.AsyncClient, transport=httpx.MockTransport(replies.handle))
@@ -134,15 +135,14 @@ async def test_cancelled_iso_transfer_is_not_reused_by_the_next_write():
             await asyncio.sleep(0.01)
 
     with patch("httpx.AsyncClient", client):
-        async with local_upload_peer(api, True):
-            first = asyncio.create_task(sandbox.write_file("/first", b"x" * 200_000))
-            try:
-                await asyncio.wait_for(wait_for_attach(), 5)
-            finally:
-                first.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await asyncio.wait_for(first, 5)
-            await asyncio.wait_for(sandbox.write_file("/second", b"y" * 200_000), 10)
+        first = asyncio.create_task(sandbox.write_file("/first", b"x" * 200_000))
+        try:
+            await asyncio.wait_for(wait_for_attach(), 5)
+        finally:
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(first, 5)
+        await asyncio.wait_for(sandbox.write_file("/second", b"y" * 200_000), 10)
 
     assert replies.seen["iso_attach"] == 1
     assert replies.seen.get("upload", 0) > 0
@@ -153,6 +153,7 @@ async def test_slow_successful_iso_cleanup_preserves_the_fast_transfer(stage):
     replies = GuestReplies(
         Scenario(
             operation="exec",
+            iso_uploads=True,
             fault=Fault(stage=stage, mode="late_success", elapsed_seconds=45),
         )
     )
@@ -161,9 +162,8 @@ async def test_slow_successful_iso_cleanup_preserves_the_fast_transfer(stage):
     client = partial(httpx.AsyncClient, transport=httpx.MockTransport(replies.handle))
 
     with patch("httpx.AsyncClient", client), patch("time.monotonic", replies.now):
-        async with local_upload_peer(api, True):
-            await sandbox.write_file("/first", b"x" * 200_000)
-            await sandbox.write_file("/second", b"y" * 200_000)
+        await sandbox.write_file("/first", b"x" * 200_000)
+        await sandbox.write_file("/second", b"y" * 200_000)
 
     assert replies.seen["iso_attach"] == 2
     assert replies.seen.get("upload", 0) == 0

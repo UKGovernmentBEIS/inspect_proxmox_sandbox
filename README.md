@@ -586,7 +586,6 @@ The built-in VMs (`ubuntu24.04`, `debian13`, `kali2025.4`) pin specific upstream
 
 ## Tech debt
 
-- Large OVA uploads use PycURL, because neither aiohttp nor httpx worked with large uploads
 - Inconsistent use of task_wrapper and tenacity
 
 ## Developing

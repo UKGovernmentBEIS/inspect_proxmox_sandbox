@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -36,10 +37,11 @@ async def _upload() -> dict:
         port = server.sockets[0].getsockname()[1]
         api = AsyncProxmoxAPI("unused.test", "user", "password")
         api.api_base_url = f"http://127.0.0.1:{port}"
+        api.ticket, api.csrf_token, api.ticket_date = "t", "c", time.monotonic()
         with TemporaryDirectory() as directory:
             payload = Path(directory) / "payload.iso"
             payload.write_bytes(b"sample upload")
-            return await api.upload_file_with_curl("node", "local", payload, "iso")
+            return await api.upload_file("node", "local", payload, "iso")
 
 
 def test_successful_upload_returns_parsed_data():
