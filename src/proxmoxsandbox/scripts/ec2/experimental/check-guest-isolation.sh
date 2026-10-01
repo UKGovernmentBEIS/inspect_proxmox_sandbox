@@ -65,29 +65,13 @@ tcp_state() {
         *) echo "blocked(${err##*: })" ;;
     esac
 }
-http_state() {
-    local code
-    code=$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null)
-    # An empty status is curl failing to run rather than a block, so it must not read as one.
-    case "$code" in
-        000) echo "blocked(no response)" ;;
-        "") echo "error(curl printed no status)" ;;
-        *) echo "reachable($code)" ;;
-    esac
-}
-# dig only retries over TCP on a truncated reply, never on silence, so the transport has to
-# be selected explicitly to cover both.
-dig_rcode() { # server type name [dig args...] -> rcode, empty if nothing answered
-    local server=$1 type=$2 name=$3
-    shift 3
-    dig @"$server" +time=3 +tries=1 -t "$type" "$name" "$@" 2>/dev/null |
-        awk -F'status: ' '/status:/ {split($2, a, ","); print a[1]; exit}'
-}
-# Any rcode is reachable, REFUSED included: it means a resolver got the query, which is how a
-# host whose firewall had failed once looked, with dnsmasq declining in its place.
-dns_state() { # server type name
+# UDP; the TCP side of port 53 is a tcp_state probe. Any rcode is reachable, REFUSED included:
+# it means a resolver got the query, which is how a host whose firewall had failed once
+# looked, with dnsmasq declining in its place.
+dns_state() { # server
     local rcode
-    rcode=$(dig_rcode "$@")
+    rcode=$(dig @"$1" +time=3 +tries=1 deb.debian.org 2>/dev/null |
+        awk -F'status: ' '/status:/ {split($2, a, ","); print a[1]; exit}')
     case "$rcode" in
         "") echo "blocked(no response)" ;;
         *) echo "reachable($rcode)" ;;
@@ -113,30 +97,39 @@ else
     echo "no --host-addr given, so the default gateway is assumed to be the host"
 fi
 
+have_dig=$(command -v dig)
+[ -n "$have_dig" ] || echo "no dig, so nothing probes UDP 53; install dnsutils/bind-utils in the guest template"
+
 echo
 echo "# the host itself"
 for host in "${hosts[@]}"; do
-    for spec in 8006:pveproxy 22:ssh 85:pvedaemon 111:rpcbind 25:smtp 3128:spiceproxy 4318:otlp-collector 5900:vnc 5901:vnc; do
+    for spec in 8006:pveproxy 22:ssh 85:pvedaemon 111:rpcbind 25:smtp 3128:spiceproxy 4318:otlp-collector 5900:vnc 5901:vnc 53:dns; do
         port=${spec%%:*}
         want blocked "host $host:$port (${spec#*:})" "$(tcp_state "$host" "$port")"
     done
-    want blocked "Proxmox API https://$host:8006/api2/json/version" "$(http_state "https://$host:8006/api2/json/version")"
-    want blocked "host $host:53 (dns)" "$(tcp_state "$host" 53)"
+    if [ -n "$have_dig" ]; then
+        want blocked "host $host:53/udp (dns)" "$(dns_state "$host")"
+    else
+        skip "host $host:53/udp (dns)" "no dig"
+    fi
 done
 
 echo
 echo "# cloud metadata and link-local"
 # IMDS addresses: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html#instance-metadata-v2-how-it-works
 # Resolver addresses: https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html
-want blocked "IMDSv1 GET http://169.254.169.254/latest/meta-data/instance-id" \
-    "$(http_state http://169.254.169.254/latest/meta-data/instance-id)"
-want blocked "IMDSv2 token PUT http://169.254.169.254/latest/api/token" \
-    "$(http_state -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' http://169.254.169.254/latest/api/token)"
-want blocked "IMDS over IPv6 http://[fd00:ec2::254]/latest/meta-data/" \
-    "$(http_state 'http://[fd00:ec2::254]/latest/meta-data/')"
+want blocked "IMDS 169.254.169.254:80" "$(tcp_state 169.254.169.254 80)"
+want blocked "IMDS [fd00:ec2::254]:80" "$(tcp_state fd00:ec2::254 80)"
 # The resolver also answers on a VPC-specific address, which the guest has no way to derive.
 for resolver_addr in 169.254.169.253 fd00:ec2::253; do
-    want blocked "VPC resolver $resolver_addr:53 over TCP" "$(tcp_state "$resolver_addr" 53)"
+    label="VPC resolver $resolver_addr"
+    [[ $resolver_addr == *:* ]] && label="VPC resolver [$resolver_addr]"
+    want blocked "$label:53" "$(tcp_state "$resolver_addr" 53)"
+    if [ -n "$have_dig" ]; then
+        want blocked "$label:53/udp" "$(dns_state "$resolver_addr")"
+    else
+        skip "$label:53/udp" "no dig"
+    fi
 done
 want blocked "link-local router 169.254.1.1:80" "$(tcp_state 169.254.1.1 80)"
 
@@ -149,44 +142,18 @@ v6route=$(ip -6 route show default 2>/dev/null | head -1)
 # makes these two checks able to fail.
 want absent "no global IPv6 address" "${v6addr:-absent}"
 want absent "no IPv6 default route" "${v6route:-absent}"
-want blocked "IPv6 egress https://[2606:4700:4700::1111]/" "$(http_state 'https://[2606:4700:4700::1111]/')"
+want blocked "IPv6 egress [2606:4700:4700::1111]:443" "$(tcp_state 2606:4700:4700::1111 443)"
 
 echo
 echo "# internet egress"
-for target in 1.1.1.1:443 8.8.8.8:53; do
-    want blocked "TCP ${target/:/ port }" "$(tcp_state "${target%:*}" "${target##*:}")"
+for ip in 1.1.1.1 8.8.8.8; do
+    for port in 53 853 443; do
+        want blocked "TCP $ip:$port" "$(tcp_state "$ip" "$port")"
+    done
 done
-names=(deb.debian.org download.proxmox.com pypi.org)
-for name in "${names[@]}"; do
-    want blocked "package registry https://$name/" "$(http_state "https://$name/")"
+for name in deb.debian.org download.proxmox.com pypi.org; do
+    want blocked "package registry $name:443" "$(tcp_state "$name" 443)"
 done
-
-echo
-echo "# DNS"
-if ! command -v dig >/dev/null 2>&1; then
-    skip "DNS probes" "no dig; install dnsutils/bind-utils in the guest template"
-else
-    # UDP to the link-local addresses, which the TCP probes above cannot cover.
-    for resolver_addr in 169.254.169.253 fd00:ec2::253; do
-        want blocked "VPC resolver $resolver_addr:53 over UDP" \
-            "$(dns_state "$resolver_addr" A "${names[0]}")"
-    done
-    # dig never falls back to TCP on silence, so that transport needs a probe of its own.
-    for name in "${names[@]}"; do
-        want blocked "recursion via $gw for $name" "$(dns_state "$gw" A "$name")"
-    done
-    want blocked "recursion via $gw for ${names[0]} over TCP" \
-        "$(dns_state "$gw" A "${names[0]}" +tcp)"
-    # A long random label under a name the resolver will recurse for is the classic
-    # exfil-over-DNS channel; the TXT reply is the return path.
-    label=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    want blocked "DNS exfil TXT $label.${names[0]}" "$(dns_state "$gw" TXT "$label.${names[0]}")"
-    for resolver_ip in 1.1.1.1 8.8.8.8; do
-        for port in 53 853 443; do
-            want blocked "direct resolver $resolver_ip:$port" "$(tcp_state "$resolver_ip" "$port")"
-        done
-    done
-fi
 
 echo
 echo "# operator-supplied addresses"
