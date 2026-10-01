@@ -96,7 +96,7 @@ echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev
 
 # The contract stamped by ../userdata.sh. Read locally rather than over the API: if the halt
 # unit has masked pvedaemon, an API read fails and a fine host looks like a stale one.
-WANT_CONTRACT=2
+WANT_CONTRACT=3
 contract=$(pveversion 2>/dev/null | head -1)
 case "$contract" in
     *.aisi[0-9]*) contract=${contract##*.aisi}; contract=${contract%%[!0-9]*} ;;
@@ -133,6 +133,14 @@ echo
 echo "# forwarding rules and kernel state"
 check "link-local destinations dropped: raw PREROUTING -d 169.254.0.0/16 -j DROP" \
     has_rule raw PREROUTING "-d 169.254.0.0/16 -j DROP"
+# PVE may prepend CT zone selectors; they do not accept traffic.
+first_raw_verdict_is_host_local() {
+    [ "$(iptables -w -t raw -S PREROUTING | sed -n '/^-A PREROUTING -i fwbr+ -j CT --zone 1$/d; /^-A PREROUTING /{p;q;}')" = \
+        '-A PREROUTING -m comment --comment isp -j INSP-SANDBOX-HOST-LOCAL' ]
+}
+check "host-local guard precedes raw PREROUTING verdicts" first_raw_verdict_is_host_local
+check "host-local guard drops all local destinations" \
+    has_rule raw INSP-SANDBOX-HOST-LOCAL "-m addrtype --dst-type LOCAL -j DROP"
 check "link-local sources dropped: FORWARD -s 169.254.0.0/16 -j DROP" \
     has_rule filter FORWARD "-s 169.254.0.0/16 -j DROP"
 check "forwarded IPv6 dropped: ip6tables FORWARD -j DROP" has_rule6 FORWARD "-A FORWARD -j DROP"
