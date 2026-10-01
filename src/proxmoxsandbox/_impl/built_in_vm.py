@@ -51,9 +51,14 @@ async def download_to_file(url: str, destination: Path) -> None:
     ) as client:
         async with client.stream("GET", url) as response:
             response.raise_for_status()
-            with destination.open("wb") as file_handle:
-                async for chunk in response.aiter_bytes():
-                    file_handle.write(chunk)
+            partial = destination.with_name(destination.name + ".part")
+            try:
+                with partial.open("wb") as file_handle:
+                    async for chunk in response.aiter_bytes():
+                        file_handle.write(chunk)
+                partial.replace(destination)
+            finally:
+                partial.unlink(missing_ok=True)
 
 
 class BuiltInVM(abc.ABC):

@@ -350,9 +350,7 @@ class AsyncProxmoxAPI:
                         files={"filename": (actual_filename, file_handle)},
                     )
 
-            response_json = response.json()
-
             if response.is_error:
-                raise ValueError(f"Error uploading file: {response_json}")
+                raise _http_status_error(response)
 
-            return response_json.get("data", {})
+            return response.json().get("data", {})

@@ -103,6 +103,32 @@ async def test_upload_sends_extras_and_proxmox_auth(monkeypatch, tmp_path):
     assert seen["csrfpreventiontoken"] == "csrf-456"
 
 
+@pytest.mark.asyncio
+async def test_upload_reports_non_json_proxy_error(monkeypatch, tmp_path):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            502, text="<html><h1>502 Bad Gateway</h1></html>", request=request
+        )
+
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        kwargs.pop("verify", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_with_mock_transport)
+
+    api = AsyncProxmoxAPI.from_instance_config(_instance_config())
+    api.ticket = "ticket-123"
+    api.ticket_date = float("inf")
+    api.csrf_token = "csrf-456"
+    payload = tmp_path / "payload.iso"
+    payload.write_bytes(b"sample upload")
+
+    with pytest.raises(httpx.HTTPStatusError, match="502 Bad Gateway"):
+        await api.upload_file("pve1", "local", payload, "iso")
+
+
 @pytest.mark.parametrize("name", ["Cookie", "cookie", "CSRFPreventionToken"])
 def test_reserved_proxmox_auth_headers_are_rejected(name):
     with pytest.raises(ValueError, match="may not include"):

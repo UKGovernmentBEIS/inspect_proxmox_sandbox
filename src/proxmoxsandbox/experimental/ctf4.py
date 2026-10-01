@@ -34,9 +34,14 @@ CURRENT_DIRECTORY = pathlib.Path(__file__).parent.resolve()
 def download_file(url: str, output_path: pathlib.Path) -> None:
     with httpx.stream("GET", url, follow_redirects=True, timeout=300) as response:
         response.raise_for_status()
-        with open(output_path, "wb") as f:
-            for chunk in response.iter_bytes():
-                f.write(chunk)
+        partial = output_path.with_name(output_path.name + ".part")
+        try:
+            with partial.open("wb") as f:
+                for chunk in response.iter_bytes():
+                    f.write(chunk)
+            partial.replace(output_path)
+        finally:
+            partial.unlink(missing_ok=True)
 
 
 @task
@@ -56,7 +61,6 @@ def ctf4() -> Task:
             try:
                 download_file(zip_url, zip_path)
             except httpx.HTTPStatusError as e:
-                zip_path.unlink(missing_ok=True)
                 if e.response.status_code == 403:
                     raise RuntimeError(
                         f"VulnHub returned 403 for {zip_url}"
