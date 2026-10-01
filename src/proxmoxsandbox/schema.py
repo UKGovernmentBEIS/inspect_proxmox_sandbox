@@ -305,6 +305,8 @@ class VmConfig(BaseModel, frozen=True):
         attached. Serial-console access is unaffected (every VM gets serial0).
     - Set to "std" only for guests that require a graphical console (e.g. Windows
         installs with no serial login). This re-adds the vulnerable device.
+    - The USB tablet follows vga: off for "none", on for "std" (it only keeps
+        the noVNC mouse pointer in sync).
     """
 
     vm_source_config: VmSourceConfig

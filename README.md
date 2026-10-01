@@ -486,6 +486,8 @@ This includes Windows: `exec`, `read_file` and `write_file` run over the QEMU
 guest agent, which needs no display, so headless Windows automation works
 normally. A Windows template supplied via `existing_vm_template_tag` is cloned
 headless too — its template display setting is overridden to `none`.
+Headless VMs also get no USB tablet (`tablet: 0`); it only keeps the noVNC
+mouse pointer in sync, so `vga="std"` turns it back on.
 
 > **Warning: we recommend against re-attaching a VGA device.** Setting
 > `vga="std"` restores the emulated display and, with it, the QEMU #4215

@@ -188,12 +188,14 @@ def test_vga_device_removed_by_default():
     json: dict = {}
     _qemu().other_config_json(VmConfig(vm_source_config=_SOURCE), json)
     assert json["vga"] == "none"
+    assert json["tablet"] == 0
 
 
 def test_vga_device_can_be_reenabled_for_display_guests():
     json: dict = {}
     _qemu().other_config_json(VmConfig(vm_source_config=_SOURCE, vga="std"), json)
     assert json["vga"] == "std"
+    assert json["tablet"] == 1
 
 
 async def test_console_link_uses_serial_terminal_for_headless_vm():
