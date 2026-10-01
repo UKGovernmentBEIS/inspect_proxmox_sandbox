@@ -19,6 +19,17 @@ class TaskWrapper(abc.ABC):
     async def do_action_and_wait_for_tasks(
         self, the_action: Callable[[], Awaitable[None]], async_wait_seconds: int = 2
     ) -> None:
+        """
+        Call the callback and wait for any new tasks to complete.
+
+        This function has no way to know which tasks arose from the callback, so
+        it waits for anything that started after the callback start, including
+        anything that started while waiting for those. If the cluster has other users,
+        this could mean waiting for unrelated (potentially long-running) tasks. Most
+        operations that spawn tasks return an UPID for the task in their API response,
+        in which case using `async_proxmox.wait_for_task(upid=...)` instead is likely
+        better.
+        """
         incomplete_tasks_pre_action = await self.new_incomplete_tasks(
             pre_existing_incomplete_tasks=[]
         )
