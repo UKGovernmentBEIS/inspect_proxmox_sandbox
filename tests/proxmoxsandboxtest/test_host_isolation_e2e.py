@@ -39,6 +39,13 @@ for unit in proxmox-ami-fixup-firewall.service \
     [ "$(systemctl show -p Result --value "$unit")" = success ]
 done
 pve-firewall status | grep -q enabled/running
+expected='-A PREROUTING -m comment --comment isp'
+expected="$expected -j INSP-SANDBOX-HOST-LOCAL"
+first=$(iptables -w -t raw -S PREROUTING |
+    sed -n '/^-A PREROUTING -i fwbr+ -j CT --zone 1$/d;
+            /^-A PREROUTING /{p;q;}')
+[ "$first" = "$expected" ]
+iptables -w -t raw -C INSP-SANDBOX-HOST-LOCAL -m addrtype --dst-type LOCAL -j DROP
 iptables -w -t raw -S PREROUTING | grep -q -- '-d 169.254.0.0/16 -j DROP'
 iptables -w -S FORWARD | grep -q -- '-s 169.254.0.0/16 -j DROP'
 """
