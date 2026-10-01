@@ -295,16 +295,11 @@ endpoint_addrs=$(grep . <<<"$endpoint_addrs" | sort -u)
 check "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" unresolvable deb.debian.org
 check "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
 
-# Only silence passes. Security groups and NACLs drop without replying, so a RST or ICMP error
-# is assumed to come from the far end, i.e. the packet left the VPC.
+# Only a completed connect fails. A RST or ICMP error may come from any firewall on the path,
+# so like a timeout it is not evidence the target was reached.
 tcp_dead() { # host port
-    local err
-    err=$(timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1)
-    case "$?:$err" in
-        124:* | *"Network is unreachable"*) return 0 ;;
-        0:*) echo "connected" ;;
-        *) echo "answered: ${err##*: }" ;;
-    esac
+    timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null || return 0
+    echo "connected"
     return 1
 }
 if [ ${#unreachable[@]} -eq 0 ]; then
