@@ -203,7 +203,10 @@ timed out.
 
 Routes to peered VPCs, transit gateways and on-prem survive all of this, and a guest that
 reaches one is off the host. Nothing in the AMI knows those addresses; pass them to
-`check-guest-isolation.sh` as `--unreachable IP[:PORT]` and it asserts they're dead.
+`check-host-isolation.sh` as `--unreachable IP[:PORT]` and it asserts they're dead from
+the host, then carries them into the guest command line it prints. It also sweeps the
+VPC's CIDR on TCP/443 and fails on any responder other than the interface endpoints,
+which catches a security group that lets the host reach more than item 4 allows.
 
 ## EC2-specific bits handled by `userdata.sh`
 

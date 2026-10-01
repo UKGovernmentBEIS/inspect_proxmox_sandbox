@@ -9,11 +9,25 @@
 # Assumes the configuration in the parent README's "Properly isolating the host": egress
 # lockdown armed, no route off the VPC, reachable only via interface endpoints. That is
 # the configuration worth checking; an ordinary host fails these by design.
+#
+# Usage: check-host-isolation.sh [--unreachable IP[:PORT]] ... [--no-sweep]
+#   --unreachable  an address off this VPC that must stay dead: a host across a peering link,
+#                  a transit gateway or on-prem. Repeats; port defaults to 443. Also passed on
+#                  to the printed guest command line.
+#   --no-sweep     skip the TCP/443 sweep of the VPC, which takes ~4-5 minutes per /16.
 # shellcheck disable=SC2329  # the check helpers are invoked indirectly, via check
 set -uo pipefail
 
-usage() { echo "usage: $0" >&2; exit 2; }
-[ $# -eq 0 ] || usage
+usage() { echo "usage: $0 [--unreachable IP[:PORT]] ... [--no-sweep]" >&2; exit 2; }
+unreachable=()
+sweep=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --unreachable) [ $# -ge 2 ] || usage; unreachable+=("$2"); shift 2 ;;
+        --no-sweep) sweep=0; shift ;;
+        *) usage ;;
+    esac
+done
 
 checks=0
 failures=0
@@ -81,6 +95,7 @@ no_connect() {
     echo "connected, HTTP $code"
     return 1
 }
+resolves_all() { getent ahostsv4 "$1" 2>/dev/null | awk '{print $1}' | sort -u; }
 unresolvable() {
     local ip
     ip=$(resolves_to "$1")
@@ -90,6 +105,7 @@ unresolvable() {
 }
 
 nic=$(ip route show default | awk '{print $5; exit}')
+held_addrs=$(ip -4 -o addr show | awk '{split($4, a, "/"); print a[1]}' | sort -u)
 node=$(hostname)
 marker=/etc/inspect-proxmox-egress-lockdown
 echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev/null | head -1)"
@@ -139,6 +155,30 @@ check "forwarded IPv6 dropped: ip6tables FORWARD -j DROP" has_rule6 FORWARD "-A 
 check "IPv6 off for interfaces created after boot (SDN vnets): net.ipv6.conf.default.disable_ipv6" \
     sysctl_is net.ipv6.conf.default.disable_ipv6 1
 check "IPv4 forwarding on (guests reach their gateway): net.ipv4.ip_forward" sysctl_is net.ipv4.ip_forward 1
+# Proxmox fixes an SNAT zone's --to-source when the SDN config is applied, so a zone that came
+# with the AMI can SNAT guests to the build instance's address, or whoever holds it now.
+snat_held() { # rules text
+    local spec ends addr bad=""
+    while read -r _ spec; do
+        spec=${spec//[\'\"]/} # quoted in interfaces files
+        spec=${spec%%:*}      # drop any :port
+        IFS=- read -ra ends <<<"$spec" # a range a-b: check both ends
+        for addr in "${ends[@]}"; do
+            grep -qxF "$addr" <<<"$held_addrs" || bad="$bad $addr"
+        done
+    done < <(grep -oE -- "--to-source [^ ]+" <<<"$1")
+    [ -z "$bad" ] && return 0
+    echo "not held by this host:$bad"
+    return 1
+}
+snat_held_live() {
+    local rules
+    rules=$(iptables -w -t nat -S 2>&1) || { echo "$rules"; return 1; }
+    snat_held "$rules"
+}
+check "nat SNAT --to-source addresses all held by this host" snat_held_live
+check "SNAT --to-source in /etc/network/interfaces* all held by this host" \
+    snat_held "$(cat /etc/network/interfaces /etc/network/interfaces.d/* 2>/dev/null)"
 
 echo
 echo "# Proxmox firewall (host services reachable only on the mgmt NIC)"
@@ -229,7 +269,8 @@ echo "# AWS-level controls, as seen from the host"
 endpoint_ok() { is_private "$1" && connects "https://$2/"; }
 region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
 check "region from IMDS" test -n "$region"
-endpoints=""
+# Every address of every endpoint, one per AZ, so the guest probes them all.
+endpoint_addrs=""
 if [ -z "$region" ]; then
     skip "interface endpoint checks" "no region, so the endpoint names cannot be built"
 else
@@ -240,7 +281,7 @@ else
         ip=$(resolves_to "$name")
         check "interface endpoint $svc: $name resolves" test -n "$ip"
         check "interface endpoint $svc: $ip private and answering on 443" endpoint_ok "$ip" "$name"
-        [ -n "$ip" ] && endpoints="$endpoints $ip"
+        endpoint_addrs+=$'\n'$(resolves_all "$name")
     done
     # The CloudWatch endpoint is optional, so a public answer here is a VPC without one
     # rather than a leak. Add it to the guest's target list only when it is an endpoint.
@@ -248,14 +289,80 @@ else
     ip=$(resolves_to "$name")
     if is_private "$ip"; then
         check "interface endpoint monitoring: $ip answering on 443" connects "https://$name/"
-        endpoints="$endpoints $ip"
+        endpoint_addrs+=$'\n'$(resolves_all "$name")
     else
         skip "interface endpoint monitoring" \
             "${ip:-$name} is not an endpoint in this VPC (metrics are optional)"
     fi
 fi
+endpoint_addrs=$(grep . <<<"$endpoint_addrs" | sort -u)
 check "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" unresolvable deb.debian.org
 check "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
+
+# Only a completed connect fails. A RST or ICMP error may come from any firewall on the path,
+# so like a timeout it is not evidence the target was reached.
+tcp_dead() { # host port
+    timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null || return 0
+    echo "connected"
+    return 1
+}
+if [ ${#unreachable[@]} -eq 0 ]; then
+    skip "peered VPC / transit gateway / on-prem probes" "no --unreachable addresses given"
+else
+    for target in "${unreachable[@]}"; do
+        case "$target" in
+            \[*\]:*) host=${target#[}; host=${host%%]:*}; port=${target##*:} ;;
+            *:*:*) host=$target; port=443 ;;
+            *:*) host=${target%:*}; port=${target##*:} ;;
+            *) host=$target; port=443 ;;
+        esac
+        check "off-VPC address unreachable: $host:$port" tcp_dead "$host" "$port"
+    done
+fi
+
+# Anything else in the VPC the security group lets the host reach is somewhere an escaped guest
+# can go. Connect-only, one SYN per address: the endpoints are AWS-operated, and AWS's pentest
+# policy (aws.amazon.com/security/penetration-testing) covers scanning our instances, not its
+# services, so this must stay a reachability check.
+cidr_addrs() { # a.b.c.d/n
+    local a b c d bits=${1#*/} base i x
+    IFS=. read -r a b c d <<<"${1%/*}"
+    base=$(((a << 24 | b << 16 | c << 8 | d) & ~((1 << (32 - bits)) - 1) & 0xffffffff))
+    for ((i = 0; i < 1 << (32 - bits); i++)); do
+        x=$((base + i))
+        echo "$((x >> 24 & 255)).$((x >> 16 & 255)).$((x >> 8 & 255)).$((x & 255))"
+    done
+}
+only_endpoints_on_443() { # cidr...
+    local cidr answered addr bad="" known=0
+    answered=$(for cidr; do cidr_addrs "$cidr"; done | grep -vxF -f <(echo "$held_addrs") |
+        xargs -P 256 -I{} timeout 1 bash -c 'exec 3<>/dev/tcp/{}/443 && echo {}' 2>/dev/null)
+    for addr in $answered; do
+        if grep -qxF "$addr" <<<"$endpoint_addrs"; then
+            known=$((known + 1))
+        else
+            bad="$bad $addr"
+        fi
+    done
+    [ -n "$bad" ] && echo "answered on 443, not an interface endpoint:$bad"
+    # Otherwise a sweep that silently ran nothing would pass.
+    [ "$known" -gt 0 ] || echo "no interface endpoint answered either, so the sweep proves nothing"
+    [ -z "$bad" ] && [ "$known" -gt 0 ]
+}
+mac=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/mac 2>/dev/null)
+vpc_cidrs=$([ -n "$mac" ] && /usr/local/bin/call-ec2-hypervisor \
+    "latest/meta-data/network/interfaces/macs/$mac/vpc-ipv4-cidr-blocks" 2>/dev/null)
+if [ "$sweep" = 0 ]; then
+    skip "TCP/443 sweep of the VPC" "--no-sweep"
+elif [ -z "$vpc_cidrs" ]; then
+    skip "TCP/443 sweep of the VPC" "no VPC CIDR from IMDS"
+elif [ -z "$endpoint_addrs" ]; then
+    skip "TCP/443 sweep of the VPC" "no interface endpoints found to tell apart from the rest"
+else
+    # shellcheck disable=SC2086  # one CIDR per line
+    check "TCP/443 sweep of VPC $(oneline "$vpc_cidrs"): only interface endpoints answer" \
+        only_endpoints_on_443 $vpc_cidrs
+fi
 
 echo
 # Every IPv4 address this host holds is one a guest must not reach: the management address,
@@ -266,8 +373,11 @@ args=""
 for ip in $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}' | sort -u); do
     args="$args --host-addr $ip"
 done
-for ip in $endpoints; do
+for ip in $endpoint_addrs; do
     args="$args --unreachable $ip"
+done
+for target in "${unreachable[@]}"; do
+    args="$args --unreachable $target"
 done
 if [ -n "$args" ]; then
     echo "# paste into the guest run (addresses are per-host and per-VPC; do not commit them):"
