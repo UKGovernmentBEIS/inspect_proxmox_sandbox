@@ -158,11 +158,15 @@ check "IPv4 forwarding on (guests reach their gateway): net.ipv4.ip_forward" sys
 # Proxmox fixes an SNAT zone's --to-source when the SDN config is applied, so a zone that came
 # with the AMI can SNAT guests to the build instance's address, or whoever holds it now.
 snat_held() { # rules text
-    local addr bad=""
-    for addr in $(grep -oE -- "--to-source [^ ]+" <<<"$1" | awk '{print $2}' | tr -d "'\"" |
-        sed 's/:.*//' | tr - '\n'); do
-        grep -qxF "$addr" <<<"$held_addrs" || bad="$bad $addr"
-    done
+    local spec ends addr bad=""
+    while read -r _ spec; do
+        spec=${spec//[\'\"]/} # quoted in interfaces files
+        spec=${spec%%:*}      # drop any :port
+        IFS=- read -ra ends <<<"$spec" # a range a-b: check both ends
+        for addr in "${ends[@]}"; do
+            grep -qxF "$addr" <<<"$held_addrs" || bad="$bad $addr"
+        done
+    done < <(grep -oE -- "--to-source [^ ]+" <<<"$1")
     [ -z "$bad" ] && return 0
     echo "not held by this host:$bad"
     return 1
