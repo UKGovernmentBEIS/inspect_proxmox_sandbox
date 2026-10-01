@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The `kali2025.4` built-in now installs `kali-linux-everything` on a 64 GiB disk. Hosts that already have a `builtin-kali2025.4` template must `qm destroy` it.
 - Fix: run large storage uploads off the asyncio event loop again (in a worker thread, while staying cancellable), so concurrent VM provisioning no longer starves the loop and times out other Proxmox API calls with `ConnectTimeout`
 - `VmConfig.depends_on`: a VM is created only once the named VMs are ready. See "Dependency-based VM startup" in the README
 - `VmConfig.healthcheck`: compose-style guest command that gates a VM's readiness. See "Healthchecks" in the README
