@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- VMs no longer get a USB tablet device by default; set `VmConfig(tablet=True)` for an accurate noVNC mouse on `vga="std"` guests
 - Fix: run large storage uploads off the asyncio event loop again (in a worker thread, while staying cancellable), so concurrent VM provisioning no longer starves the loop and times out other Proxmox API calls with `ConnectTimeout`
 - `VmConfig.depends_on`: a VM is created only once the named VMs are ready. See "Dependency-based VM startup" in the README
 - `VmConfig.healthcheck`: compose-style guest command that gates a VM's readiness. See "Healthchecks" in the README
@@ -10,7 +11,6 @@
 - Reject malformed guest-agent replies with `GuestAgentTamperError`. Limit accepted file data, command output and quoted error text; limit how long commands wait; and close cancelled uploads with a time limit on cleanup.
 - Bundled provisioning scripts: `pve-qemu-kvm` is now built on upstream QEMU 11.0.5, which carries the virtio-net RSC fixes (CVE-2026-66900, CVE-2026-63321), the VAPIC region fixes and the io-channel-socket zero-length write fix (CVE-2026-84788), plus a backport of the AHCI fixes for a stale command header once the command list is unmapped, building `11.0.5-0+aisi1`.
 - Bundled provisioning scripts: under the egress lockdown the host now REJECTs guest DNS to port 53 instead of accepting it; the lockdown unit only halts the API on its own verdict; hosts carry a `.aisi<N>` contract stamp in the API version that survives `pve-manager` upgrades
-- VMs no longer get Proxmox's default USB tablet device (`tablet: 0`), including clones of `existing_vm_template_tag` templates. Set `VmConfig(tablet=True)` for an accurate noVNC mouse on `vga="std"` guests. The PIIX3 UHCI USB controller remains: Proxmox adds it unconditionally on the default i440fx machine type
 - Every VM now gets a serial port (`serial0: socket`)
 - VMs no longer get an emulated VGA device by default (`vga: none`), closing the QEMU display out-of-bounds write path (gitlab.com/qemu-project/qemu/-/work_items/4215) that a privileged guest can trigger even with no console attached. Guests that need a graphical console (e.g. Windows without a serial login) can opt back in with `VmConfig(vga="std")`. Headless VMs' console link now points at the xterm.js serial terminal instead of noVNC. Note: for a template supplied via `existing_vm_template_tag`, the clone's display is overridden to `none`, so a Windows/GUI template needs `vga="std"`; and Proxmox drops SMM (`smm=off`) for SeaBIOS guests that have no VGA
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
