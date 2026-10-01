@@ -270,6 +270,7 @@ sandbox=SandboxEnvironmentSpec(
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
                 cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
                 vga="none", # optional, default "none" (no emulated display, mitigates the QEMU #4215 escape path). "std" re-adds the vulnerable device — read the warning under "Windows VMs" before using it.
+                tablet=False, # optional, default False. True adds a USB tablet so the noVNC mouse tracks accurately; only useful with vga="std".
                 firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
                 depends_on=("router",), # optional. Names of VMs that must be ready before this one is created. See "Dependency-based VM startup" below.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
@@ -486,8 +487,8 @@ This includes Windows: `exec`, `read_file` and `write_file` run over the QEMU
 guest agent, which needs no display, so headless Windows automation works
 normally. A Windows template supplied via `existing_vm_template_tag` is cloned
 headless too — its template display setting is overridden to `none`.
-Headless VMs also get no USB tablet (`tablet: 0`); it only keeps the noVNC
-mouse pointer in sync, so `vga="std"` turns it back on.
+VMs also get no USB tablet by default. If you do use `vga="std"` and want the
+noVNC mouse pointer to track accurately, set `tablet=True` as well.
 
 > **Warning: we recommend against re-attaching a VGA device.** Setting
 > `vga="std"` restores the emulated display and, with it, the QEMU #4215

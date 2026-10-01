@@ -664,9 +664,8 @@ class QemuCommands(abc.ABC):
         json_for_create["name"] = vm_config.name
         json_for_create["serial0"] = "socket"
         json_for_create["vga"] = vm_config.vga
-        # The tablet only keeps the noVNC mouse in sync; it's useless without a
-        # display. Proxmox defaults it on unless vga is serialN, so not for none.
-        json_for_create["tablet"] = 0 if vm_config.vga == "none" else 1
+        # Proxmox defaults the tablet on, so this must be sent explicitly.
+        json_for_create["tablet"] = 1 if vm_config.tablet else 0
         if vm_config.uefi_boot:
             json_for_create["efidisk0"] = (
                 f"{self.image_storage}:0,efitype=4m,pre-enrolled-keys=0"

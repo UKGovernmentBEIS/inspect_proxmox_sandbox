@@ -195,6 +195,14 @@ def test_vga_device_can_be_reenabled_for_display_guests():
     json: dict = {}
     _qemu().other_config_json(VmConfig(vm_source_config=_SOURCE, vga="std"), json)
     assert json["vga"] == "std"
+    assert json["tablet"] == 0
+
+
+def test_tablet_can_be_enabled():
+    json: dict = {}
+    _qemu().other_config_json(
+        VmConfig(vm_source_config=_SOURCE, vga="std", tablet=True), json
+    )
     assert json["tablet"] == 1
 
 
