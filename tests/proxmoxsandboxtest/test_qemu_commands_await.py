@@ -183,6 +183,35 @@ def test_agent_enabled_for_non_sandbox_with_healthcheck():
     assert "sata5" not in json
 
 
+def test_vga_device_removed_by_default():
+    """No emulated VGA closes the QEMU display OOB-write path (QEMU #4215)."""
+    json: dict = {}
+    _qemu().other_config_json(VmConfig(vm_source_config=_SOURCE), json)
+    assert json["vga"] == "none"
+
+
+def test_vga_device_can_be_reenabled_for_display_guests():
+    json: dict = {}
+    _qemu().other_config_json(VmConfig(vm_source_config=_SOURCE, vga="std"), json)
+    assert json["vga"] == "std"
+
+
+async def test_console_link_uses_serial_terminal_for_headless_vm():
+    qemu = _qemu()
+    qemu.async_proxmox.request = AsyncMock(return_value={"vga": "none"})
+    url = await qemu.connection_url(100)
+    assert "console=kvm" in url
+    assert "xtermjs=1" in url
+    assert "novnc" not in url
+
+
+async def test_console_link_uses_novnc_when_vm_has_display():
+    qemu = _qemu()
+    qemu.async_proxmox.request = AsyncMock(return_value={"vga": "std"})
+    url = await qemu.connection_url(100)
+    assert "novnc=1" in url
+
+
 async def test_vm_bridges_reads_every_nic_regardless_of_option_order():
     qemu = _qemu()
     qemu.async_proxmox.request = AsyncMock(
