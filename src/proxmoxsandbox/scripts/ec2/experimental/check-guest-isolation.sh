@@ -65,16 +65,22 @@ tcp_state() {
         *) echo "blocked(${err##*: })" ;;
     esac
 }
-# UDP; the TCP side of port 53 is a tcp_state probe. Any rcode is reachable, REFUSED included:
+# UDP; the TCP side of port 53 is a tcp_state probe. Any reply is reachable, REFUSED included:
 # it means a resolver got the query, which is how a host whose firewall had failed once
-# looked, with dnsmasq declining in its place.
+# looked, with dnsmasq declining in its place. The query is a hand-built A for deb.debian.org.
 dns_state() { # server
-    local rcode
-    rcode=$(dig @"$1" +time=3 +tries=1 deb.debian.org 2>/dev/null |
-        awk -F'status: ' '/status:/ {split($2, a, ","); print a[1]; exit}')
-    case "$rcode" in
-        "") echo "blocked(no response)" ;;
-        *) echo "reachable($rcode)" ;;
+    local hdr
+    hdr=$(timeout 3 bash -c "exec 3<>/dev/udp/$1/53 &&
+        printf '\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03deb\x06debian\x03org\x00\x00\x01\x00\x01' >&3 &&
+        head -c 4 <&3 | od -An -tx1" 2>/dev/null)
+    read -ra hdr <<<"$hdr"
+    [ ${#hdr[@]} -eq 4 ] || { echo "blocked(no response)"; return; }
+    case $((0x${hdr[3]} & 15)) in
+        0) echo "reachable(NOERROR)" ;;
+        2) echo "reachable(SERVFAIL)" ;;
+        3) echo "reachable(NXDOMAIN)" ;;
+        5) echo "reachable(REFUSED)" ;;
+        *) echo "reachable(rcode $((0x${hdr[3]} & 15)))" ;;
     esac
 }
 
@@ -97,9 +103,6 @@ else
     echo "no --host-addr given, so the default gateway is assumed to be the host"
 fi
 
-have_dig=$(command -v dig)
-[ -n "$have_dig" ] || echo "no dig, so nothing probes UDP 53; install dnsutils/bind-utils in the guest template"
-
 echo
 echo "# the host itself"
 for host in "${hosts[@]}"; do
@@ -107,11 +110,7 @@ for host in "${hosts[@]}"; do
         port=${spec%%:*}
         want blocked "host $host:$port (${spec#*:})" "$(tcp_state "$host" "$port")"
     done
-    if [ -n "$have_dig" ]; then
-        want blocked "host $host:53/udp (dns)" "$(dns_state "$host")"
-    else
-        skip "host $host:53/udp (dns)" "no dig"
-    fi
+    want blocked "host $host:53/udp (dns)" "$(dns_state "$host")"
 done
 
 echo
@@ -125,11 +124,7 @@ for resolver_addr in 169.254.169.253 fd00:ec2::253; do
     label="VPC resolver $resolver_addr"
     [[ $resolver_addr == *:* ]] && label="VPC resolver [$resolver_addr]"
     want blocked "$label:53" "$(tcp_state "$resolver_addr" 53)"
-    if [ -n "$have_dig" ]; then
-        want blocked "$label:53/udp" "$(dns_state "$resolver_addr")"
-    else
-        skip "$label:53/udp" "no dig"
-    fi
+    want blocked "$label:53/udp" "$(dns_state "$resolver_addr")"
 done
 want blocked "link-local router 169.254.1.1:80" "$(tcp_state 169.254.1.1 80)"
 
