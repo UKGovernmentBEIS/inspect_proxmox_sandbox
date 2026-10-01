@@ -53,10 +53,8 @@ want() { # want EXPECTED NAME ACTUAL
 }
 skip() { echo "SKIP  $1 ($2)"; }
 
-# A rejection (TCP RST, or an ICMP unreachable) says something on the path answered instead of
-# swallowing the packet — the target, or any router in between, which is why it is not evidence
-# the target was reached. "Network is unreachable" is the guest's own stack declining to send,
-# every IPv6 target on a guest with IPv6 off included, so it counts as a block. 124 is
+# Only a completed connect is reachable. How the rest fail is the mechanism's business, not
+# this script's: a RST or ICMP error can come from any firewall on the path. 124 is
 # timeout(1)'s exit for the kill.
 tcp_state() {
     local err
@@ -64,8 +62,7 @@ tcp_state() {
     case "$?:$err" in
         0:*) echo reachable ;;
         124:*) echo "blocked(timeout after 3s)" ;;
-        *"Network is unreachable"* | *"not supported"*) echo "blocked(no route from the guest)" ;;
-        *) echo "rejected(${err##*: })" ;;
+        *) echo "blocked(${err##*: })" ;;
     esac
 }
 http_state() {
@@ -86,15 +83,14 @@ dig_rcode() { # server type name [dig args...] -> rcode, empty if nothing answer
     dig @"$server" +time=3 +tries=1 -t "$type" "$name" "$@" 2>/dev/null |
         awk -F'status: ' '/status:/ {split($2, a, ","); print a[1]; exit}'
 }
-# Any rcode other than NOERROR/NXDOMAIN counts as blocked: a REFUSED or SERVFAIL is a live
-# resolver that cannot recurse, which carries no data even though it is not silence.
+# Any rcode is reachable, REFUSED included: it means a resolver got the query, which is how a
+# host whose firewall had failed once looked, with dnsmasq declining in its place.
 dns_state() { # server type name
     local rcode
     rcode=$(dig_rcode "$@")
     case "$rcode" in
-        NOERROR|NXDOMAIN) echo "reachable($rcode)" ;;
         "") echo "blocked(no response)" ;;
-        *) echo "blocked($rcode)" ;;
+        *) echo "reachable($rcode)" ;;
     esac
 }
 
@@ -125,15 +121,8 @@ for host in "${hosts[@]}"; do
         want blocked "host $host:$port (${spec#*:})" "$(tcp_state "$host" "$port")"
     done
     want blocked "Proxmox API https://$host:8006/api2/json/version" "$(http_state "https://$host:8006/api2/json/version")"
-    # The host closes the resolver's port with REJECT so guests fail immediately instead
-    # of hanging on every lookup. Silence here means the rule is a DROP; reachable means
-    # dnsmasq is still serving this address.
-    want rejected "host $host:53 (dns)" "$(tcp_state "$host" 53)"
+    want blocked "host $host:53 (dns)" "$(tcp_state "$host" 53)"
 done
-# Not judged, and blocked on an isolated host: the node firewall accepts only DHCP from guests.
-# So this is not the witness that the probes above found shut ports rather than a dead network
-# — the port-53 rejection is, because a cut path cannot produce one.
-echo "INFO  ICMP to the gateway [$(ping -c1 -W2 "$gw" >/dev/null 2>&1 && echo reachable || echo blocked)]"
 
 echo
 echo "# cloud metadata and link-local"
@@ -182,9 +171,7 @@ else
         want blocked "VPC resolver $resolver_addr:53 over UDP" \
             "$(dns_state "$resolver_addr" A "${names[0]}")"
     done
-    # Under the lockdown the host rejects port 53, so the SDN resolver answers nothing at
-    # all — not even REFUSED. dig never falls back to TCP on silence, so that transport needs
-    # a probe of its own.
+    # dig never falls back to TCP on silence, so that transport needs a probe of its own.
     for name in "${names[@]}"; do
         want blocked "recursion via $gw for $name" "$(dns_state "$gw" A "$name")"
     done
