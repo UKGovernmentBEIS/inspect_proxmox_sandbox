@@ -399,6 +399,21 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_PASSWORD_UNIT
 
+# Clear baked-in SSM command history before the agent starts (bash -c: ExecStart won't glob).
+cat > /etc/systemd/system/proxmox-ami-fixup-ssm.service << 'FIXUP_SSM_UNIT'
+[Unit]
+Description=Clear SSM agent history baked into the AMI
+Before=amazon-ssm-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'rm -rf /var/lib/amazon/ssm/i-* /var/log/amazon/ssm/*'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+FIXUP_SSM_UNIT
+
 # At boot, not baked in: the NIC name (enp39s0, ens5, ...) depends on instance family.
 cat > /usr/local/bin/proxmox-ami-fixup-nat.sh << 'FIXUP_NAT'
 #!/bin/bash
@@ -631,6 +646,7 @@ systemctl enable proxmox-ami-fixup-hostname.service
 systemctl enable proxmox-ami-fixup-certs.service
 systemctl enable proxmox-ami-fixup-nat.service
 systemctl enable proxmox-ami-fixup-password.service
+systemctl enable proxmox-ami-fixup-ssm.service
 systemctl enable proxmox-ami-fixup-firewall.service
 systemctl enable inspect-proxmox-block-cloud-metadata.service
 systemctl enable inspect-proxmox-egress-lockdown.service
