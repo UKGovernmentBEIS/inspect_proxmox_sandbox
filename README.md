@@ -270,6 +270,7 @@ sandbox=SandboxEnvironmentSpec(
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
                 cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
                 vga="none", # optional, default "none" (no emulated display, mitigates the QEMU #4215 escape path). "std" re-adds the vulnerable device — read the warning under "Windows VMs" before using it.
+                tablet=False, # optional, default False. True adds a USB tablet so the noVNC mouse tracks accurately; only useful with vga="std".
                 firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
                 depends_on=("router",), # optional. Names of VMs that must be ready before this one is created. See "Dependency-based VM startup" below.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
