@@ -393,6 +393,15 @@ async def test_cli_cleanup(
     existing_vms = await qemu_commands.list_vms()
     existing_zones = await sdn_commands.list_sdn_zones()
 
+    # can happen if something else (e.g. an interrupted test run) left inspect VMs
+    # behind; abort rather than trying to work around it
+    existing_sweepable = [
+        vm
+        for vm in existing_vms
+        if QemuCommands.vm_is_inspect(vm=vm, template=False)
+    ]
+    assert not existing_sweepable, f"test_cli_cleanup: unexpected pre-existing VMs: {existing_sweepable}"
+
     await setup_sandbox("tcc", sandbox_env_config)
 
     all_vms = await qemu_commands.list_vms()
