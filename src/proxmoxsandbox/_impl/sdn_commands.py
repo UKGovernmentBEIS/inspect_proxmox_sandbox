@@ -15,7 +15,6 @@ from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
 )
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     DhcpRange,
     SdnConfig,
@@ -93,13 +92,11 @@ class SdnCommands(abc.ABC):
     TRACE_NAME = "proxmox_sdn_command"
 
     async_proxmox: AsyncProxmoxAPI
-    task_wrapper: TaskWrapper
     _tracked_sdn_zone_ids: set[str]
     _tracked_ipam_mappings: List[IpamMapping]
 
-    def __init__(self, async_proxmox: AsyncProxmoxAPI, task_wrapper: TaskWrapper):
+    def __init__(self, async_proxmox: AsyncProxmoxAPI):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = task_wrapper
         self._tracked_sdn_zone_ids: set[str] = set()
         self._tracked_ipam_mappings: List[IpamMapping] = []
 
@@ -342,11 +339,15 @@ class SdnCommands(abc.ABC):
         return sdn_zone_id, existing_vnet_aliases
 
     async def do_update_all_sdn(self) -> None:
-        async def update_all_sdn() -> None:
-            await self.async_proxmox.request("PUT", "/cluster/sdn")
-
         with trace_action(self.logger, self.TRACE_NAME, "update all SDN"):
-            await self.task_wrapper.do_action_and_wait_for_tasks(update_all_sdn)
+            # The returned reloadnetworkall task runs each node's srvreload via
+            # pvesh, which waits for it, so waiting on this UPID covers the
+            # reload. But a failed per-node reload is only reported via Perl's
+            # `warn` (printed to the task log, not counted as a Proxmox task
+            # warning), so this task's exitstatus is still OK. See
+            # https://github.com/proxmox/pve-network/blob/ce388c5eec2376576d62a6be708439a64cf7fb62/src/PVE/API2/Network/SDN.pm#L338-L353
+            upid = await self.async_proxmox.request("PUT", "/cluster/sdn")
+            await self.async_proxmox.wait_for_task(upid=upid)
 
     async def list_sdn_zones(self):
         with trace_action(self.logger, self.TRACE_NAME, "get SDN zones"):
