@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- EC2 `launch.sh` sets `InstanceMetadataTags=disabled` so a process on the host can't read the instance's tags over IMDS. Cost: CloudWatch metrics lose the `Name` dimension (instance-id only); re-enable per launch to get it back.
 - Fix: run large storage uploads off the asyncio event loop again (in a worker thread, while staying cancellable), so concurrent VM provisioning no longer starves the loop and times out other Proxmox API calls with `ConnectTimeout`
 - `VmConfig.depends_on`: a VM is created only once the named VMs are ready. See "Dependency-based VM startup" in the README
 - `VmConfig.healthcheck`: compose-style guest command that gates a VM's readiness. See "Healthchecks" in the README

@@ -68,8 +68,9 @@ RUN_ARGS=(
     --security-group-ids "$SECURITY_GROUP_ID"
     # Require IMDSv2 and keep token responses on the host. A hop limit above 1
     # allows nested sandbox VMs to retrieve host metadata credentials.
-    # InstanceMetadataTags lets the OTel collector read the instance Name.
-    --metadata-options "HttpTokens=required,HttpPutResponseHopLimit=1,HttpProtocolIpv6=disabled,InstanceMetadataTags=enabled"
+    # InstanceMetadataTags disabled so a process on the host can't read the
+    # instance's tags over IMDS; cost is pvestatd metrics lose the Name dimension.
+    --metadata-options "HttpTokens=required,HttpPutResponseHopLimit=1,HttpProtocolIpv6=disabled,InstanceMetadataTags=disabled"
     --block-device-mappings
         "DeviceName=/dev/xvda,Ebs={VolumeSize=1024,VolumeType=gp3,DeleteOnTermination=true}"
     --user-data "fileb://$USERDATA_GZ"

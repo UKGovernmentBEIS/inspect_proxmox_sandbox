@@ -87,7 +87,7 @@ aws ec2 run-instances --region "$REGION" \
     --cpu-options "NestedVirtualization=enabled" \
     --subnet-id "$SUBNET_ID" \
     --security-group-ids "$SECURITY_GROUP_ID" \
-    --metadata-options "HttpTokens=required,HttpPutResponseHopLimit=1,HttpProtocolIpv6=disabled,InstanceMetadataTags=enabled"
+    --metadata-options "HttpTokens=required,HttpPutResponseHopLimit=1,HttpProtocolIpv6=disabled,InstanceMetadataTags=disabled"
     # add --iam-instance-profile Name=<profile> if SSM access doesn't come from DHMC
 ```
 
@@ -136,13 +136,12 @@ accepted. Without it the agent still runs, but the endpoint returns 403 —
 harmless, you just get no metrics.
 
 **Per-instance `Name` dimension**: every datapoint is labelled with the EC2
-instance-id. It is additionally labelled with the instance `Name` tag **only if
-the launcher enables instance metadata tags**. Like the hostname and root
-password (see fixup services below), this is a per-launch attribute set at
-`run-instances` time — it is **not** baked into the AMI. Pass
-`InstanceMetadataTags=enabled` in `--metadata-options` (as `launch.sh` does for
-the build instance, and as the everyday-launch example above does) or you get
-instance-id only.
+instance-id. It could also carry the instance `Name` tag, but that needs
+`InstanceMetadataTags=enabled`, which `launch.sh` leaves off so a process on the
+host can't read the instance's tags over IMDS — so metrics carry instance-id
+only. Set it back to `enabled` in `--metadata-options` if you want the `Name`
+dimension; like the hostname and root password it's a per-launch attribute, not
+baked into the AMI.
 
 ## Properly isolating the host
 

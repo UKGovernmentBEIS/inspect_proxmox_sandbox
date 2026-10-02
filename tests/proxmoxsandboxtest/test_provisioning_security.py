@@ -20,7 +20,7 @@ def test_launch_contains_expected_imds_settings() -> None:
 
     assert (
         "HttpTokens=required,HttpPutResponseHopLimit=1,"
-        "HttpProtocolIpv6=disabled,InstanceMetadataTags=enabled"
+        "HttpProtocolIpv6=disabled,InstanceMetadataTags=disabled"
     ) in launch
 
 
