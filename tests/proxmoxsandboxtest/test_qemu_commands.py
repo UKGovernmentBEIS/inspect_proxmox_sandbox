@@ -50,7 +50,7 @@ async def test_simple_vm_non_sandbox(
     assert "inspect" in new_vm["tags"]
     assert "ubuntu24.04" not in new_vm["tags"]
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
 
 
 async def test_none_nic_from_template_tag(
@@ -77,7 +77,7 @@ async def test_none_nic_from_template_tag(
     assert "inspect" in new_vm["tags"]
     assert "builtin-ubuntu24.04" in new_vm["tags"]
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
 
 
 async def test_empty_nic_from_template_tag(
@@ -101,7 +101,7 @@ async def test_empty_nic_from_template_tag(
     new_vm = await qemu_commands.read_vm(new_vm_id)
     assert "net0" not in new_vm
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
 
 
 async def test_none_nic_from_built_in(
@@ -126,7 +126,7 @@ async def test_none_nic_from_built_in(
     assert "net0" in new_vm
     assert auto_sdn_vnet_aliases[0][0] in new_vm["net0"]
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
 
 
 async def test_existing_alias_from_built_in(
@@ -165,7 +165,7 @@ async def test_existing_alias_from_built_in(
     assert "net0" in new_vm
     assert "tea999" in new_vm["net0"]
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
     await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
@@ -209,7 +209,7 @@ async def test_multiple_nic(
     assert vnet_aliases[0][0] in new_vm["net1"]
     assert vnet_aliases[0][1] == "vnetA"
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
     await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
@@ -234,7 +234,7 @@ async def test_empty_nic_from_built_in(
     new_vm = await qemu_commands.read_vm(new_vm_id)
     assert "net0" not in new_vm
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
 
 
 async def test_disk_controller_match_from_built_in(
@@ -261,7 +261,7 @@ async def test_disk_controller_match_from_built_in(
     new_vm = await qemu_commands.read_vm(new_vm_id)
     assert "scsi0" in new_vm
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
 
 
 async def test_disk_controller_mismatch_from_built_in_raises(
@@ -304,7 +304,7 @@ async def test_disk_controller_mismatch_from_template_tag_raises(
         )
 
 
-async def test_from_ova_local(qemu_commands: QemuCommands):
+async def test_from_ova_local(qemu_commands: QemuCommands) -> None:
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=[],
         vm_config=VmConfig(
@@ -321,14 +321,14 @@ async def test_from_ova_local(qemu_commands: QemuCommands):
         built_in_vm_ids={},
     )
     # ping_qemu_agent below is a single call with no retry
-    await qemu_commands.await_vm(new_vm_id, requires_guest_agent=True)
+    await qemu_commands.await_vm(new_vm_id, requires_guest_agent=True, name="test VM")
 
     await qemu_commands.ping_qemu_agent(new_vm_id)
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
     assert "inspect" in new_vm["tags"]
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
 
 
 # test disabled - you need a publicly available OVA that has both:
@@ -337,7 +337,7 @@ async def test_from_ova_local(qemu_commands: QemuCommands):
 # AISI has one internally which can be provided on request, but it is
 # nearly 1GB in size and hence not checked in to this repo.
 @pytest.mark.skip
-async def test_from_ova_uefi_sandbox(qemu_commands: QemuCommands):
+async def test_from_ova_uefi_sandbox(qemu_commands: QemuCommands) -> None:
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=[],
         vm_config=VmConfig(
@@ -349,11 +349,11 @@ async def test_from_ova_uefi_sandbox(qemu_commands: QemuCommands):
         built_in_vm_ids={},
     )
     # ping_qemu_agent below is a single call with no retry
-    await qemu_commands.await_vm(new_vm_id, requires_guest_agent=True)
+    await qemu_commands.await_vm(new_vm_id, requires_guest_agent=True, name="test VM")
 
     await qemu_commands.ping_qemu_agent(new_vm_id)
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")
 
 
 async def test_uefi(
@@ -375,7 +375,7 @@ async def test_uefi(
         built_in_vm_ids=await built_in_vm.known_builtins(),
     )
     # ping_qemu_agent below is a single call with no retry
-    await qemu_commands.await_vm(new_vm_id, requires_guest_agent=True)
+    await qemu_commands.await_vm(new_vm_id, requires_guest_agent=True, name="test VM")
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
     assert new_vm["agent"] == "enabled=1"
@@ -383,4 +383,4 @@ async def test_uefi(
 
     await qemu_commands.ping_qemu_agent(new_vm_id)
 
-    await qemu_commands.destroy_vm(new_vm_id)
+    await qemu_commands.destroy_vm(vm_id=new_vm_id, name="test VM")

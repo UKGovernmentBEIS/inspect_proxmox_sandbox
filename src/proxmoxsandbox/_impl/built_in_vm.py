@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import BinaryIO, Dict, cast, get_args
 from urllib.parse import urlparse
 
+import httpx
 import platformdirs
 import pycdlib
-import pycurl
 import tenacity
 from inspect_ai.util import trace_action
 
@@ -42,6 +42,23 @@ KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.4/kali-linux-2
 KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
 
 STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
+
+
+async def download_to_file(url: str, destination: Path) -> None:
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=httpx.Timeout(connect=30, read=300, write=60, pool=60),
+    ) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            partial = destination.with_name(destination.name + ".part")
+            try:
+                with partial.open("wb") as file_handle:
+                    async for chunk in response.aiter_bytes():
+                        file_handle.write(chunk)
+                partial.replace(destination)
+            finally:
+                partial.unlink(missing_ok=True)
 
 
 class BuiltInVM(abc.ABC):
@@ -264,8 +281,10 @@ runcmd:
                             )
 
             existing_vms = await self.known_builtins()
-            for existing_vm in existing_vms:
-                await self.qemu_commands.destroy_vm(vm_id=existing_vms[existing_vm])
+            for built_in, vm_id in existing_vms.items():
+                await self.qemu_commands.destroy_vm(
+                    vm_id=vm_id, name=f"inspect-{built_in}"
+                )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(inner_clear_builtins)
 
@@ -397,22 +416,8 @@ runcmd:
                 TRACE_NAME,
                 f"upload source image {built_in=} ",
             ):
-                download_path = os.path.join(self.cache_dir, download_filename)
-                with open(download_path, "wb") as f:
-                    c = pycurl.Curl()
-                    c.setopt(c.URL, source_image_source_url)  # type: ignore[attr-defined]
-                    c.setopt(c.WRITEDATA, f)  # type: ignore[attr-defined]
-                    c.setopt(c.FOLLOWLOCATION, True)  # type: ignore[attr-defined]
-                    c.setopt(c.FAILONERROR, True)  # type: ignore[attr-defined]
-                    try:
-                        c.perform()
-                        status_code = c.getinfo(c.RESPONSE_CODE)  # type: ignore[attr-defined]
-                        if status_code >= 400:
-                            raise ValueError(
-                                f"Download failed with status code: {status_code}"
-                            )
-                    finally:
-                        c.close()
+                download_path = Path(self.cache_dir) / download_filename
+                await download_to_file(source_image_source_url, download_path)
 
                 # shell out to tar -xf with subprocess:
                 subprocess.check_call(
@@ -479,6 +484,8 @@ runcmd:
         built_in: str,
         import_source: str,
     ) -> None:
+        name = f"inspect-{built_in}"
+
         with trace_action(
             self.logger,
             TRACE_NAME,
@@ -491,7 +498,7 @@ runcmd:
                     f"/nodes/{self.node}/qemu",
                     json={
                         "vmid": next_available_vm_id,
-                        "name": f"inspect-{built_in}",
+                        "name": name,
                         "node": self.node,
                         "cpu": "host",
                         "memory": 8192,
@@ -527,8 +534,9 @@ runcmd:
 
             await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
 
-            await self.qemu_commands.start_and_await(
-                vm_id=next_available_vm_id, requires_guest_agent=True
+            await self.qemu_commands.start(vm_id=next_available_vm_id)
+            await self.qemu_commands.await_vm(
+                vm_id=next_available_vm_id, requires_guest_agent=True, name=name
             )
 
             # now wait for cloud-init to finish
@@ -570,6 +578,7 @@ runcmd:
             await self.qemu_commands.await_vm(
                 vm_id=next_available_vm_id,
                 requires_guest_agent=True,
+                name=name,
                 status_for_wait="stopped",
             )
 
@@ -588,7 +597,7 @@ runcmd:
                     "GET",
                     f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
                 )
-                return current_config["template"] == 1
+                return current_config.get("template") == 1
 
             await is_template()
 

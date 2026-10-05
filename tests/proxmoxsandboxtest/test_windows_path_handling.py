@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 
 def _make_sandbox(os_type=None) -> ProxmoxSandboxEnvironment:
@@ -19,7 +20,13 @@ def _make_sandbox(os_type=None) -> ProxmoxSandboxEnvironment:
         agent_commands=MagicMock(),
         ipam_mappings=(),
         vm_id=100,
-        all_vm_ids=(100,),
+        name="test-sandbox",
+        all_vms={
+            100: VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                name="test-sandbox",
+            )
+        },
         sdn_zone_id=None,
         instance=None,
         pool_id=None,
@@ -28,27 +35,27 @@ def _make_sandbox(os_type=None) -> ProxmoxSandboxEnvironment:
 
 
 class TestIsWindows:
-    def test_linux_os_type(self):
+    def test_linux_os_type(self) -> None:
         env = _make_sandbox(os_type="l26")
         assert not env._is_windows()
 
-    def test_none_os_type(self):
+    def test_none_os_type(self) -> None:
         env = _make_sandbox(os_type=None)
         assert not env._is_windows()
 
-    def test_win11_os_type(self):
+    def test_win11_os_type(self) -> None:
         env = _make_sandbox(os_type="win11")
         assert env._is_windows()
 
-    def test_win10_os_type(self):
+    def test_win10_os_type(self) -> None:
         env = _make_sandbox(os_type="win10")
         assert env._is_windows()
 
-    def test_w2k8_os_type(self):
+    def test_w2k8_os_type(self) -> None:
         env = _make_sandbox(os_type="w2k8")
         assert env._is_windows()
 
-    def test_solaris_not_windows(self):
+    def test_solaris_not_windows(self) -> None:
         env = _make_sandbox(os_type="solaris")
         assert not env._is_windows()
 
@@ -104,7 +111,7 @@ class TestWriteFileWindowsPaths:
 class TestSampleCleanupWarningMessage:
     """Verify the warning message in sample_cleanup is correctly formatted."""
 
-    def test_warning_fstring_has_no_missing_separator(self):
+    def test_warning_fstring_has_no_missing_separator(self) -> None:
         """Sample_cleanup warning must separate pool_id and cleanup_succeeded.
 
         Regression test: the f-string in sample_cleanup's warning

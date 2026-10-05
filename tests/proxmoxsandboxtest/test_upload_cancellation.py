@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -36,11 +37,12 @@ async def upload_then_cancel() -> None:
         port = server.sockets[0].getsockname()[1]
         api = AsyncProxmoxAPI("unused.test", "user", "password")
         api.api_base_url = f"http://127.0.0.1:{port}"
+        api.ticket, api.csrf_token, api.ticket_date = "t", "c", time.monotonic()
         with TemporaryDirectory() as directory:
             payload = Path(directory) / "payload.iso"
             payload.write_bytes(b"sample upload")
             upload = asyncio.create_task(
-                api.upload_file_with_curl("node", "local", payload, "iso")
+                api.upload_file("node", "local", payload, "iso")
             )
             await asyncio.wait_for(received.wait(), 3)
             upload.cancel()
