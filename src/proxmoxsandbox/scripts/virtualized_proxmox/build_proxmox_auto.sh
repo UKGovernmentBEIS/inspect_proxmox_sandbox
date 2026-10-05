@@ -192,14 +192,15 @@ set -euxo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-PATCHED_VERSION="11.0.3-3+aisi1"
+PATCHED_VERSION="11.0.5-0+aisi1"
 PVE_QEMU_BASE_COMMIT="c3b7a675a52c11a1c4a5873ff2bd1696df7bf98c"
-PVE_QEMU_PATCHES_COMMIT="5e08c14024a6646711fc88529942e5296b9cd676"
+QEMU_COMMIT="19def23adfcece2bc138cda371aa08299d574fe4"
+AHCI_FIX_COMMIT="a2fbf1785b7a464d61c0f60c4ad0a86d82925e5d"
 BUILD_DIR="/root/pve-qemu-build"
 
 INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
-if /usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -qF quirk_mode_page_set_block_size; then
-    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the scsi-disk quirk patch, nothing to do"
+if dpkg --compare-versions "$INSTALLED_VERSION" ge "$PATCHED_VERSION"; then
+    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the backported fixes, nothing to do"
     exit 0
 fi
 
@@ -211,28 +212,55 @@ rm -rf "$BUILD_DIR"
 git clone https://git.proxmox.com/git/pve-qemu.git "$BUILD_DIR"
 cd "$BUILD_DIR"
 git checkout "$PVE_QEMU_BASE_COMMIT"
-git checkout "$PVE_QEMU_PATCHES_COMMIT" -- \
-    debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
-    debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
-mv debian/patches/extra/0007-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch \
-    debian/patches/extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch
-mv debian/patches/extra/0008-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch \
-    debian/patches/extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch
-sed -i '/^extra\/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA\.patch$/a extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch\nextra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch' debian/patches/series
-grep -qF extra/0027-scsi-disk-fix-out-of-bound-read-in-WRITE-SAME.patch debian/patches/series
-grep -qF extra/0028-scsi-hide-MODE-SELECT-block-size-change-behind-a-qui.patch debian/patches/series
-sed -i 's|url = ../mirror_qemu|url = https://git.proxmox.com/git/mirror_qemu.git|' .gitmodules
+sed -i 's|url = ../mirror_qemu|url = https://gitlab.com/qemu-project/qemu.git|' .gitmodules
+git update-index --cacheinfo "160000,$QEMU_COMMIT,qemu"
+sed -i -E '/^extra\/00(03|0[6-9]|1[1-9]|2[0-5])-/d' debian/patches/series
+patches="debian/patches/extra"
+git init -q /root/qemu-ahci-fix
+git -C /root/qemu-ahci-fix fetch -q --depth=3 \
+    https://gitlab.com/qemu-project/qemu.git "$AHCI_FIX_COMMIT"
+git -C /root/qemu-ahci-fix format-patch -1 --stdout --no-signature FETCH_HEAD~1 \
+    > "$patches/0027-hw-ide-ahci-refuse-a-PIO-transfer-with-no-command-he.patch"
+git -C /root/qemu-ahci-fix format-patch -1 --stdout --no-signature FETCH_HEAD \
+    > "$patches/0028-hw-ide-ahci-clear-cur_cmd-when-the-command-list-is-u.patch"
+rm -rf /root/qemu-ahci-fix
+
+anchor="extra/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA.patch"
+grep -qxF "$anchor" debian/patches/series
+sed -i "\|^$anchor\$|a\\
+extra/0027-hw-ide-ahci-refuse-a-PIO-transfer-with-no-command-he.patch\\
+extra/0028-hw-ide-ahci-clear-cur_cmd-when-the-command-list-is-u.patch" debian/patches/series
 sed -i 's/clean -xdfi/clean -xdff/' Makefile
 
 mv debian/changelog debian/changelog.orig
 cat > debian/changelog <<'CHANGELOG_END'
+pve-qemu-kvm (11.0.5-0+aisi1) trixie; urgency=high
+
+  * rebase onto upstream QEMU 11.0.5, which carries the virtio-net RSC
+    fixes (CVE-2026-66900, CVE-2026-63321), the VAPIC fixes and the
+    io-channel-socket zero-length write fix (CVE-2026-84788); drop the
+    stable patches it already includes.
+  * backport the AHCI fixes refusing a PIO transfer with no command header
+    and clearing cur_cmd when the command list is unmapped (upstream qemu
+    commits d7f16bad8f and a2fbf1785b).
+
+ -- AISI <coretech@dsit.gov.uk>  Wed, 30 Sep 2026 14:00:00 +0000
+
+pve-qemu-kvm (11.0.3-3+aisi2) trixie; urgency=high
+
+  * backport VAPIC region confinement, the matching MemoryRegion unref fix
+    and the io-channel-socket zero-length write fix (CVE-2026-84788) from
+    pve-qemu master, ahead of the official 11.1.1-1 release.
+
+ -- AISI <coretech@dsit.gov.uk>  Wed, 30 Sep 2026 10:00:00 +0000
+
 pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
 
   * backport scsi-disk WRITE SAME out-of-bounds read fix and MODE SELECT
     block size quirk from pve-qemu master (upstream qemu commits merged
     2026-08-27), ahead of the official 11.1.1-1 release.
 
- -- AISI <platform@example.com>  Thu, 17 Sep 2026 13:55:04 +0000
+ -- AISI <coretech@dsit.gov.uk>  Thu, 17 Sep 2026 13:55:04 +0000
 
 CHANGELOG_END
 cat debian/changelog.orig >> debian/changelog

@@ -161,7 +161,7 @@ response body to distinguish this from genuine errors.
 ### Cleanup
 
 There are two paths for cleaning up resources. The normal, "happy", path is via `sample_cleanup()`, which uses
-`ProxmoxSandboxEnvironment`'s `all_vm_ids`, `sdn_zone_id`, and `all_ipam_mappings` fields. These are populated
+`ProxmoxSandboxEnvironment`'s `all_vms`, `sdn_zone_id`, and `all_ipam_mappings` fields. These are populated
 during sample setup and passed explicitly to `InfraCommands.delete_sdn_and_vms()`.
 
 However, the user can press Ctrl-C, per the [Inspect docs](https://inspect.aisi.org.uk/sandboxing.html#environment-cleanup).

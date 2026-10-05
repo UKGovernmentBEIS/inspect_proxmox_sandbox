@@ -8,7 +8,6 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryFile
@@ -23,6 +22,7 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 
 class Fault(BaseModel):
@@ -68,7 +68,7 @@ class Scenario(BaseModel):
     http_error: str | None = None
     input: str | None = None
     command: list[str] = ["echo", "hello"]
-    local_uploads: bool = False
+    iso_uploads: bool = False
     faults: list[Fault] = []
 
 
@@ -181,45 +181,16 @@ class GuestReplies:
             )
             await self.apply_fault("iso_detach" if empty else "iso_attach")
             data = {}
+        elif route == "upload":
+            if not scenario.iso_uploads:
+                return httpx.Response(500, text="ISO uploads disabled by scenario")
+            data = {}
         elif request.method == "DELETE" and "/content/" in request.url.path:
             await self.apply_fault("iso_delete")
             data = {}
         else:
             raise AssertionError(f"unexpected HTTP request: {request.method} {route}")
         return httpx.Response(200, json={"data": data})
-
-
-@asynccontextmanager
-async def local_upload_peer(api: AsyncProxmoxAPI, enabled: bool):
-    if not enabled:
-        yield
-        return
-
-    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        try:
-            headers = await reader.readuntil(b"\r\n\r\n")
-            length = next(
-                int(line.split(b":", 1)[1])
-                for line in headers.split(b"\r\n")
-                if line.lower().startswith(b"content-length:")
-            )
-            if b"expect: 100-continue" in headers.lower():
-                writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
-                await writer.drain()
-            await reader.readexactly(length)
-            body = b'{"data": {}}'
-            writer.write(
-                f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode()
-                + body
-            )
-            await writer.drain()
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-    async with await asyncio.start_server(serve, "127.0.0.1", 0) as server:
-        api.api_base_url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
-        yield
 
 
 def make_sandbox(
@@ -232,7 +203,13 @@ def make_sandbox(
         agent_commands=AgentCommands(api, "test-node"),
         ipam_mappings=(),
         vm_id=100,
-        all_vm_ids=(100,),
+        name="test-sandbox",
+        all_vms={
+            100: VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                name="test-sandbox",
+            )
+        },
         sdn_zone_id=None,
         os_type=os_type,
     )
@@ -270,10 +247,9 @@ async def exercise(scenario: Scenario) -> Observation:
                     content=base64.b64encode(content).decode(),
                     truncated=truncated,
                 )
-            async with local_upload_peer(api, scenario.local_uploads):
-                result = await sandbox.exec(
-                    scenario.command, input=scenario.input, timeout=scenario.timeout
-                )
+            result = await sandbox.exec(
+                scenario.command, input=scenario.input, timeout=scenario.timeout
+            )
             return Observation(
                 kind="exec",
                 returncode=result.returncode,

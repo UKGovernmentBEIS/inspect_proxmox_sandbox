@@ -70,7 +70,7 @@ class LocalStorageCommands(abc.ABC):
                         return
 
         async def do_upload():
-            await self.async_proxmox.upload_file_with_curl(
+            await self.async_proxmox.upload_file(
                 self.node, LOCAL_STORAGE, file, content_type, filename=filename
             )
 
