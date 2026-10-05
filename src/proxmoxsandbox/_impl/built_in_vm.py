@@ -544,6 +544,7 @@ runcmd:
                         "net0": f"virtio,bridge={STATIC_VNET_ID}",
                         "serial0": "socket",
                         "vga": "none",
+                        "tablet": 0,
                         "start": False,
                         "agent": "enabled=1",
                     },
