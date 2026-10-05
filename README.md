@@ -495,6 +495,9 @@ headless too — its template display setting is overridden to `none`.
 > graphical console or GUI framebuffer, and using it re-introduces the escape
 > path for that VM.
 >
+> If you do enable `vga`, also set `tablet=True`: without the USB tablet the
+> noVNC mouse pointer is inaccurate and buggy.
+>
 > Do **not** reach for `vga="std"` on Windows just because the console looks
 > blank. Windows has no serial *login* by default, so a headless Windows VM
 > shows an empty serial terminal even though the guest agent is working — that is
