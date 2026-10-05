@@ -69,7 +69,8 @@ qm create "$VMID" \
     --scsihw virtio-scsi-single \
     --agent enabled=1 \
     --serial0 socket \
-    --vga none
+    --vga none \
+    --tablet 0
 
 qm importdisk "$VMID" "$IMG_PATH" "$STORAGE" --format qcow2
 qm set "$VMID" \

@@ -679,6 +679,8 @@ class QemuCommands(abc.ABC):
         json_for_create["name"] = vm_config.name
         json_for_create["serial0"] = "socket"
         json_for_create["vga"] = vm_config.vga
+        # Proxmox defaults the tablet on, so this must be sent explicitly.
+        json_for_create["tablet"] = 1 if vm_config.tablet else 0
         if vm_config.uefi_boot:
             json_for_create["efidisk0"] = (
                 f"{self.image_storage}:0,efitype=4m,pre-enrolled-keys=0"
