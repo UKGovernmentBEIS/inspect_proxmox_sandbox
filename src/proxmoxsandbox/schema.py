@@ -3,6 +3,7 @@
 import json
 import os
 import re
+from ipaddress import ip_network
 from os import getenv
 from pathlib import Path
 from typing import (
@@ -28,6 +29,9 @@ from pydantic.networks import IPvAnyAddress, IPvAnyNetwork
 from pydantic_extra_types.mac_address import MacAddress
 
 from proxmoxsandbox._impl.dependency_graph import reject_cycles
+
+# Carrier-grade NAT space, carved into /31s between isolated switch VMs.
+ISOLATED_LINK_NETWORK = ip_network("100.64.0.0/16")
 
 
 class DhcpRange(BaseModel, frozen=True):
@@ -90,10 +94,41 @@ class SdnConfig(BaseModel, frozen=True):
         use_pve_ipam_dnsnmasq: Whether to use Proxmox VE's built-in IPAM and DNSmasq
             Set to False if you are using e.g. your own pfsense instance for IPAM
             (recommended)
+        isolated: Experimental. If True, no Proxmox SDN is created. Each vnet
+            gets a switch VM (DHCP from `dhcp_ranges`, gateway at `gateway`, routing
+            to the other vnets) and guest NICs connect to it over host unix sockets,
+            so guest traffic never touches a host network interface. Each vnet
+            needs a unique alias and exactly one IPv4 subnet with snat=False.
     """
 
     vnet_configs: Tuple[VnetConfig, ...]
     use_pve_ipam_dnsnmasq: bool = True
+    isolated: bool = False
+
+    @model_validator(mode="after")
+    def _validate_isolated(self) -> "SdnConfig":
+        if not self.isolated:
+            return self
+        aliases = [v.alias for v in self.vnet_configs]
+        if None in aliases or len(set(aliases)) != len(aliases):
+            raise ValueError("isolated vnets need unique, non-empty aliases")
+        for vnet in self.vnet_configs:
+            if len(vnet.subnets) != 1:
+                raise ValueError(f"isolated vnet {vnet.alias} needs exactly one subnet")
+            subnet = vnet.subnets[0]
+            if subnet.snat:
+                raise ValueError(
+                    f"isolated vnet {vnet.alias} has snat=True, but isolated "
+                    "networks have no route off the range"
+                )
+            if subnet.cidr.version != 4:
+                raise ValueError(f"isolated vnet {vnet.alias}: only IPv4 is supported")
+            if subnet.cidr.overlaps(ISOLATED_LINK_NETWORK):
+                raise ValueError(
+                    f"isolated vnet {vnet.alias} overlaps {ISOLATED_LINK_NETWORK}, "
+                    "which is reserved for links between switch VMs"
+                )
+        return self
 
 
 SdnConfigType: TypeAlias = Union[SdnConfig, Literal["auto"], None]

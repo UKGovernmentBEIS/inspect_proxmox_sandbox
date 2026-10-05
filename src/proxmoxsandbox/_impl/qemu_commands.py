@@ -12,6 +12,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
 )
+from proxmoxsandbox._impl.isolated_network import check_info_network
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
@@ -355,7 +356,13 @@ class QemuCommands(abc.ABC):
         sdn_vnet_aliases: VnetAliases,
         vm_config: VmConfig,
         built_in_vm_ids: Dict[str, int],
+        isolated_args: str | None = None,
     ) -> int:
+        """Create and start a VM.
+
+        isolated_args: if set, the VM gets no Proxmox netX devices and this
+            string becomes its QEMU `args` (see isolated_network).
+        """
         if (
             vm_config.os_type != "l26"
             and vm_config.vm_source_config.ova is None
@@ -366,13 +373,17 @@ class QemuCommands(abc.ABC):
             )
 
         vm_id_to_clone, preserve_tags = await self._resolve_source_template(
-            vm_config, sdn_vnet_aliases, built_in_vm_ids
+            vm_config,
+            sdn_vnet_aliases,
+            built_in_vm_ids,
+            isolated=isolated_args is not None,
         )
         return await self.clone_vm_and_start(
             vm_config=vm_config,
             vm_id_to_clone=vm_id_to_clone,
             sdn_vnet_aliases=sdn_vnet_aliases,
             preserve_tags=preserve_tags,
+            isolated_args=isolated_args,
         )
 
     async def _resolve_source_template(
@@ -380,6 +391,7 @@ class QemuCommands(abc.ABC):
         vm_config: VmConfig,
         sdn_vnet_aliases: VnetAliases,
         built_in_vm_ids: Dict[str, int],
+        isolated: bool = False,
     ) -> Tuple[int, bool]:
         """Find or make the template this VmConfig clones from.
 
@@ -471,6 +483,7 @@ class QemuCommands(abc.ABC):
                     sdn_vnet_aliases=sdn_vnet_aliases,
                     vm_id=new_vm_template_id,
                     extra_tags=[ova_tag],
+                    isolated_args="" if isolated else None,
                 )
 
                 async def convert_to_template() -> None:
@@ -523,8 +536,29 @@ class QemuCommands(abc.ABC):
         sdn_vnet_aliases: VnetAliases,
         vm_id: int,
         extra_tags: List[str] = [],
+        isolated_args: str | None = None,
     ) -> None:
+        async def update_isolated_network(args: str) -> None:
+            # Always strip netX, including any a template brought with it.
+            await self.remove_existing_nics(vm_id)
+            if args:
+                await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{vm_id}/config",
+                    json={"args": args},
+                )
+            else:
+                await self.async_proxmox.request(
+                    "PUT",
+                    f"/nodes/{self.node}/qemu/{vm_id}/config",
+                    body_content="delete=args",
+                    content_type="application/x-www-form-urlencoded",
+                )
+
         async def update_network() -> None:
+            if isolated_args is not None:
+                await update_isolated_network(isolated_args)
+                return
             network_update_json: ProxmoxJsonDataType = {}
 
             nic_prefix = (
@@ -624,6 +658,7 @@ class QemuCommands(abc.ABC):
         vm_id_to_clone: int,
         sdn_vnet_aliases: VnetAliases,
         preserve_tags: bool,
+        isolated_args: str | None = None,
     ) -> int:
         """Clone, configure and start a VM; it is tracked for cleanup once cloned."""
         new_vm_id = await self.find_next_available_vm_id()
@@ -650,8 +685,14 @@ class QemuCommands(abc.ABC):
                 extra_tags += existing_config["tags"].split(";")
 
         await self.configure_network_and_tags(
-            vm_config, sdn_vnet_aliases, new_vm_id, extra_tags=extra_tags
+            vm_config,
+            sdn_vnet_aliases,
+            new_vm_id,
+            extra_tags=extra_tags,
+            isolated_args=isolated_args,
         )
+        if isolated_args is not None:
+            await self.verify_isolated_config(new_vm_id, isolated_args)
 
         async def other_updates() -> None:
             other_update_json: ProxmoxJsonDataType = {}
@@ -691,6 +732,29 @@ class QemuCommands(abc.ABC):
             # enumerate the AHCI controller. Then runtime media-change
             # works to swap ISOs in/out.
             json_for_create["sata5"] = "none,media=cdrom"
+
+    async def verify_isolated_config(self, vm_id: int, expected_args: str) -> None:
+        """Refuse to start a VM whose config could put it on a host network."""
+        config = await self.read_vm(vm_id)
+        nets = sorted(k for k in config if re.fullmatch(r"net\d+", k))
+        if nets:
+            raise RuntimeError(f"isolated VM {vm_id} still has {nets}")
+        if config.get("args", "") != expected_args:
+            raise RuntimeError(
+                f"isolated VM {vm_id} has args {config.get('args')!r}, "
+                f"expected {expected_args!r}"
+            )
+
+    async def verify_isolated_runtime(
+        self, vm_id: int, expected_sockets: Collection[str]
+    ) -> None:
+        """Check the running QEMU's netdevs, not just what Proxmox was told."""
+        output = await self.async_proxmox.request(
+            "POST",
+            f"/nodes/{self.node}/qemu/{vm_id}/monitor",
+            json={"command": "info network"},
+        )
+        check_info_network(str(output), list(expected_sockets))
 
     async def ping_qemu_agent(self, vm_id: int):
         await self.async_proxmox.request(

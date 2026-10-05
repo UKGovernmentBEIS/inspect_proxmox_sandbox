@@ -61,7 +61,7 @@ class Harness:
 
         infra.create_ipam_mappings = AsyncMock(side_effect=ipam)
 
-        async def create(sdn_vnet_aliases, vm_config, built_in_vm_ids):
+        async def create(sdn_vnet_aliases, vm_config, built_in_vm_ids, isolated_args):
             vm_id = next(ids)
             self._names[vm_id] = vm_config.name
             self.events.append(("create", vm_config.name))
@@ -128,7 +128,7 @@ async def test_no_dependencies_creates_all_before_any_readiness():
     assert h.created() == ["a", "b", "c"]
     for name in ("a", "b", "c"):
         h.ready[name].set()
-    result, zone, ipam = await task
+    result, zone, ipam, _ = await task
     assert [cfg.name for _, cfg in result] == ["a", "b", "c"]
     assert [vm_id for vm_id, _ in result] == [100, 101, 102]
 
@@ -168,7 +168,7 @@ async def test_forward_reference_creates_dependency_first():
     assert h.created() == ["b", "c", "a"]
     h.ready["a"].set()
     h.ready["b"].set()
-    result, _, _ = await task
+    result, _, _, _ = await task
     # Declaration order is preserved in the result regardless of creation order.
     assert [cfg.name for _, cfg in result] == ["a", "b", "c"]
 
@@ -216,8 +216,12 @@ async def test_failure_during_create_stops_further_creates():
     )
     original_create = h.infra.qemu_commands.create_and_start_vm.side_effect
 
-    async def create_and_fail_v0(sdn_vnet_aliases, vm_config, built_in_vm_ids):
-        vm_id = await original_create(sdn_vnet_aliases, vm_config, built_in_vm_ids)
+    async def create_and_fail_v0(
+        sdn_vnet_aliases, vm_config, built_in_vm_ids, isolated_args
+    ):
+        vm_id = await original_create(
+            sdn_vnet_aliases, vm_config, built_in_vm_ids, isolated_args
+        )
         if vm_config.name == "v1":
             # v0's readiness task reports failure while v1 is still being cloned.
             h.ready["v0"].set()

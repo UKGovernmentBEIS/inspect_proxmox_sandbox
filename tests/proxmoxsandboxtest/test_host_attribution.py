@@ -63,6 +63,7 @@ def _make_mock_infra():
             [(101, vm_config_mock)],
             "zone1",
             (),
+            (),
         )
     )
     infra.delete_sdn_and_vms = AsyncMock()
