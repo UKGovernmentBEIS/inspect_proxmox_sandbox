@@ -10,6 +10,7 @@ from proxmoxsandbox.schema import (
     VmConfig,
     VmNicConfig,
     VmSourceConfig,
+    VnetConfig,
 )
 
 
@@ -42,6 +43,23 @@ def test_vmnicconfig_minimal():
     nic = VmNicConfig(vnet_alias="test")
     assert nic.mac is None
     assert nic.ipv4 is None
+    assert nic.vlan_tag is None
+
+
+def test_vnetconfig_not_vlan_aware_by_default():
+    assert VnetConfig(alias="lan").vlan_aware is False
+
+
+@pytest.mark.parametrize("vlan_tag", [1, 2, 12, 4094])
+def test_vmnicconfig_vlan_tag(vlan_tag):
+    nic = VmNicConfig(vnet_alias="lan", vlan_tag=vlan_tag)
+    assert nic.vlan_tag == vlan_tag
+
+
+@pytest.mark.parametrize("vlan_tag", [-1, 0, 4095, 2.5, True, "2"])
+def test_vmnicconfig_rejects_invalid_vlan_tag(vlan_tag):
+    with pytest.raises(ValidationError, match="vlan_tag"):
+        VmNicConfig(vnet_alias="lan", vlan_tag=vlan_tag)
 
 
 _SOURCE = VmSourceConfig(built_in="ubuntu24.04")
