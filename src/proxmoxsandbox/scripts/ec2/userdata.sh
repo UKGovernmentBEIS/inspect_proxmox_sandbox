@@ -268,7 +268,7 @@ STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
 cat > "$STAMP" << 'STAMP_CONTRACT'
 #!/bin/bash
 set -euo pipefail
-C=aisi2
+C=aisi3
 F=/usr/share/perl5/PVE/pvecfg.pm
 before=$(md5sum < "$F")
 sed -i -E "s/\.aisi[0-9]+//g
@@ -432,28 +432,64 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_NAT_UNIT
 
-# vnet names are generated per sample, so only default.disable_ipv6 can reach them. The
-# management NIC is already up and keeps its own setting.
+# Apply to future guest interfaces; leave the running management NIC unchanged.
 cat > /etc/sysctl.d/99-inspect-proxmox-disable-ipv6.conf << 'SYSCTL_V6'
 net.ipv6.conf.default.disable_ipv6 = 1
 SYSCTL_V6
 
-# Confine sandbox guests at the host's forwarding layer. Kept identical to the
-# on-first-boot heredoc in scripts/virtualized_proxmox/build_proxmox_auto.sh.
+# Keep in sync with the virtualized provisioner.
+mkdir -p /etc/inspect-proxmox
+cat > /etc/inspect-proxmox/host-local.rules << 'HOST_LOCAL_RULES'
+-A INSP-SANDBOX-HOST-LOCAL -p udp --sport 68 --dport 67 -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -p udp --dport 53 -m addrtype --dst-type LOCAL -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -p tcp --dport 53 -m addrtype --dst-type LOCAL -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -p icmp --icmp-type echo-request -m addrtype --dst-type LOCAL -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -m addrtype --dst-type LOCAL -j DROP
+-A INSP-SANDBOX-HOST-LOCAL -j RETURN
+HOST_LOCAL_RULES
+
 cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
 #!/bin/bash
 set -euo pipefail
 
-# RFC 3927: a router must not forward IPv4 link-local. The destination drop goes in raw
-# PREROUTING, ahead of any FORWARD ACCEPT; host requests are OUTPUT so unaffected.
+CHAIN=INSP-SANDBOX-HOST-LOCAL
+C=isp
+MGMT=$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
+[ -n "$MGMT" ] || exit 1
+for NIC in $MGMT; do
+    [ ! -d "/sys/class/net/$NIC/brif" ] || ls "/sys/class/net/$NIC"/brif/*/../device >/dev/null 2>&1 || exit 1
+done
+JUMPS=$(iptables -w -t raw -S PREROUTING |
+    sed -n "s/^-A PREROUTING -m comment --comment $C -j $CHAIN$/-D PREROUTING -m comment --comment $C -j $CHAIN/p")
+{
+    cat <<RULES
+*raw
+:$CHAIN - [0:0]
+-F $CHAIN
+-A $CHAIN -i lo -j RETURN
+RULES
+    for NIC in $MGMT; do
+        if [ -d "/sys/class/net/$NIC/brif" ]; then
+            for MEMBER in "/sys/class/net/$NIC"/brif/*; do
+                [ -e "/sys/class/net/${MEMBER##*/}/device" ] || continue
+                echo "-A $CHAIN -m physdev --physdev-in ${MEMBER##*/} -j RETURN"
+            done
+        else
+            echo "-A $CHAIN -i $NIC -j RETURN"
+        fi
+    done
+    cat /etc/inspect-proxmox/host-local.rules || exit 1
+    echo "$JUMPS"
+    echo "-I PREROUTING 1 -m comment --comment $C -j $CHAIN"
+    echo COMMIT
+} | iptables-restore -w --noflush
+
+# Guest link-local and IPv6 forwarding are unsupported.
 iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
-    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
-# The source drop must be FORWARD, not raw PREROUTING: the latter would also drop the
-# host's own on-link replies (IMDS/DNS) and break it.
+    || iptables -w -t raw -I PREROUTING 2 -d 169.254.0.0/16 -j DROP
 iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
     || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
 
-# Guest v6 is unsupported; FORWARD sees only transit, so the host's own v6 is intact.
 if command -v ip6tables >/dev/null; then
     ip6tables -w -C FORWARD -j DROP 2>/dev/null \
         || ip6tables -w -A FORWARD -j DROP
@@ -463,18 +499,20 @@ chmod +x /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
 
 cat > /etc/systemd/system/inspect-proxmox-block-cloud-metadata.service << 'BLOCK_METADATA_UNIT'
 [Unit]
-Description=Confine sandbox guests (link-local forwarding block, IPv6 drop)
+Description=Confine sandbox guests
 After=network-online.target pve-firewall.service proxmox-firewall.service
 Wants=network-online.target
-Before=proxmox-ami-fixup-nat.service
+Before=proxmox-ami-fixup-nat.service pvedaemon.service pveproxy.service pve-guests.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
+ExecReload=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=pvedaemon.service pveproxy.service pve-guests.service
 BLOCK_METADATA_UNIT
 
 # NOTE: keep in sync with scripts/virtualized_proxmox/build_proxmox_auto.sh.
@@ -583,11 +621,8 @@ Type=oneshot
 ExecStart=/bin/sh -c 'echo "egress lockdown failed: stopping and masking pveproxy/pvedaemon; see journalctl -u inspect-proxmox-egress-lockdown.service" >&2; systemctl mask --runtime pveproxy.service pvedaemon.service; systemctl stop pveproxy.service pvedaemon.service'
 EGRESS_LOCKDOWN_HALT_UNIT
 
-# Host isolation. See root README.
-# Re-applied every boot: node and NIC names change per launch, so AMI-baked node-scoped
-# rules are orphaned. Delete ours (matched by comment) and recreate, so state converges.
-# NOTE: keep these rules in sync with the on-first-boot heredoc in
-# scripts/virtualized_proxmox/build_proxmox_auto.sh.
+# Recreate node-scoped rules after hostname/NIC changes; see README.
+# Keep in sync with the virtualized provisioner.
 cat > /usr/local/bin/proxmox-ami-fixup-firewall.sh << 'FIXUP_FIREWALL'
 #!/bin/bash
 set -euo pipefail
