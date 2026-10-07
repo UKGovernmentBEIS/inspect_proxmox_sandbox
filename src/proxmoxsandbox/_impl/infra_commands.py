@@ -22,6 +22,11 @@ from rich.table import Table
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.healthcheck import HealthCheckExecutor, HealthCheckRunner
+from proxmoxsandbox._impl.isolated_network import (
+    IsolatedNetworkPlan,
+    SwitchPlan,
+    plan_isolated_network,
+)
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, vm_label
 from proxmoxsandbox._impl.sdn_commands import (
     IpamMapping,
@@ -35,8 +40,11 @@ from proxmoxsandbox._impl.vm_scheduler import VmScheduler
 from proxmoxsandbox.schema import (
     HealthCheck,
     ProxmoxSandboxEnvironmentConfig,
+    SdnConfig,
     VmConfig,
 )
+
+VmsWithIds = Tuple[Tuple[int, VmConfig], ...]
 
 
 class ProxmoxTarget(NamedTuple):
@@ -145,12 +153,17 @@ class InfraCommands(abc.ABC):
 
     async def create_sdn_and_vms(
         self, proxmox_ids_start: str, config: ProxmoxSandboxEnvironmentConfig
-    ) -> Tuple[Tuple[Tuple[int, VmConfig], ...], str | None, Tuple[IpamMapping, ...]]:
+    ) -> Tuple[VmsWithIds, str | None, Tuple[IpamMapping, ...], VmsWithIds]:
         """Create the SDN, then create/start VMs in dependency order.
 
-        Results are in `vms_config` order regardless of the order VMs were
-        created in.
+        Returns (sample VMs, SDN zone, IPAM mappings, infrastructure VMs). Sample
+        VMs are in `vms_config` order regardless of creation order.
+        Infrastructure VMs (isolated switch VMs) need cleaning up but are not
+        sandboxes.
         """
+        if isinstance(config.sdn_config, SdnConfig) and config.sdn_config.isolated:
+            return await self._create_isolated_network_and_vms(config)
+
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, config.sdn_config
         )
@@ -174,13 +187,70 @@ class InfraCommands(abc.ABC):
             config.vms_config, vnet_aliases, known_builtins
         )
 
-        return vm_configs_with_ids, sdn_zone_id, tuple(ipam_mappings)
+        return vm_configs_with_ids, sdn_zone_id, tuple(ipam_mappings), ()
+
+    async def _create_isolated_network_and_vms(
+        self, config: ProxmoxSandboxEnvironmentConfig
+    ) -> Tuple[VmsWithIds, None, Tuple[IpamMapping, ...], VmsWithIds]:
+        plan = plan_isolated_network(config)
+        switch_template_id = await self.built_in_vm.ensure_isolated_switch_exists()
+        known_builtins = await self.built_in_vm.known_builtins()
+
+        switch_vms: List[Tuple[int, VmConfig]] = []
+        for switch in plan.switches:
+            vm_config = switch.vm_config
+            vm_id = await self.qemu_commands.clone_vm_and_start(
+                vm_config=vm_config,
+                vm_id_to_clone=switch_template_id,
+                sdn_vnet_aliases=[],
+                preserve_tags=False,
+                isolated_args=switch.args,
+            )
+            switch_vms.append((vm_id, vm_config))
+            await self.qemu_commands.verify_isolated_runtime(
+                vm_id, plan.expected_sockets(switch.args)
+            )
+
+        for (vm_id, vm_config), switch in zip(switch_vms, plan.switches):
+            await self.qemu_commands.await_vm(
+                vm_id, requires_guest_agent=True, name=vm_config.name
+            )
+            await self._configure_switch(vm_id, vm_config.name, switch)
+
+        vm_configs_with_ids = await self._start_vms_in_dependency_order(
+            config.vms_config, [], known_builtins, plan=plan
+        )
+        return vm_configs_with_ids, None, (), tuple(switch_vms)
+
+    async def _configure_switch(
+        self, vm_id: int, name: str, switch: SwitchPlan
+    ) -> None:
+        # Imported here: the agent module pulls in the environment module.
+        from proxmoxsandbox._impl.agent_commands import AgentCommands
+
+        agent = AgentCommands(self.async_proxmox, self.node)
+        pid = await agent.exec_command(vm_id, ["sh", "-c", switch.configure_script()])
+        deadline = asyncio.get_running_loop().time() + 120
+        while True:
+            status = await agent.get_agent_exec_status(vm_id, pid)
+            if status.exited:
+                break
+            if asyncio.get_running_loop().time() > deadline:
+                raise TimeoutError(f"switch VM {name} configuration timed out")
+            await asyncio.sleep(1)
+        if status.exitcode != 0:
+            raise RuntimeError(
+                f"switch VM {name} configuration failed ({status.exitcode}): "
+                f"{status.err_data}"
+            )
+        self.logger.info(f"Isolated switch VM {name} (ID={vm_id}) configured")
 
     async def _start_vms_in_dependency_order(
         self,
         vms_config: Tuple[VmConfig, ...],
         vnet_aliases: VnetAliases,
         known_builtins: Dict[str, int],
+        plan: IsolatedNetworkPlan | None = None,
     ) -> Tuple[Tuple[int, VmConfig], ...]:
         """Create every VM once its dependencies are ready; wait for all to be ready.
 
@@ -201,12 +271,18 @@ class InfraCommands(abc.ABC):
                 self.logger.info(
                     f"Creating VM {name} ({len(created) + 1}/{len(vms_config)})"
                 )
+                isolated_args = plan.guest_args(name) if plan else None
                 vm_id = await self.qemu_commands.create_and_start_vm(
                     sdn_vnet_aliases=vnet_aliases,
                     vm_config=vm_config,
                     built_in_vm_ids=known_builtins,
+                    isolated_args=isolated_args,
                 )
                 created[name] = (vm_id, vm_config)
+                if isolated_args is not None:
+                    await self.qemu_commands.verify_isolated_runtime(
+                        vm_id, IsolatedNetworkPlan.expected_sockets(isolated_args)
+                    )
                 readiness_tasks.append(
                     asyncio.create_task(
                         self._await_vm_ready(scheduler, vm_config, vm_id)

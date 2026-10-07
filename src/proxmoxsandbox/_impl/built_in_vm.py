@@ -17,6 +17,7 @@ from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.isolated_network import SWITCH_TEMPLATE_TAG
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
@@ -47,6 +48,25 @@ KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.4/kali-linux-2
 KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
 
 STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
+
+# Baked with internet on the static SDN like the other built-ins; the network
+# config is then removed so clones come up with every NIC unconfigured and no
+# default route, ready for isolated_network's configure_script.
+ISOLATED_SWITCH_USER_DATA = """#cloud-config
+package_update: true
+packages:
+  - qemu-guest-agent
+  - dnsmasq-base
+runcmd:
+  - [ systemctl, enable, qemu-guest-agent ]
+  - [ systemctl, start, qemu-guest-agent ]
+  - [ systemctl, mask, systemd-networkd-wait-online.service ]
+  # Nothing on a switch VM should listen except dnsmasq's DHCP on br0.
+  - [ systemctl, mask, ssh.service, ssh.socket, systemd-resolved.service ]
+  - [ sh, -c, "rm -f /etc/netplan/*.yaml /etc/network/interfaces.d/*cloud-init* /etc/systemd/network/*cloud-init*" ]
+  - [ sh, -c, "systemctl disable systemd-networkd.service systemd-networkd.socket || true" ]
+  - [ sh, -c, "echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-isoswitch.cfg" ]
+"""  # noqa: E501
 
 
 async def download_to_file(url: str, destination: Path) -> None:
@@ -374,6 +394,23 @@ runcmd:
         else:
             raise ValueError(f"Unknown built-in {built_in_name}")
 
+    async def ensure_isolated_switch_exists(self) -> int:
+        """Template for isolated_network's switch VMs; baked on first use."""
+        existing = await self.qemu_commands._find_inspect_template_id(
+            tag=SWITCH_TEMPLATE_TAG
+        )
+        if existing is not None:
+            return existing
+        await self.ensure_version(9)
+        vm_id = await self.qemu_commands.find_next_available_vm_id()
+        await self.ensure_exists_from_qcow2(
+            next_available_vm_id=vm_id,
+            built_in=SWITCH_TEMPLATE_TAG.removeprefix("builtin-"),
+            source_image_source_url=DEBIAN_13_URL,
+            user_data=ISOLATED_SWITCH_USER_DATA,
+        )
+        return vm_id
+
     async def ensure_exists_from_ova(
         self,
         next_available_vm_id: int,
@@ -400,6 +437,7 @@ runcmd:
         next_available_vm_id: int,
         built_in: str,
         source_image_source_url: str,
+        user_data: str = DEFAULT_USER_DATA,
     ) -> None:
         source_image_name = Path(urlparse(source_image_source_url).path).name
 
@@ -410,7 +448,10 @@ runcmd:
         await self.ensure_static_sdn_exists()
 
         await self.startup_vm(
-            next_available_vm_id, built_in, f"import/{source_image_name}"
+            next_available_vm_id,
+            built_in,
+            f"import/{source_image_name}",
+            user_data=user_data,
         )
 
     async def ensure_exists_from_xz(

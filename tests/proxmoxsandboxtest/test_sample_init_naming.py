@@ -45,6 +45,7 @@ async def _sample_init(*vms: VmConfig) -> dict:
             tuple((100 + i, vm) for i, vm in enumerate(vms)),
             None,
             (),
+            (),
         )
     )
     with (
