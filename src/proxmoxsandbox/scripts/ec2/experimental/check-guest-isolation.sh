@@ -56,25 +56,40 @@ skip() { echo "SKIP  $1 ($2)"; }
 # Only a completed connect is reachable. How the rest fail is the mechanism's business, not
 # this script's: a RST or ICMP error can come from any firewall on the path. 124 is
 # timeout(1)'s exit for the kill.
+# A probe that could not run must not read as a block: 126/127 is a missing tool, and
+# "No such file or directory" against /dev/tcp is a bash built without net redirections.
+# bash puts the reason on its first stderr line and a less useful one on the second.
+state() { # rc stderr
+    local reason=${2%%$'\n'*}
+    reason=${reason##*: }
+    case "$1:$2" in
+        0:*) echo reachable ;;
+        124:*) echo "blocked(timeout after 3s)" ;;
+        12[67]:* | *"No such file or directory"*) echo "error($reason)" ;;
+        *) echo "blocked($reason)" ;;
+    esac
+}
 tcp_state() {
     local err
     err=$(timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1)
-    case "$?:$err" in
-        0:*) echo reachable ;;
-        124:*) echo "blocked(timeout after 3s)" ;;
-        *) echo "blocked(${err##*: })" ;;
-    esac
+    state $? "$err"
 }
 # UDP; the TCP side of port 53 is a tcp_state probe. Any reply is reachable, REFUSED included:
 # it means a resolver got the query, which is how a host whose firewall had failed once
 # looked, with dnsmasq declining in its place. The query is a hand-built A for deb.debian.org.
 dns_state() { # server
-    local hdr
-    hdr=$(timeout 3 bash -c "exec 3<>/dev/udp/$1/53 &&
+    local out rc hdr
+    out=$(timeout 3 bash -c "exec 3<>/dev/udp/$1/53 &&
         printf '\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03deb\x06debian\x03org\x00\x00\x01\x00\x01' >&3 &&
-        head -c 4 <&3 | od -An -tx1" 2>/dev/null)
-    read -ra hdr <<<"$hdr"
-    [ ${#hdr[@]} -eq 4 ] || { echo "blocked(no response)"; return; }
+        head -c 4 <&3 | od -An -tx1" 2>&1)
+    rc=$?
+    if ! [[ $out =~ ^[[:space:]]*([0-9a-f]{2}[[:space:]]*){4}$ ]]; then
+        # An ICMP error surfaces as a read error in head, which the pipeline's exit hides.
+        [ "$rc" = 0 ] && rc=1
+        state "$rc" "$out"
+        return
+    fi
+    read -ra hdr <<<"$out"
     case $((0x${hdr[3]} & 15)) in
         0) echo "reachable(NOERROR)" ;;
         2) echo "reachable(SERVFAIL)" ;;
