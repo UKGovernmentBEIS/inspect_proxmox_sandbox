@@ -202,12 +202,8 @@ timed out.
    `--metadata-options`, and a backstop rather than the primary control.
 
 Routes to peered VPCs, transit gateways and on-prem survive all of this, and a guest that
-reaches one is off the host. Nothing in the AMI knows those addresses; pass them to
-`check-host-isolation.sh` as `--unreachable IP[:PORT]` and it asserts they're dead from
-the host, then carries them into the guest command line it prints. Its usage header says
-how to pick the port. The same script sweeps the VPC's CIDR on TCP/443 and fails on any
-listener other than the interface endpoints, which catches a security group that lets the
-host reach more of the VPC than item 4 allows.
+reaches one is off the host. Nothing in the AMI knows those addresses, so they are the one
+input `check-host-isolation.sh` needs: see `--unreachable` in its usage header.
 
 ## EC2-specific bits handled by `userdata.sh`
 
