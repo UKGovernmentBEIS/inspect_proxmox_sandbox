@@ -204,9 +204,12 @@ timed out.
 Routes to peered VPCs, transit gateways and on-prem survive all of this, and a guest that
 reaches one is off the host. Nothing in the AMI knows those addresses; pass them to
 `check-host-isolation.sh` as `--unreachable IP[:PORT]` and it asserts they're dead from
-the host, then carries them into the guest command line it prints. It also sweeps the
-VPC's CIDR on TCP/443 and fails on any responder other than the interface endpoints,
-which catches a security group that lets the host reach more than item 4 allows.
+the host, then carries them into the guest command line it prints. Point each one at a
+port that is listening, because a refused connect passes too and so proves nothing. If
+you administer the host from another machine across one of those routes, its private IP
+on port 22 is an easy choice if it runs sshd. It also sweeps the VPC's CIDR on TCP/443
+and fails on any responder other than the interface endpoints, which catches a security
+group that lets the host reach more than item 4 allows.
 
 ## EC2-specific bits handled by `userdata.sh`
 

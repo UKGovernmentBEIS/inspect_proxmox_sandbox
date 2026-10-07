@@ -13,7 +13,10 @@
 # Usage: check-host-isolation.sh [--unreachable IP[:PORT]] ... [--no-sweep]
 #   --unreachable  an address off this VPC that must stay dead: a host across a peering link,
 #                  a transit gateway or on-prem. Repeats; port defaults to 443. Also passed on
-#                  to the printed guest command line.
+#                  to the printed guest command line. Pick a port that is listening: a closed
+#                  port refuses the connect, which passes whether or not a route exists. The
+#                  machine you administer the host from is usually a good target, e.g. its
+#                  private IP on port 22 if it runs sshd.
 #   --no-sweep     skip the TCP/443 sweep of the VPC, which takes ~4-5 minutes per /16.
 # shellcheck disable=SC2329  # the check helpers are invoked indirectly, via check
 set -uo pipefail
