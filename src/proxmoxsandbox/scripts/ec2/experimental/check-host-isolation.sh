@@ -108,7 +108,7 @@ unresolvable() {
 }
 
 nic=$(ip route show default | awk '{print $5; exit}')
-held_addrs=$(ip -4 -o addr show | awk '{split($4, a, "/"); print a[1]}' | sort -u)
+held_addrs=$(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}' | sort -u)
 node=$(hostname)
 marker=/etc/inspect-proxmox-egress-lockdown
 echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev/null | head -1)"
@@ -166,12 +166,14 @@ check "forwarded IPv6 dropped: ip6tables FORWARD -j DROP" has_rule6 FORWARD "-A 
 check "IPv6 off for interfaces created after boot (SDN vnets): net.ipv6.conf.default.disable_ipv6" \
     sysctl_is net.ipv6.conf.default.disable_ipv6 1
 check "IPv4 forwarding on (guests reach their gateway): net.ipv4.ip_forward" sysctl_is net.ipv4.ip_forward 1
-# Proxmox fixes an SNAT zone's --to-source when the SDN config is applied, so a zone that came
-# with the AMI can SNAT guests to the build instance's address, or whoever holds it now.
+# pve-network bakes the SNAT --to-source literal into interfaces.d/sdn when the SDN config is
+# applied (SimplePlugin.pm, get_local_route_ip), so an image taken from such a host SNATs
+# guests to the build instance's address. With the ENI source/dest check off, that is traffic
+# leaving the host under another instance's address.
 snat_held() { # rules text
     local spec ends addr bad=""
     while read -r _ spec; do
-        spec=${spec//[\'\"]/} # quoted in interfaces files
+        spec=${spec//[\'\"]/}
         spec=${spec%%:*}      # drop any :port
         IFS=- read -ra ends <<<"$spec" # a range a-b: check both ends
         for addr in "${ends[@]}"; do
@@ -331,9 +333,10 @@ else
     done
 fi
 
-# Anything else in the VPC the security group lets the host reach is somewhere an escaped guest
-# can go. Connect-only, one SYN per address: the endpoints are AWS-operated, and AWS's pentest
-# policy (aws.amazon.com/security/penetration-testing) covers scanning our instances, not its
+# Covers "443 only to the endpoints" from README item 4, not "nothing else": other ports, and
+# addresses the security group permits but where nothing listens, go unseen.
+# Connect-only, one SYN per address: the endpoints are AWS-operated, and AWS's pentest policy
+# (https://aws.amazon.com/security/penetration-testing) covers scanning our instances, not its
 # services, so this must stay a reachability check.
 cidr_addrs() { # a.b.c.d/n
     local a b c d bits=${1#*/} base i x
@@ -355,11 +358,13 @@ only_endpoints_on_443() { # cidr...
             bad="$bad $addr"
         fi
     done
-    [ -n "$bad" ] && echo "answered on 443, not an interface endpoint:$bad"
+    [ -n "$bad" ] && echo "answered on 443, not an endpoint this script knows (ssm, ssmmessages," \
+        "ec2messages, monitoring); another endpoint is still somewhere a guest can reach:$bad"
     # Otherwise a sweep that silently ran nothing would pass.
     [ "$known" -gt 0 ] || echo "no interface endpoint answered either, so the sweep proves nothing"
     [ -z "$bad" ] && [ "$known" -gt 0 ]
 }
+# IMDS paths from https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-categories.html
 mac=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/mac 2>/dev/null)
 vpc_cidrs=$([ -n "$mac" ] && /usr/local/bin/call-ec2-hypervisor \
     "latest/meta-data/network/interfaces/macs/$mac/vpc-ipv4-cidr-blocks" 2>/dev/null)
@@ -371,7 +376,7 @@ elif [ -z "$endpoint_addrs" ]; then
     skip "TCP/443 sweep of the VPC" "no interface endpoints found to tell apart from the rest"
 else
     # shellcheck disable=SC2086  # one CIDR per line
-    check "TCP/443 sweep of VPC $(oneline "$vpc_cidrs"): only interface endpoints answer" \
+    check "TCP/443 sweep of VPC $(oneline "$vpc_cidrs"): only the interface endpoints have a listener" \
         only_endpoints_on_443 $vpc_cidrs
 fi
 
@@ -381,7 +386,7 @@ echo
 # this while a sample is up and those gateways are included, which is the only way the guest
 # script gets to probe segments other than its own — it cannot discover them itself.
 args=""
-for ip in $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}' | sort -u); do
+for ip in $held_addrs; do
     args="$args --host-addr $ip"
 done
 for ip in $endpoint_addrs; do
