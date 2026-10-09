@@ -524,33 +524,30 @@ runcmd:
             TRACE_NAME,
             f"create VM from import {next_available_vm_id=}",
         ):
-
-            async def do_create() -> None:
-                await self.async_proxmox.request(
-                    "POST",
-                    f"/nodes/{self.node}/qemu",
-                    json={
-                        "vmid": next_available_vm_id,
-                        "name": name,
-                        "node": self.node,
-                        "cpu": "host",
-                        "memory": 8192,
-                        "cores": 2,
-                        "ostype": "l26",
-                        "scsi0": f"{self.image_storage}:0,"
-                        + f"import-from={LOCAL_STORAGE}:{import_source},"
-                        + "format=qcow2,cache=writeback",
-                        "scsihw": "virtio-scsi-single",
-                        "net0": f"virtio,bridge={STATIC_VNET_ID}",
-                        "serial0": "socket",
-                        "vga": "none",
-                        "tablet": 0,
-                        "start": False,
-                        "agent": "enabled=1",
-                    },
-                )
-
-            await self.task_wrapper.do_action_and_wait_for_tasks(do_create)
+            upid = await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu",
+                json={
+                    "vmid": next_available_vm_id,
+                    "name": name,
+                    "node": self.node,
+                    "cpu": "host",
+                    "memory": 8192,
+                    "cores": 2,
+                    "ostype": "l26",
+                    "scsi0": f"{self.image_storage}:0,"
+                    + f"import-from={LOCAL_STORAGE}:{import_source},"
+                    + "format=qcow2,cache=writeback",
+                    "scsihw": "virtio-scsi-single",
+                    "net0": f"virtio,bridge={STATIC_VNET_ID}",
+                    "serial0": "socket",
+                    "vga": "none",
+                    "tablet": 0,
+                    "start": False,
+                    "agent": "enabled=1",
+                },
+            )
+            await self.async_proxmox.wait_for_task(upid=upid)
 
             if disk_gib is not None:
                 # cloud-init's growpart/resizefs pick this up on first boot
@@ -568,16 +565,14 @@ runcmd:
                 user_data=user_data,
             )
 
-            async def update_tags() -> None:
-                await self.async_proxmox.request(
-                    "POST",
-                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
-                    json={
-                        "tags": f"inspect,builtin-{built_in}",
-                    },
-                )
-
-            await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
+            upid = await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
+                json={
+                    "tags": f"inspect,builtin-{built_in}",
+                },
+            )
+            await self.async_proxmox.wait_for_task(upid=upid)
 
             await self.qemu_commands.start(vm_id=next_available_vm_id)
             await self.qemu_commands.await_vm(
