@@ -71,6 +71,7 @@ class VnetConfig(BaseModel, frozen=True):
         alias: A human-readable alias for the virtual network.
             The alias is also used in this configuration to link each VM in the Vnet.
         subnets: Subnet configurations for this virtual network.
+        vlan_aware: Enable VLAN-aware bridging. Defaults to False.
     """
 
     alias: Optional[
@@ -79,6 +80,7 @@ class VnetConfig(BaseModel, frozen=True):
         Annotated[str, Field(pattern=r"[()-_.[a-z][A-Z][0-9]\s]{0,256}")]
     ] = None
     subnets: Tuple[SubnetConfig, ...] = ()
+    vlan_aware: bool = False
 
 
 class SdnConfig(BaseModel, frozen=True):
@@ -154,11 +156,14 @@ class VmNicConfig(BaseModel, frozen=True):
             If specified, a DHCP static mapping (host reservation) will be created.
             Requires a MAC address to be specified as well.
             Please read the notes in README.md for Proxmox server patching requirements
+        vlan_tag: Access VLAN ID, from 1 to 4094, on a VLAN-aware VNet.
+            Omit for an untagged interface or a guest-managed VLAN trunk.
     """
 
     vnet_alias: str
     mac: Optional[MacAddress] = None
     ipv4: Optional[IPvAnyAddress] = None
+    vlan_tag: Optional[int] = Field(default=None, ge=1, le=4094, strict=True)
 
     @model_validator(mode="after")
     def _validate_ipv4_requires_mac(self) -> "VmNicConfig":
