@@ -26,7 +26,13 @@ from .guest_agent_fixture import (
 )
 def test_command_stops_waiting_for_a_stalled_guest_at_every_stage(stage):
     observed = isolated(Scenario(operation="exec", fault=Fault(stage=stage)))
-    assert observed.kind == "timeout"
+    if stage in ("launch", "status"):
+        assert observed.kind == "incomplete"
+        assert observed.vm_id == 100
+        assert observed.pid == (None if stage == "launch" else 42)
+        assert observed.script_path.endswith("script.sh")
+    else:
+        assert observed.kind == "timeout"
     assert observed.cancelled is True
 
 

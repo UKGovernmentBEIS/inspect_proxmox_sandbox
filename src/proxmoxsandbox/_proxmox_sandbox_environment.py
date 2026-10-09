@@ -25,7 +25,11 @@ from inspect_ai.util import (
 from pydantic import BaseModel
 from typing_extensions import override
 
-from proxmoxsandbox._impl.agent_commands import AgentCommands
+from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
+    GuestAgentCommunicationTimeoutError,
+    GuestExecIncompleteError,
+)
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.deadline import (
     CLEANUP_WAIT_SECONDS,
@@ -808,17 +812,25 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             poll_timeout + _EXEC_POLL_GRACE_SECONDS + _EXEC_AGENT_BUDGET_SECONDS
         )
         launched_pid: int | None = None
+        launch_attempted = False
+        completion_observed = False
 
         async def launch_and_collect() -> ExecResult[str]:
-            nonlocal launched_pid
+            nonlocal launched_pid, launch_attempted, completion_observed
             if stdin_upload is not None:
                 await self.write_file(*stdin_upload)
             launch = await self._upload_exec_script(
                 script_path, script, is_windows=is_windows
             )
-            exec_response_pid = await self.agent_commands.exec_command(
-                vm_id=self.vm_id, command=launch
+            # Windows has no launch guard. A lost PID response must remain
+            # unresolved rather than retrying a potentially running command.
+            start_command = (
+                self.agent_commands.exec_command_once
+                if is_windows
+                else self.agent_commands.exec_command
             )
+            launch_attempted = True
+            exec_response_pid = await start_command(vm_id=self.vm_id, command=launch)
             launched_pid = exec_response_pid
             self.logger.debug(
                 f"VM {self.vm_id} exec pid={exec_response_pid}: {cmd[:100]}"
@@ -832,6 +844,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
             if exec_status is None:  # tenacity only returns a non-None result
                 raise RuntimeError("exec-status poll returned without a status")
+            completion_observed = True
 
             if exec_status.err_data is not None:
                 # QGA stderr comes from the wrapper; command stderr is in its file.
@@ -898,27 +911,27 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         try:
             exec_response = await within_budget(launch_and_collect(), waiting_allowance)
         except tenacity.RetryError as ex:
-            untimed_note = (
-                " (the wait for an exec without a timeout; see "
-                "PROXMOX_EXEC_UNTIMED_WAIT_SECONDS)"
-                if timeout is None
-                else ""
-            )
-            raise TimeoutError(
-                f"Command did not complete within {poll_timeout}s{untimed_note} "
-                f"(+{_EXEC_POLL_GRACE_SECONDS}s guest-agent grace) on VM "
-                f"{self.vm_id}, pid {launched_pid}. The QEMU guest "
-                f"agent did not report the process as finished. "
-                f"Command: {shlex.join(cmd)[:200]}"
+            raise GuestExecIncompleteError(
+                self.vm_id, launched_pid, script_path
             ) from ex
         except TimeoutError as ex:
-            raise TimeoutError(
+            if launch_attempted and not completion_observed:
+                raise GuestExecIncompleteError(
+                    self.vm_id, launched_pid, script_path
+                ) from ex
+            raise GuestAgentCommunicationTimeoutError(
                 f"The QEMU guest agent on VM {self.vm_id} did not deliver the result "
                 f"of pid {launched_pid} within {waiting_allowance}s ({poll_timeout}s "
                 f"timeout + {_EXEC_POLL_GRACE_SECONDS}s grace + "
                 f"{_EXEC_AGENT_BUDGET_SECONDS}s agent budget): the agent is stalled "
                 f"or tampered. Command: {shlex.join(cmd)[:200]}"
             ) from ex
+        except httpx.HTTPError as ex:
+            if launch_attempted and not completion_observed:
+                raise GuestExecIncompleteError(
+                    self.vm_id, launched_pid, script_path
+                ) from ex
+            raise
 
         if exec_response.returncode == 124:
             raise TimeoutError("Command timed out")

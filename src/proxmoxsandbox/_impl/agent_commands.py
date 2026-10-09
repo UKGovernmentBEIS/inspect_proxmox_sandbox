@@ -29,13 +29,12 @@ from proxmoxsandbox._impl.qga_responses import (
 #     by another process", etc.) and Proxmox's non-standard 596/597
 #     "Broken pipe" returned when streaming large file-reads back.
 #
-# Every QGA call is retried on these - including exec-start: a retry can only
-# double-launch the command if the agent received it but the pid response was
-# lost (a narrow window, since exec-start returns immediately), and the wrapper
-# script's flock guard makes a double launch run the command once anyway. The
-# exec-status read is single-shot (the agent discards a finished process's
-# output once read), so get_agent_exec_status falls back to the on-disk results
-# if a retry finds the PID gone.
+# QGA calls are retried on these except non-idempotent exec-starts. Linux's
+# wrapper has a flock guard, so exec_command may retry a lost pid response.
+# Windows has no such guard and uses exec_command_once instead. The exec-status
+# read is single-shot (the agent discards a finished process's output once
+# read), so get_agent_exec_status falls back to the on-disk results if a retry
+# finds the PID gone.
 # Exception: a 500 for a missing file, an unreadable file (e.g. "Is a
 # directory"), or a gone PID is surfaced immediately (it will not change on
 # retry); callers turn those into empty content / a disk fallback / an error.
@@ -44,6 +43,27 @@ _QGA_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt, capped below
 _QGA_RETRY_MAX_DELAY = 20.0  # seconds
 # Limit requests and retry sleeps together, including a request that never returns.
 _QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
+
+
+class GuestAgentCommunicationTimeoutError(TimeoutError):
+    """The provider exhausted its wait for guest-agent communication."""
+
+
+class GuestExecIncompleteError(RuntimeError):
+    """An attempted guest command has not been confirmed terminal.
+
+    This is not a TimeoutError: Inspect treats that as a completed tool call,
+    hiding the execution identity needed to investigate before retrying.
+    """
+
+    def __init__(self, vm_id: int, pid: int | None, script_path: str):
+        self.vm_id = vm_id
+        self.pid = pid
+        self.script_path = script_path
+        super().__init__(
+            f"Guest command completion is unknown on VM {vm_id}, pid {pid}, "
+            f"script {script_path}; inspect this execution before retrying"
+        )
 
 
 def _is_pid_gone(exc: httpx.HTTPStatusError) -> bool:
@@ -183,7 +203,18 @@ class AgentCommands:
             )
 
     async def exec_command(self, vm_id: int, command: List[str]) -> int:
-        """Execute a command in the VM using QEMU agent; returns its pid.
+        """Execute an idempotent command with transport retries; return its pid.
+
+        A lost response may cause multiple launches. The command must tolerate
+        this, as the Linux exec wrapper does with its flock guard.
+        """
+        return await self._retry_on_qga_error(
+            f"exec_command vm={vm_id}",
+            lambda: self.exec_command_once(vm_id, command),
+        )
+
+    async def exec_command_once(self, vm_id: int, command: List[str]) -> int:
+        """Attempt one command launch using QEMU agent; return its pid.
 
         Every element of `command` MUST be ASCII. A single non-ASCII byte in
         the QMP guest-exec arguments breaks Proxmox's agent bridge: the call
@@ -193,15 +224,9 @@ class AgentCommands:
         with trace_action(
             self.logger, self.TRACE_NAME, f"exec_command {vm_id=} {command=}"
         ):
-            # Retried like everything else. A retry only double-launches if the
-            # agent received the request but the pid response was lost; the
-            # wrapper script's flock guard makes that run the command once.
             path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec"
             data: ProxmoxJsonDataType = {"command": command}
-            raw = await self._retry_on_qga_error(
-                f"exec_command vm={vm_id}",
-                lambda: self.async_proxmox.request("POST", path, json=data),
-            )
+            raw = await self.async_proxmox.request("POST", path, json=data)
             return parse_guest(ExecReturn, vm_id, "exec", raw).pid
 
     async def read_file_capped(

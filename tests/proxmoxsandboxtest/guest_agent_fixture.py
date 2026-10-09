@@ -17,7 +17,7 @@ from unittest.mock import patch
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from proxmoxsandbox._impl.agent_commands import AgentCommands
+from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
@@ -75,7 +75,7 @@ class Scenario(BaseModel):
 class Observation(BaseModel):
     """Visible result, or the failure reported by the provider."""
 
-    kind: Literal["file", "exec", "rejected", "timeout", "error"]
+    kind: Literal["file", "exec", "rejected", "timeout", "incomplete", "error"]
     content: str | None = None
     truncated: bool | None = None
     returncode: int | None = None
@@ -85,6 +85,8 @@ class Observation(BaseModel):
     error_type: str | None = None
     error_length: int | None = None
     vm_id: int | None = None
+    pid: int | None = None
+    script_path: str | None = None
     cancelled: bool = False
     launched: bool = False
     status_reads: int = 0
@@ -260,6 +262,15 @@ async def exercise(scenario: Scenario) -> Observation:
             )
         except GuestAgentTamperError as exc:
             return Observation(kind="rejected", vm_id=exc.vm_id)
+        except GuestExecIncompleteError as exc:
+            return Observation(
+                kind="incomplete",
+                vm_id=exc.vm_id,
+                pid=exc.pid,
+                script_path=exc.script_path,
+                cancelled=replies.cancelled,
+                launched=replies.seen.get("launch", 0) > 0,
+            )
         except TimeoutError:
             return Observation(
                 kind="timeout",

@@ -14,7 +14,11 @@ from typing import Awaitable, Callable, Literal
 import httpx
 from inspect_ai.util import ExecResult, OutputLimitExceededError
 
-from proxmoxsandbox._impl.agent_commands import is_transient_qga_error
+from proxmoxsandbox._impl.agent_commands import (
+    GuestAgentCommunicationTimeoutError,
+    GuestExecIncompleteError,
+    is_transient_qga_error,
+)
 from proxmoxsandbox.schema import HealthCheck
 
 logger = getLogger(__name__)
@@ -22,7 +26,8 @@ logger = getLogger(__name__)
 # Consecutive guest-agent transport failures tolerated before giving up. These
 # do not count towards `HealthCheck.retries`: a flaky QGA channel (Windows
 # drops a few percent of calls) must not masquerade as a failing service.
-# The only transport retry budget: the executor's AgentCommands does not retry.
+# The executor retries safe operations first; unresolved execution never reaches
+# this budget because starting a new probe could overlap the earlier command.
 _TRANSPORT_ERROR_LIMIT = 25
 
 HealthCheckExecutor = Callable[[HealthCheck], Awaitable[ExecResult[str]]]
@@ -124,7 +129,11 @@ class HealthCheckRunner:
         """Run the check once and classify what happened."""
         try:
             result = await self.execute(self.spec)
-        except httpx.TransportError as e:
+        except GuestExecIncompleteError:
+            # A new probe could overlap a still-running command. Abort startup
+            # with its execution identity instead of trying again.
+            raise
+        except (GuestAgentCommunicationTimeoutError, httpx.TransportError) as e:
             return Probe("unreachable", type(e).__name__)
         except httpx.HTTPStatusError as e:
             if is_transient_qga_error(e):
