@@ -312,7 +312,7 @@ class AsyncProxmoxAPI:
         file: Path,
         content_type: Literal["iso", "vztmpl", "import"],
         filename: Optional[str] = None,
-    ) -> dict:
+    ) -> str:
         """Upload a file to Proxmox storage.
 
         The body is streamed from disk with a Content-Length, which pveproxy
@@ -326,7 +326,7 @@ class AsyncProxmoxAPI:
             filename: Optional custom filename to use (defaults to file.name)
 
         Returns:
-            The API response data
+            The UPID of the server-side task that finalises the upload
         """
         with trace_action(self.logger, self.TRACE_NAME, "upload_file"):
             if not file.exists():
@@ -354,7 +354,7 @@ class AsyncProxmoxAPI:
             if response.is_error:
                 raise _http_status_error(response)
 
-            return response.json().get("data", {})
+            return response.json()["data"]
 
     async def wait_for_task(
         self,
