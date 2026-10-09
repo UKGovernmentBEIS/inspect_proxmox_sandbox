@@ -928,6 +928,16 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             ) from ex
         except httpx.HTTPError as ex:
             if launch_attempted and not completion_observed:
+                if (
+                    is_windows
+                    and launched_pid is None
+                    and isinstance(
+                        ex,
+                        (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+                    )
+                ):
+                    # The single-shot launch failed before sending the request.
+                    raise
                 raise GuestExecIncompleteError(
                     self.vm_id, launched_pid, script_path
                 ) from ex

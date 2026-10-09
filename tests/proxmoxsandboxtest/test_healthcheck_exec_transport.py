@@ -289,3 +289,55 @@ async def test_production_healthcheck_retries_known_pid_without_relaunch(
         await check.run()
     assert guest.status_reads == (agent_commands._QGA_MAX_RETRIES if exhausted else 2)
     assert len(guest.launches) == 1
+
+
+@pytest.mark.parametrize(
+    "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
+)
+async def test_windows_launch_not_sent_is_an_unreachable_probe(error_type):
+    guest = Guest()
+    sandbox = guest.sandbox()
+    sandbox.agent_commands.exec_command_once = AsyncMock(
+        side_effect=error_type("request not sent")
+    )
+
+    probe = await runner(sandbox)._probe()
+
+    assert probe.outcome == "unreachable"
+    sandbox.agent_commands.exec_command_once.assert_awaited_once()
+    assert guest.launches == []
+
+
+@pytest.mark.parametrize(
+    "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
+)
+async def test_status_request_not_sent_still_leaves_execution_unknown(error_type):
+    guest = Guest()
+    sandbox = guest.sandbox()
+    sandbox.agent_commands.get_agent_exec_status = AsyncMock(
+        side_effect=error_type("status request not sent")
+    )
+
+    with pytest.raises(GuestExecIncompleteError) as error:
+        await runner(sandbox).run()
+
+    assert error.value.pid == 123
+    assert len(guest.launches) == 1
+
+
+async def test_linux_launch_retry_not_sent_does_not_disprove_an_earlier_launch():
+    sandbox = Guest().sandbox(os_type="l26")
+    sandbox.agent_commands._qga_max_retries = 2
+    sandbox.agent_commands.exec_command_once = AsyncMock(
+        side_effect=[
+            httpx.ReadTimeout("first launch response lost"),
+            httpx.ConnectError("retry request not sent"),
+        ]
+    )
+
+    with pytest.raises(GuestExecIncompleteError) as error:
+        await runner(sandbox).run()
+
+    assert error.value.pid is None
+    assert sandbox.agent_commands.exec_command_once.await_count == 2
+    assert isinstance(error.value.__cause__, httpx.ConnectError)
