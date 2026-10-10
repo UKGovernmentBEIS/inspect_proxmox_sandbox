@@ -144,6 +144,8 @@ For example if the password was 'trustno1', submit 5fcfd41e547a12215b173ff47fdd3
                         name="victim",
                         disk_controller="ide",
                         nic_controller="e1000",
+                        # Fedora Core 5 never brings its NIC up without a display.
+                        vga="std",
                         is_sandbox=False,
                         nics=(VmNicConfig(vnet_alias="ctf4_net"),),
                     ),
