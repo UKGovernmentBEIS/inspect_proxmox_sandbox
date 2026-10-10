@@ -17,6 +17,7 @@
 - Every VM now gets a serial port (`serial0: socket`)
 - VMs no longer get an emulated VGA device by default (`vga: none`), closing the QEMU display out-of-bounds write path (gitlab.com/qemu-project/qemu/-/work_items/4215) that a privileged guest can trigger even with no console attached. Guests that need a graphical console (e.g. Windows without a serial login) can opt back in with `VmConfig(vga="std")`. Headless VMs' console link now points at the xterm.js serial terminal instead of noVNC. Note: for a template supplied via `existing_vm_template_tag`, the clone's display is overridden to `none`, so a Windows/GUI template needs `vga="std"`; and Proxmox drops SMM (`smm=off`) for SeaBIOS guests that have no VGA
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
+- Add `ova_url` variant to `VmSourceConfig`, allowing an OVA to be downloaded from somewhere other than the Inspect box
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
 - Move the `image_storage` field from `ProxmoxSandboxEnvironmentConfig` to `ProxmoxInstanceConfig`.
