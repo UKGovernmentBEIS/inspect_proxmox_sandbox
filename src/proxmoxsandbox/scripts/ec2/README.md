@@ -151,8 +151,8 @@ lockdown armed — the internet. They say nothing about what the *host* can reac
 guest that escapes to the host inherits all of it. For untrusted workloads the VPC has
 to close that half.
 
-`experimental/check-host-isolation.sh` asserts everything below; on a host with ordinary
-internet access it fails by design.
+`check-host-isolation.sh` asserts everything below (see "Isolation checks"); on a host
+with ordinary internet access it fails by design.
 
 **Host layer.** Arm the egress lockdown: `touch
 /etc/inspect-proxmox-egress-lockdown` and start
@@ -200,6 +200,7 @@ timed out.
 
 5. **`HttpPutResponseHopLimit=1`** — already in the launch example's
    `--metadata-options`, and a backstop rather than the primary control.
+   `check-host-isolation.sh` verifies it from the host, along with `HttpTokens=required`.
 
 Routes to peered VPCs, transit gateways and on-prem survive all of this, and a guest that
 reaches one is off the host. Nothing in the AMI knows those addresses; pass them to
@@ -224,6 +225,31 @@ reaches one is off the host. Nothing in the AMI knows those addresses; pass them
   apt hook re-applies it after every dpkg run. Only the API's `version` field and
   `pveversion`'s text carry it; pvecfg.pm's `sub version()` is left alone because Proxmox
   compares it internally.
+
+## Isolation checks
+
+Two scripts check a host built for "Properly isolating the host" above. Both print one
+PASS/FAIL/SKIP line per check and a trailing summary, and exit nonzero if anything failed.
+On an ordinary host they fail by design — that host is not isolated.
+
+`check-host-isolation.sh` runs as root *on the host* and checks the **mechanism**: the
+units from `userdata.sh` are installed, enabled and last ran OK, the rules they install are
+loaded, the Proxmox firewall accepts only what the AMI configured, the egress lockdown is
+armed, and the VPC-level items above hold as seen from the host (endpoints private, DNS
+firewall NXDOMAINs, no route out). It also verifies the launch-time IMDS settings: a GET
+with no session token gets 401 (`HttpTokens=required`), and a token PUT's reply segments
+all arrive with IP TTL 1 (`HttpPutResponseHopLimit=1`, item 5) — IMDS has no field that
+reports the hop limit, so the script counts the reply TTLs with two temporary target-less
+iptables rules. It refuses to run against a host older than the `.aisi<N>` contract it
+expects, rather than reporting the difference as failed checks. Run it over SSM:
+
+```bash
+experimental/run-script-on-host.sh <instance-id> check-host-isolation.sh
+```
+
+`check-guest-isolation.sh` runs *inside a Linux guest* and checks the **effect**: what the
+guest can reach. Run the host script first; it ends by printing the guest command line to
+paste, with the host's addresses and the VPC endpoints filled in.
 
 ## Other scripts
 

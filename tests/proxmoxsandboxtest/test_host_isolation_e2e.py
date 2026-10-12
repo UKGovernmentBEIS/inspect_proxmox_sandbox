@@ -6,7 +6,7 @@ up a test host applies it, so this runs unconditionally as part of the
 integration suite — if it fails, the host you're testing against wasn't
 provisioned correctly (e.g. a hand-rolled Proxmox missing the firewall config).
 
-The fuller probes live in scripts/ec2/experimental/check-{host,guest}-isolation.sh,
+The fuller probes live in scripts/ec2/check-{host,guest}-isolation.sh,
 which assume the isolated configuration in scripts/ec2/README.md ("Properly isolating
 the host") — its egress lockdown fails the rest of the suite. Asserted here is only the
 part that survives on a host without that configuration: the AMI's own blocks on guests
@@ -48,6 +48,12 @@ first=$(iptables -w -t raw -S PREROUTING |
 iptables -w -t raw -C INSP-SANDBOX-HOST-LOCAL -m addrtype --dst-type LOCAL -j DROP
 iptables -w -t raw -S PREROUTING | grep -q -- '-d 169.254.0.0/16 -j DROP'
 iptables -w -S FORWARD | grep -q -- '-s 169.254.0.0/16 -j DROP'
+# IMDSv2 required: a GET with no session token is refused. Holds on any EC2 host
+# launched per scripts/ec2/README.md, lockdown or not. A host with no metadata
+# service at all (the local virtualized test host) gets 000 and is not asserted.
+code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' \
+    http://169.254.169.254/latest/meta-data/)
+[ "$code" = 401 ] || [ "$code" = 000 ]
 """
 
 

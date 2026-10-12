@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- EC2 scripts: `check-host-isolation.sh` and `check-guest-isolation.sh` move out of `experimental/` and are supported scripts; the host script now verifies the launch-time IMDS settings (`HttpTokens=required`, `HttpPutResponseHopLimit=1`) from the host
 - VMs with `is_sandbox=False` are no longer given to Inspect as sandboxes, fixing a bug where Inspect since 0.3.274 tries to `exec()` on every sandbox, causing ~7-minute timeouts for each VM without a guest agent during sample init.
 - `kali2025.4` built-in now installs `kali-linux-everything`; delete any existing `builtin-kali2025.4` template to pick this up
 - Bundled provisioners restrict guest access to host services before connection tracking, retaining management ingress and DHCP/DNS. New hosts carry contract `aisi3`.
