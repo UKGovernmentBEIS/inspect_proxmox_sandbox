@@ -95,13 +95,19 @@ def build_launch(
     claim = shlex.quote(f"{tmp_start}claimed")
     script = shlex.quote(f"{tmp_start}script{SCRIPT_SUFFIX}")
     lines = [f"if mkdir -m 700 -- {claim} 2>/dev/null; then"]
-    if parts:
-        lines.append(f"  (umask 077; cat -- {shlex.join(parts)} >{script}) || exit $?")
-    if stdin_parts:
-        stdin = shlex.quote(f"{tmp_start}stdin")
-        lines.append(
-            f"  (umask 077; cat -- {shlex.join(stdin_parts)} >{stdin}) || exit $?"
-        )
+    for path, chunks in (
+        (f"{tmp_start}script{SCRIPT_SUFFIX}", parts),
+        (f"{tmp_start}stdin", stdin_parts),
+    ):
+        if chunks:
+            # Shared staging numbers every chunk contiguously with fixed padding.
+            # Keep sh's command argument bounded even for large standard input.
+            lines.append(
+                "  (umask 077\n"
+                + f"  exec >{shlex.quote(path)} || exit $?\n"
+                + _chunk_loop(path, len(chunks), "cat")
+                + "\n  ) || exit $?"
+            )
     lines.extend(
         [
             f"  exec sh {script}",
@@ -120,4 +126,35 @@ def build_launch(
 
 def build_cleanup(paths: Sequence[str]) -> list[str]:
     """Remove only the exact disposable files selected by the shared executor."""
-    return ["rm", "-f", "--", *paths]
+    files = []
+    groups: dict[str, list[str]] = {}
+    for path in paths:
+        prefix, separator, index = path.rpartition(".part")
+        if separator and index.isascii() and index.isdecimal():
+            groups.setdefault(prefix, []).append(path)
+        else:
+            files.append(path)
+    loops = []
+    for path, chunks in groups.items():
+        width = len(str(len(chunks) - 1))
+        if all(chunk == f"{path}.part{i:0{width}d}" for i, chunk in enumerate(chunks)):
+            loops.append(_chunk_loop(path, len(chunks), "rm -f"))
+        else:
+            # An isolated or incomplete selection does not authorise siblings.
+            files.extend(chunks)
+    if not loops:
+        return ["rm", "-f", "--", *paths]
+    lines = [f"rm -f -- {shlex.join(files)} || exit $?"] if files else []
+    return ["sh", "-c", "\n".join([*lines, *loops])]
+
+
+def _chunk_loop(path: str, count: int, command: str) -> str:
+    """Visit a complete staged chunk sequence without expanding it into argv."""
+    width = len(str(count - 1))
+    prefix = shlex.quote(f"{path}.part")
+    return (
+        f'i=0\nwhile [ "$i" -lt {count} ]; do\n'
+        f"  part=$(printf '%0{width}d' \"$i\")\n"
+        f'  {command} -- {prefix}"$part" || exit $?\n'
+        "  i=$((i + 1))\ndone"
+    )

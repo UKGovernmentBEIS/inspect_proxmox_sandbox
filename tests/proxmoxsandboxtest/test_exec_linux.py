@@ -295,7 +295,7 @@ def test_claim_protects_chunk_assembly_from_running_duplicates(
     script = execution.write(execution.blocked_command())
     execution.path("script.sh").unlink()
     midpoint = len(script) // 2
-    parts = [execution.path("part0"), execution.path("part1")]
+    parts = [execution.path("script.sh.part0"), execution.path("script.sh.part1")]
     parts[0].write_text(script[:midpoint])
     parts[1].write_text(script[midpoint:])
     part_names = [str(part) for part in parts]
@@ -323,7 +323,7 @@ def test_cleanup_does_not_reopen_claim_or_remove_terminal_record(
 ) -> None:
     effect = shlex.quote(str(execution.path("side_effect")))
     script = execution.write(["sh", "-c", f"printf 'once\\n' >> {effect}"])
-    part = execution.path("part0")
+    part = execution.path("script.sh.part0")
     part.write_text(script)
     assert execution.run([str(part)]) == 0
     terminal_before = _snapshot(execution.path("script.returncode"))
@@ -337,7 +337,7 @@ def test_cleanup_does_not_reopen_claim_or_remove_terminal_record(
             "script.stderr",
             "script.returncode.tmp",
             "stdin",
-            "part0",
+            "script.sh.part0",
         )
     ]
 
@@ -404,7 +404,7 @@ def test_publication_failure_does_not_permit_replay(
 
 
 def test_failed_chunk_assembly_keeps_claim(execution: _Execution) -> None:
-    part = execution.path("part0")
+    part = execution.path("script.sh.part0")
     assert execution.run([str(part)]) != 0
     assert execution.path("claimed").is_dir()
     assert not execution.path("script.returncode").exists()
@@ -614,6 +614,98 @@ def test_chunked_stdin_is_assembled_after_the_persistent_claim(
     assert execution.path("script.stdout").read_bytes() == data
 
 
+def test_chunk_assembly_uses_numeric_order_and_only_the_staged_count(
+    execution: _Execution,
+) -> None:
+    data = b"".join(bytes([i, 0, 255]) * (i + 1) for i in range(12))
+    script = execution.write(["cat"], stdin_file=str(execution.path("stdin")))
+    execution.path("script.sh").unlink()
+    staged = {}
+    for name, content in (("script.sh", script.encode()), ("stdin", data)):
+        parts = [execution.path(f"{name}.part{i:02d}") for i in range(12)]
+        for i, part in enumerate(parts):
+            part.write_bytes(
+                content[len(content) * i // 12 : len(content) * (i + 1) // 12]
+            )
+        execution.path(f"{name}.part12").write_text("not part of this execution")
+        staged[name] = [str(part) for part in parts]
+
+    assert execution.run(staged["script.sh"], staged["stdin"]) == 0
+    assert execution.path("script.sh").read_text() == script
+    assert execution.path("stdin").read_bytes() == data
+    assert execution.path("script.stdout").read_bytes() == data
+    assert execution.path("script.returncode").read_text() == "0"
+
+
+def test_large_chunk_lists_do_not_expand_launch_or_cleanup_arguments(
+    execution: _Execution,
+) -> None:
+    # Enough paths to exceed both Linux's per-string and aggregate argv limits.
+    # No large files need to be uploaded to decide this renderer property.
+    arg_max = os.sysconf("SC_ARG_MAX")
+    count = arg_max // len(execution.prefix) + 1
+    width = len(str(count - 1))
+    script_parts = [
+        str(execution.path(f"script.sh.part{i:0{width}d}")) for i in range(count)
+    ]
+    stdin_parts = [
+        str(execution.path(f"stdin.part{i:0{width}d}")) for i in range(count)
+    ]
+    assert len(shlex.join(stdin_parts).encode()) > 32 * os.sysconf("SC_PAGESIZE")
+    assert sum(len(path.encode()) + 1 for path in stdin_parts) > arg_max
+
+    launch = exec_linux.build_launch(execution.prefix, script_parts, stdin_parts)
+    cleanup = exec_linux.build_cleanup(
+        [str(execution.path("script.sh")), *script_parts, *stdin_parts]
+    )
+
+    assert sum(len(arg.encode()) + 1 for arg in launch) < 4096
+    assert sum(len(arg.encode()) + 1 for arg in cleanup) < 4096
+    assert "*" not in launch[-1]
+    assert "*" not in cleanup[-1]
+    # A delayed duplicate still reaches the existing claim without large argv.
+    execution.path("claimed").mkdir()
+    assert subprocess.run(launch, timeout=5).returncode == 0
+
+
+def test_chunk_cleanup_keeps_unselected_neighbours(execution: _Execution) -> None:
+    parts = [execution.path(f"stdin.part{i:02d}") for i in range(12)]
+    for part in parts:
+        part.write_bytes(b"owned")
+    neighbour = execution.path("stdin.part12")
+    neighbour.write_bytes(b"keep")
+    output = execution.path("script.stdout")
+    output.write_text("owned")
+
+    subprocess.run(
+        exec_linux.build_cleanup([str(output), *(str(part) for part in parts)]),
+        check=True,
+        timeout=5,
+    )
+
+    assert not output.exists()
+    assert all(not part.exists() for part in parts)
+    assert neighbour.read_bytes() == b"keep"
+
+
+def test_incomplete_chunk_cleanup_removes_only_selected_paths(
+    execution: _Execution,
+) -> None:
+    parts = [execution.path(f"stdin.part{i}") for i in range(3)]
+    for part in parts:
+        part.write_bytes(b"keep unless selected")
+
+    subprocess.run(
+        exec_linux.build_cleanup([str(parts[0]), str(parts[2])]),
+        check=True,
+        timeout=5,
+    )
+
+    assert not parts[0].exists()
+    assert parts[1].read_bytes() == b"keep unless selected"
+    assert not parts[2].exists()
+
+
 def test_failed_stdin_assembly_keeps_claim(execution: _Execution) -> None:
     execution.write(["cat"], stdin_file=str(execution.path("stdin")))
     part = execution.path("stdin.part0")
@@ -634,7 +726,7 @@ def test_provider_permissions_do_not_change_payload_umask(
     created = shlex.quote(str(execution.path("payload_created")))
     script = execution.write(["sh", "-c", f"umask; : > {created}"])
     execution.path("script.sh").unlink()
-    part = execution.path("part0")
+    part = execution.path("script.sh.part0")
     part.write_text(script)
 
     process = execution.launch([str(part)], umask=0o027)
