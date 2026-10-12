@@ -46,7 +46,11 @@ _QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
 _QGA_FILE_WRITE_MIN_ATTEMPTS = 3
 
 
-class GuestExecIncompleteError(TimeoutError):
+class GuestAgentCommunicationTimeoutError(TimeoutError):
+    """Guest communication expired without establishing the command's result."""
+
+
+class GuestExecIncompleteError(RuntimeError):
     """An attempted guest command has not been confirmed terminal."""
 
     def __init__(self, vm_id: int, pid: int | None, script_path: str):
@@ -205,7 +209,7 @@ class AgentCommands:
         """Execute an idempotent command with transport retries; return its pid.
 
         A lost response may cause multiple launches. The command must tolerate
-        this, as the Linux exec wrapper does with its flock guard.
+        this, including a retry arriving after an earlier launch has finished.
         """
         return await self._retry_on_qga_error(
             f"exec_command vm={vm_id}",

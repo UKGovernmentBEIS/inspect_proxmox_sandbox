@@ -25,7 +25,11 @@ from inspect_ai.util import (
 from pydantic import BaseModel
 from typing_extensions import override
 
-from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
+from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
+    GuestAgentCommunicationTimeoutError,
+    GuestExecIncompleteError,
+)
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.deadline import (
     CLEANUP_WAIT_SECONDS,
@@ -819,7 +823,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 script_path, script, is_windows=is_windows
             )
             # Windows has no launch guard. A lost PID response must remain
-            # unresolved rather than retrying a potentially running command.
+            # unresolved without retrying a potentially running command.
             start_command = (
                 self.agent_commands.exec_command_once
                 if is_windows
@@ -915,15 +919,27 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 raise GuestExecIncompleteError(
                     self.vm_id, launched_pid, script_path
                 ) from ex
-            raise TimeoutError(
-                f"The QEMU guest agent on VM {self.vm_id} did not deliver the result "
-                f"of pid {launched_pid} within {waiting_allowance}s ({poll_timeout}s "
+            phase = "collecting the result" if completion_observed else "preparing"
+            raise GuestAgentCommunicationTimeoutError(
+                f"Guest-agent communication on VM {self.vm_id} expired while "
+                f"{phase} for {script_path}, pid {launched_pid}, "
+                f"within {waiting_allowance}s ({poll_timeout}s "
                 f"timeout + {_EXEC_POLL_GRACE_SECONDS}s grace + "
-                f"{_EXEC_AGENT_BUDGET_SECONDS}s agent budget): the agent is stalled "
-                f"or tampered. Command: {shlex.join(cmd)[:200]}"
+                f"{_EXEC_AGENT_BUDGET_SECONDS}s agent budget). "
+                f"Command: {shlex.join(cmd)[:200]}"
             ) from ex
         except httpx.HTTPError as ex:
             if launch_attempted and not completion_observed:
+                if (
+                    is_windows
+                    and launched_pid is None
+                    and isinstance(
+                        ex,
+                        (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+                    )
+                ):
+                    # The single-shot launch failed before sending the request.
+                    raise
                 raise GuestExecIncompleteError(
                     self.vm_id, launched_pid, script_path
                 ) from ex
