@@ -213,11 +213,11 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     Attempts run through the same command wrapper as sandbox().exec(). A failed
     attempt is a non-zero exit, a guest-side timeout, a `test` that is not
     executable, or output over the exec size limit; each consumes one of
-    `retries`. Attempts that cannot reach the guest agent at all do not count
-    toward `retries`, but 25 in a row fail the VM, so a guest whose agent dies
-    is reported after roughly 25 * (interval + a few seconds). Once passed, the
-    healthcheck is not re-run for the rest of the sample. Unknown command
-    completion aborts startup rather than admitting an overlapping attempt.
+    `retries`. Transient guest-agent failures do not count toward `retries`.
+    Upload recovery and unreachable probes share one 25-failure budget, with
+    `interval` between retries; a confirmed service result resets it. Expired
+    communication or unknown command completion aborts startup without another
+    probe. Once passed, the healthcheck is not re-run for the rest of the sample.
 
     Attributes:
         test: Command to run inside the guest.

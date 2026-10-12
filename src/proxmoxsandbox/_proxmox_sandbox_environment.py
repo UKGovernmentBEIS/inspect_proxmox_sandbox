@@ -722,6 +722,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             raise ValueError("VM ID is not set")
 
         is_windows = self._is_windows()
+        single_launch_attempt = (
+            is_windows or self.agent_commands.exec_attempt_limit == 1
+        )
 
         # Hardcoded path because the QEMU guest agent doesn't expand
         # environment variables like %TEMP%. C:\Windows\Temp always exists.
@@ -931,7 +934,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         except httpx.HTTPError as ex:
             if launch_attempted and not completion_observed:
                 if (
-                    is_windows
+                    single_launch_attempt
                     and launched_pid is None
                     and isinstance(
                         ex,

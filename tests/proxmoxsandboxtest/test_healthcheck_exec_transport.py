@@ -9,9 +9,13 @@ import tenacity
 
 from proxmoxsandbox import _proxmox_sandbox_environment as environment
 from proxmoxsandbox._impl import agent_commands
-from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
+from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
+    GuestAgentCommunicationTimeoutError,
+    GuestExecIncompleteError,
+)
 from proxmoxsandbox._impl.deadline import within_budget
-from proxmoxsandbox._impl.healthcheck import HealthCheckRunner
+from proxmoxsandbox._impl.healthcheck import HealthCheckFailed, HealthCheckRunner
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 from proxmoxsandbox.schema import HealthCheck, VmConfig, VmSourceConfig
 
@@ -38,7 +42,7 @@ class Guest:
                 raise http_failure()
             return None
         if path.endswith("/exec"):
-            if json["command"][2].startswith("del "):
+            if json["command"][-1].startswith(("del ", "rm -f ")):
                 return {"pid": 456}
             self.launches.append(json["command"])
             if self.fault == "launch-transport":
@@ -62,7 +66,7 @@ class Guest:
             return str(code).encode(), False
         return b"", False
 
-    def sandbox(self):
+    def sandbox(self, *, os_type="win11"):
         api = MagicMock(request=AsyncMock(side_effect=self.request))
         agent = AgentCommands(api, "pve", qga_max_retries=1)
         agent.read_file_capped_or_blank = AsyncMock(side_effect=self.read)
@@ -79,7 +83,7 @@ class Guest:
                 )
             },
             sdn_zone_id=None,
-            os_type="win11",
+            os_type=os_type,
         )
 
 
@@ -117,8 +121,7 @@ async def test_exhausted_upload_cannot_launch_partial_script():
     guest = Guest(upload_failures=10)
     with pytest.raises(httpx.HTTPStatusError, match="guest-file-close"):
         await guest.sandbox().exec(["echo", "test"], timeout=1)
-    assert len(guest.writes) == 3
-    assert guest.writes == [guest.writes[0]] * 3
+    assert len(guest.writes) == 1
     assert guest.launches == []
 
 
@@ -132,8 +135,9 @@ async def test_exhausted_upload_cannot_launch_partial_script():
         "outer-timeout",
     ],
 )
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
 async def test_indeterminate_execution_aborts_healthcheck_without_relaunch(
-    monkeypatch, fault
+    monkeypatch, fault, os_type
 ):
     guest = Guest(fault=fault)
     if fault == "poll-timeout":
@@ -149,7 +153,7 @@ async def test_indeterminate_execution_aborts_healthcheck_without_relaunch(
 
         monkeypatch.setattr(environment, "within_budget", short_budget)
     with pytest.raises(GuestExecIncompleteError) as error:
-        await runner(guest.sandbox()).run()
+        await runner(guest.sandbox(os_type=os_type)).run()
     assert len(guest.launches) == 1
     assert error.value.vm_id == 130
     assert error.value.pid == (None if fault.startswith("launch") else 123)
@@ -162,3 +166,90 @@ async def test_confirmed_terminal_failure_remains_retryable(returncode):
     guest = Guest(returncodes=(returncode, 0))
     await runner(guest.sandbox()).run()
     assert len(guest.launches) == 2
+
+
+@pytest.mark.parametrize(
+    "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
+)
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_single_launch_not_sent_is_an_unreachable_probe(error_type, os_type):
+    guest = Guest()
+    sandbox = guest.sandbox(os_type=os_type)
+    sandbox.agent_commands.exec_command_once = AsyncMock(
+        side_effect=error_type("request not sent")
+    )
+
+    probe = await runner(sandbox)._probe()
+
+    assert probe.outcome == "unreachable"
+    sandbox.agent_commands.exec_command_once.assert_awaited_once()
+    assert guest.launches == []
+
+
+@pytest.mark.parametrize(
+    "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
+)
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_status_request_not_sent_still_leaves_execution_unknown(
+    error_type, os_type
+):
+    guest = Guest()
+    sandbox = guest.sandbox(os_type=os_type)
+    sandbox.agent_commands.get_agent_exec_status = AsyncMock(
+        side_effect=error_type("status request not sent")
+    )
+
+    with pytest.raises(GuestExecIncompleteError) as error:
+        await runner(sandbox).run()
+
+    assert error.value.pid == 123
+    assert len(guest.launches) == 1
+
+
+@pytest.mark.parametrize("final_failure", ["connect", "http400"])
+async def test_linux_retry_failure_does_not_disprove_an_earlier_launch(final_failure):
+    sandbox = Guest().sandbox(os_type="l26")
+    sandbox.agent_commands._qga_max_retries = 2
+    request = httpx.Request("POST", "https://pve.test/agent/exec")
+    failure = (
+        httpx.ConnectError("retry request not sent")
+        if final_failure == "connect"
+        else httpx.HTTPStatusError(
+            "Parameter verification failed",
+            request=request,
+            response=httpx.Response(400, request=request),
+        )
+    )
+    sandbox.agent_commands.exec_command_once = AsyncMock(
+        side_effect=[httpx.ReadTimeout("first launch response lost"), failure]
+    )
+
+    with pytest.raises(GuestExecIncompleteError) as error:
+        await sandbox.exec(["echo", "test"], timeout=1)
+
+    assert error.value.pid is None
+    assert sandbox.agent_commands.exec_command_once.await_count == 2
+    assert error.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_stalled_upload_is_not_a_service_timeout(monkeypatch, os_type):
+    guest = Guest()
+    sandbox = guest.sandbox(os_type=os_type)
+
+    async def stall_upload(*args, **kwargs):
+        await asyncio.sleep(60)
+
+    async def short_budget(operation, seconds):
+        return await within_budget(operation, 0.01)
+
+    sandbox.agent_commands.write_file = AsyncMock(side_effect=stall_upload)
+    monkeypatch.setattr(environment, "within_budget", short_budget)
+
+    with pytest.raises(HealthCheckFailed, match="communication") as error:
+        await runner(sandbox).run()
+
+    assert isinstance(error.value.__cause__, GuestAgentCommunicationTimeoutError)
+    assert "preparing" in str(error.value.__cause__)
+    assert guest.launches == []
+    sandbox.agent_commands.write_file.assert_awaited_once()

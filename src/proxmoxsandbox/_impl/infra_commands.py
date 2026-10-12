@@ -250,10 +250,9 @@ class InfraCommands(abc.ABC):
         """Run healthcheck commands through the sandbox's exec wrapper.
 
         This reuses the Linux/Windows command scripts (Linux guest-side timeout,
-        result files) rather than raw agent/exec, so a healthcheck behaves
-        exactly like sandbox().exec() would for the same command. QGA retry is
-        HealthCheckRunner's job, hence qga_max_retries=1. Only idempotent file
-        uploads retain their own retries; command launch stays single-shot.
+        result files) instead of raw agent/exec. HealthCheckRunner owns one
+        transport budget shared with file-upload retries. Other operations
+        remain single-shot, hence qga_max_retries=1.
         """
         # Imported here: the environment module imports this one.
         # https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/issues/132
