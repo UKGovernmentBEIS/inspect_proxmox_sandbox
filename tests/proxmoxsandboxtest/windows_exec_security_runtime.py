@@ -276,8 +276,21 @@ try {
         foreach ($name in $cases.Keys) {
             $case = $data.cases.$name
             New-Directory $case.directory $cases[$name]
+            if ($name -eq 'unprotected_acl') {
+                # Creation can canonicalise the supplied descriptor to protected.
+                # Confirm this negative fixture is unsafe before expecting refusal.
+                $acl = [IO.Directory]::GetAccessControl($case.directory)
+                $acl.SetAccessRuleProtection($false, $true)
+                [IO.Directory]::SetAccessControl($case.directory, $acl)
+                Assert-True (-not [IO.Directory]::GetAccessControl(
+                    $case.directory).AreAccessRulesProtected) (
+                    'Unprotected-DACL fixture remained protected')
+            }
             $before = Descriptor $case.directory
-            Run-Prepare $case $false
+            try { Run-Prepare $case $false } catch {
+                throw ('{0}: {1}; before={2}; after={3}' -f $name,
+                    $_.Exception.Message, $before, (Descriptor $case.directory))
+            }
             Assert-True ((Descriptor $case.directory) -eq $before) (
                 'Preparation repaired an unsafe object')
         }
