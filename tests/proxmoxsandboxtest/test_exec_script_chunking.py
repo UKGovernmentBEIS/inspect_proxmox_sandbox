@@ -32,15 +32,14 @@ def _make_sandbox() -> ProxmoxSandboxEnvironment:
 
 def _make_executor(os_type: str):
     agent = MagicMock(write_file=AsyncMock())
-    iso = AsyncMock(return_value=False)
-    write = AsyncMock()
-    executor = GuestExecutor(agent, 100, os_type, write_file=write, try_iso_write=iso)
-    return executor, agent.write_file, iso, write
+    return GuestExecutor(agent, 100, os_type), agent.write_file
 
 
 _OS_PARAMS = [
-    pytest.param("l26", "/tmp/proxmox_", exec_linux, id="linux"),
-    pytest.param("win11", "C:\\Windows\\Temp\\proxmox_", exec_windows, id="windows"),
+    pytest.param("l26", "/tmp/proxmox_exec_test/", exec_linux, id="linux"),
+    pytest.param(
+        "win11", "C:\\Windows\\Temp\\proxmox_exec_test\\", exec_windows, id="windows"
+    ),
 ]
 
 
@@ -51,17 +50,16 @@ _OS_PARAMS = [
 )
 @pytest.mark.parametrize("os_type,tmp_start,platform", _OS_PARAMS)
 async def test_small_script_single_write(os_type, tmp_start, platform, size):
-    executor, write, iso, _ = _make_executor(os_type)
+    executor, write = _make_executor(os_type)
     script_path = f"{tmp_start}script{platform.SCRIPT_SUFFIX}"
     script = "a" * size
 
-    launch, owned = await executor._upload_script(tmp_start, script)
+    parts, owned = await executor._stage_file(script_path, script.encode())
 
-    iso.assert_awaited_once_with(script_path, script.encode())
     write.assert_awaited_once_with(
         vm_id=100, filepath=script_path, content=script.encode()
     )
-    assert launch == platform.build_launch(tmp_start)
+    assert parts == []
     assert owned == [script_path]
 
 
@@ -72,7 +70,7 @@ async def test_small_script_single_write(os_type, tmp_start, platform, size):
 )
 @pytest.mark.parametrize("os_type,tmp_start,platform", _OS_PARAMS)
 async def test_large_script_chunked_and_reassembled(os_type, tmp_start, platform, size):
-    executor, write, _, _ = _make_executor(os_type)
+    executor, write = _make_executor(os_type)
     script_path = f"{tmp_start}script{platform.SCRIPT_SUFFIX}"
     data = ("a" * size).encode()
     expected_chunks = -(-len(data) // guest_exec._WRITE_CHUNK_SIZE)
@@ -82,7 +80,7 @@ async def test_large_script_chunked_and_reassembled(os_type, tmp_start, platform
         f"{script_path}.part{i:0{width}d}" for i in range(expected_chunks)
     ]
 
-    launch, owned = await executor._upload_script(tmp_start, data.decode())
+    parts, owned = await executor._stage_file(script_path, data)
 
     written_paths = [c.kwargs["filepath"] for c in write.await_args_list]
     assert written_paths == expected_paths
@@ -94,7 +92,7 @@ async def test_large_script_chunked_and_reassembled(os_type, tmp_start, platform
     )
     # The guarded platform launch owns assembly; staging cannot run a separate
     # assembly command before the atomic execution claim.
-    assert launch == platform.build_launch(tmp_start, expected_paths)
+    assert parts == expected_paths
     assert owned == [script_path, *expected_paths]
     executor.agent_commands.exec_command.assert_not_called()
     executor.agent_commands.exec_command_once.assert_not_called()
@@ -102,29 +100,15 @@ async def test_large_script_chunked_and_reassembled(os_type, tmp_start, platform
 
 @pytest.mark.parametrize("os_type,tmp_start,platform", _OS_PARAMS)
 async def test_chunked_upload_does_not_re_enter_exec(os_type, tmp_start, platform):
-    executor, write, _, general_write = _make_executor(os_type)
+    executor, write = _make_executor(os_type)
     executor.exec = AsyncMock()
 
-    await executor._upload_script(tmp_start, "a" * (130 * 1024))
+    await executor._stage_file(
+        f"{tmp_start}script{platform.SCRIPT_SUFFIX}", b"a" * (130 * 1024)
+    )
 
     assert write.await_count > 1
     executor.exec.assert_not_called()
-    general_write.assert_not_called()
-
-
-@pytest.mark.parametrize("os_type,tmp_start,platform", _OS_PARAMS)
-async def test_iso_fast_path_launches_single_file(os_type, tmp_start, platform):
-    executor, write, iso, _ = _make_executor(os_type)
-    iso.return_value = True
-    script_path = f"{tmp_start}script{platform.SCRIPT_SUFFIX}"
-    script = "a" * (130 * 1024)
-
-    launch, owned = await executor._upload_script(tmp_start, script)
-
-    iso.assert_awaited_once_with(script_path, script.encode())
-    write.assert_not_called()
-    assert launch == platform.build_launch(tmp_start)
-    assert owned == [script_path]
 
 
 async def test_write_file_chunks_text_by_encoded_bytes() -> None:

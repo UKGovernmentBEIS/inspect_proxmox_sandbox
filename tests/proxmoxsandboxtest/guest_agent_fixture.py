@@ -30,6 +30,8 @@ class Fault(BaseModel):
     """An external request that stalls or returns after time has elapsed."""
 
     stage: Literal[
+        "prepare",
+        "prepare_status",
         "upload",
         "launch",
         "status",
@@ -101,6 +103,23 @@ class Observation(BaseModel):
     status_reads: int = 0
 
 
+def execution_stage(command: list[str]) -> Literal["prepare", "launch", "cleanup"]:
+    """Separate private-directory setup from the command under test."""
+    body = command[-1]
+    if "-EncodedCommand" in command:
+        body = base64.b64decode(body).decode("utf-16le")
+    if command[0].rsplit("/", 1)[-1] == "rm" or body.startswith("del /f /q "):
+        return "cleanup"
+    if "claimed" in body:
+        return "launch"
+    if "CreateDirectory" in body or ("stat -c" in body and "mkdir -m 700" in body):
+        return "prepare"
+    if "Remove-Item" in body:
+        return "cleanup"
+    # Generic write_file's ISO copy still invokes a raw guest command.
+    return "launch"
+
+
 class GuestReplies:
     """An HTTP peer; production parsing and command flow remain in use."""
 
@@ -154,20 +173,22 @@ class GuestReplies:
             data = {}
         elif route == "exec":
             command = json.loads(request.content)["command"]
-            cleanup = command[:2] == ["rm", "-f"] or any(
-                "rm -f " in word or "del /f /q " in word for word in command
-            )
-            await self.apply_fault("cleanup" if cleanup else "launch")
-            data = scenario.exec_reply
+            stage = execution_stage(command)
+            await self.apply_fault(stage)
+            data = {"pid": 321} if stage == "prepare" else scenario.exec_reply
         elif route == "exec-status":
-            await self.apply_fault("status")
             if set(request.url.params) != {"pid"}:
                 raise AssertionError("guest changed authenticated request parameters")
-            data = (
-                self.status_replies.pop(0)
-                if self.status_replies
-                else scenario.status_reply
-            )
+            if request.url.params["pid"] == "321":
+                await self.apply_fault("prepare_status")
+                data = {"exited": 1, "exitcode": 0}
+            else:
+                await self.apply_fault("status")
+                data = (
+                    self.status_replies.pop(0)
+                    if self.status_replies
+                    else scenario.status_reply
+                )
         elif route == "file-read":
             if scenario.http_error is not None:
                 return httpx.Response(400, text=scenario.http_error)

@@ -10,7 +10,7 @@ from proxmoxsandbox._impl import agent_commands
 from proxmoxsandbox._impl.agent_commands import GuestExecIncompleteError
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 
-from .guest_agent_fixture import GuestReplies, Scenario, make_sandbox
+from .guest_agent_fixture import GuestReplies, Scenario, execution_stage, make_sandbox
 
 
 @pytest.fixture
@@ -19,7 +19,11 @@ def error_api(monkeypatch):
         replies = GuestReplies(Scenario())
 
         async def handle(request: httpx.Request) -> httpx.Response:
-            if request.url.path.endswith(("/file-read", "/exec")):
+            is_launch = (
+                request.url.path.endswith("/exec")
+                and execution_stage(json.loads(request.content)["command"]) == "launch"
+            )
+            if request.url.path.endswith("/file-read") or is_launch:
                 return httpx.Response(
                     400, text=body, extensions={"reason_phrase": reason.encode()}
                 )
@@ -93,7 +97,7 @@ async def test_launch_recovery_preserves_the_relevant_http_diagnostic(
     async def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/exec"):
             command = json.loads(request.content)["command"]
-            if command[:2] != ["rm", "-f"] and not command[-1].startswith("del /f /q "):
+            if execution_stage(command) == "launch":
                 launches.append(command)
                 if len(launches) == 1:
                     raise httpx.ReadTimeout("lost launch reply", request=request)

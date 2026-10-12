@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -11,6 +12,8 @@ import pytest
 from proxmoxsandbox._impl import agent_commands, exec_linux
 from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
 from proxmoxsandbox._impl.guest_exec import GuestExecResultError, GuestExecutor
+
+from .guest_agent_fixture import execution_stage
 
 pytestmark = pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
 
@@ -29,6 +32,8 @@ class LocalGuest:
         self.output_failure = output_failure
         self.processes = {}
         self.launches = []
+        self.launch_pids = []
+        self.prepares = []
         self.cleanups = []
         self.reads = []
         self.uploads = []
@@ -37,20 +42,27 @@ class LocalGuest:
     async def request(self, method, path, *, json=None):
         if path.endswith("/file-write"):
             destination = Path(json["file"])
+            assert destination.parent.stat().st_mode & 0o7777 == 0o700
             destination.write_bytes(base64.b64decode(json["content"]))
             self.uploads.append(destination)
             return None
         if path.endswith("/exec"):
             command = json["command"]
-            cleanup = command[:2] == ["rm", "-f"]
-            (self.cleanups if cleanup else self.launches).append(command)
+            stage = execution_stage(command)
+            records = {
+                "prepare": self.prepares,
+                "launch": self.launches,
+                "cleanup": self.cleanups,
+            }
+            records[stage].append(command)
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             self.processes[process.pid] = process
-            if not cleanup:
+            if stage == "launch":
+                self.launch_pids.append(process.pid)
                 self.launch_started.set()
                 if len(self.launches) <= self.lost_launches:
                     if self.lose_after_exit:
@@ -105,12 +117,12 @@ async def test_lost_acknowledgement_recovers_actual_command_once(
     assert guest.launches[0] == guest.launches[1]
     assert len(guest.cleanups) == 1
     assert any(str(path).endswith(".part0") for path in guest.uploads) is large
-    claim = next(tmp_path.glob("*claimed"))
-    terminal = next(tmp_path.glob("*script.returncode"))
+    claim = next(tmp_path.glob("proxmox_exec_*/claimed"))
+    terminal = next(tmp_path.glob("proxmox_exec_*/script.returncode"))
     assert claim.is_dir()
     assert terminal.read_text() == "0"
-    assert not list(tmp_path.glob("*script.stdout"))
-    assert not list(tmp_path.glob("*script.sh*"))
+    assert not list(tmp_path.glob("proxmox_exec_*/script.stdout"))
+    assert not list(tmp_path.glob("proxmox_exec_*/script.sh*"))
     # A launch arriving after result delivery and cleanup still cannot replay.
     late = await asyncio.create_subprocess_exec(*guest.launches[0])
     assert await late.wait() == 0
@@ -146,8 +158,8 @@ async def test_lost_output_retains_terminal_identity_and_evidence(
     assert raised.value.vm_id == 100
     assert Path(raised.value.script_path).exists()
     assert marker.read_text() == "side\n"
-    assert next(tmp_path.glob("*script.stdout")).read_text() == "output\n"
-    assert next(tmp_path.glob("*script.returncode")).read_text() == "0"
+    assert next(tmp_path.glob("proxmox_exec_*/script.stdout")).read_text() == "output\n"
+    assert next(tmp_path.glob("proxmox_exec_*/script.returncode")).read_text() == "0"
     assert guest.cleanups == []
     assert len(guest.launches) == 1
 
@@ -160,16 +172,16 @@ async def test_wrapper_death_is_incomplete_not_a_fabricated_exit_code(
         guest.executor(monkeypatch, tmp_path).exec(["sleep", ".1"], timeout=1)
     )
     await guest.launch_started.wait()
-    while not list(tmp_path.glob("*claimed")):
+    while not list(tmp_path.glob("proxmox_exec_*/claimed")):
         await asyncio.sleep(0.001)
-    next(iter(guest.processes.values())).kill()
+    guest.processes[guest.launch_pids[0]].kill()
     with pytest.raises(GuestExecIncompleteError) as raised:
         await task
     await guest.settle()
     assert raised.value.vm_id == 100
     assert guest.cleanups == []
-    assert next(tmp_path.glob("*claimed")).is_dir()
-    assert not list(tmp_path.glob("*script.returncode"))
+    assert next(tmp_path.glob("proxmox_exec_*/claimed")).is_dir()
+    assert not list(tmp_path.glob("proxmox_exec_*/script.returncode"))
     await asyncio.sleep(0.1)
 
 
@@ -188,6 +200,27 @@ async def test_cancellation_retains_execution_without_replaying(monkeypatch, tmp
     await guest.settle()
     assert len(guest.launches) == 1
     assert marker.read_text() == "side\n"
-    assert next(tmp_path.glob("*claimed")).is_dir()
-    assert next(tmp_path.glob("*script.returncode")).read_text() == "0"
+    assert next(tmp_path.glob("proxmox_exec_*/claimed")).is_dir()
+    assert next(tmp_path.glob("proxmox_exec_*/script.returncode")).read_text() == "0"
     assert guest.cleanups == []
+
+
+async def test_chunked_stdin_is_assembled_inside_the_private_workspace(
+    monkeypatch, tmp_path
+):
+    guest = LocalGuest()
+    data = bytes(range(256)) * 512
+    result = await guest.executor(monkeypatch, tmp_path).exec(
+        ["sha256sum"], input=data, timeout=5
+    )
+    await guest.settle()
+
+    assert result.stdout == f"{hashlib.sha256(data).hexdigest()}  -\n"
+    assert len(guest.prepares) == 1
+    assert len(guest.launches) == 1
+    assert len({path.parent for path in guest.uploads}) == 1
+    assert (
+        len([path for path in guest.uploads if path.name.startswith("stdin.part")]) == 4
+    )
+    assert next(tmp_path.glob("proxmox_exec_*/claimed")).is_dir()
+    assert not list(tmp_path.glob("proxmox_exec_*/stdin*"))

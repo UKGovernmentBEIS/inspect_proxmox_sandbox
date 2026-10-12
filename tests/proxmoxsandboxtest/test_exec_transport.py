@@ -12,12 +12,15 @@ from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
+from .guest_agent_fixture import execution_stage
+
 
 class Guest:
     def __init__(self, *, launch_fault=None, upload_failures=0, status_failures=0):
         self.launch_fault = launch_fault
         self.upload_failures = upload_failures
         self.status_failures = status_failures
+        self.prepares = []
         self.writes = []
         self.launches = []
         self.cleanups = []
@@ -33,7 +36,11 @@ class Guest:
             return httpx.Response(200, json={"data": None})
         if path.endswith("/exec"):
             command = json.loads(request.content)["command"]
-            if command[:2] == ["rm", "-f"] or command[-1].startswith("del /f /q "):
+            stage = execution_stage(command)
+            if stage == "prepare":
+                self.prepares.append(command)
+                return httpx.Response(200, json={"data": {"pid": 321}})
+            if stage == "cleanup":
                 self.cleanups.append(command)
                 return httpx.Response(200, json={"data": {"pid": 456}})
             # Record acceptance before dropping the first reply. A second
@@ -46,6 +53,8 @@ class Guest:
                     return httpx.Response(500, text="guest-exec response lost")
             return httpx.Response(200, json={"data": {"pid": 123}})
         if path.endswith("/exec-status"):
+            if request.url.params["pid"] == "321":
+                return httpx.Response(200, json={"data": {"exited": 1, "exitcode": 0}})
             self.status_reads += 1
             if self.status_reads <= self.status_failures:
                 raise httpx.ReadTimeout("lost status response", request=request)
@@ -116,6 +125,7 @@ async def test_exec_uploads_then_launches_once(monkeypatch, os_type, upload_fail
     guest = Guest(upload_failures=upload_failures)
     result = await guest.sandbox(monkeypatch, os_type=os_type).exec(["echo", "test"])
     assert result.success
+    assert len(guest.prepares) == 1
     assert result.returncode == 0
     assert result.stdout == "output\n"
     assert result.stderr == ""
