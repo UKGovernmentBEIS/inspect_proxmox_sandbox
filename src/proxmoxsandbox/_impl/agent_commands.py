@@ -1,7 +1,10 @@
 import asyncio
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from logging import getLogger
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
 import httpx
 from inspect_ai.util import (
@@ -42,6 +45,40 @@ _QGA_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt, capped below
 _QGA_RETRY_MAX_DELAY = 20.0  # seconds
 # Limit requests and retry sleeps together, including a request that never returns.
 _QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
+
+
+class HealthcheckTransportExhaustedError(RuntimeError):
+    """A healthcheck exhausted its shared guest-agent retry budget."""
+
+    def __init__(self, failures: int):
+        self.failures = failures
+        super().__init__(
+            f"Guest-agent transport budget exhausted after {failures} failed requests"
+        )
+
+
+@dataclass
+class _HealthcheckTransportBudget:
+    interval: float
+    failures: int = 0
+
+
+_healthcheck_budget: ContextVar[_HealthcheckTransportBudget | None] = ContextVar(
+    "healthcheck_transport_budget", default=None
+)
+
+
+@contextmanager
+def healthcheck_transport_budget(interval: float) -> Iterator[None]:
+    """Share retries across one probe without changing ordinary exec policy."""
+    if _healthcheck_budget.get() is not None:
+        yield
+        return
+    token = _healthcheck_budget.set(_HealthcheckTransportBudget(interval))
+    try:
+        yield
+    finally:
+        _healthcheck_budget.reset(token)
 
 
 class GuestAgentCommunicationTimeoutError(TimeoutError):
@@ -121,18 +158,34 @@ class AgentCommands:
     async def _retry_on_qga_error(self, label: str, coro_fn):
         """Retry a coroutine function on transient QGA / transport errors."""
         max_retries = self._qga_max_retries
+        budget = _healthcheck_budget.get()
 
         async def retry():
             for attempt in range(1, max_retries + 1):
+                if budget is not None and budget.failures >= _QGA_MAX_RETRIES:
+                    raise HealthcheckTransportExhaustedError(budget.failures)
                 try:
                     return await coro_fn()
                 except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                    if attempt == max_retries or not is_transient_qga_error(e):
+                    if not is_transient_qga_error(e):
                         raise
-                    delay = min(
-                        _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
-                        _QGA_RETRY_MAX_DELAY,
-                    )
+                    if budget is not None:
+                        budget.failures += 1
+                        if (
+                            budget.failures >= _QGA_MAX_RETRIES
+                            or attempt == max_retries
+                        ):
+                            raise HealthcheckTransportExhaustedError(
+                                budget.failures
+                            ) from e
+                        delay = budget.interval
+                    else:
+                        if attempt == max_retries:
+                            raise
+                        delay = min(
+                            _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
+                            _QGA_RETRY_MAX_DELAY,
+                        )
                     self.logger.warning(
                         "%s failed (attempt %s/%s), retrying in %.1fs: %s",
                         label,
