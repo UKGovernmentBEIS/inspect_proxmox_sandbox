@@ -1,13 +1,16 @@
 """Exercise real healthcheck scheduling and exec retries with a virtual clock."""
 
 import asyncio
+import inspect
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from proxmoxsandbox._impl.guest_exec import GuestExecutor
 
 from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
     GuestExecIncompleteError,
     HealthcheckTransportExhaustedError,
 )
@@ -49,6 +52,10 @@ def http_failure(message="guest-file-close failed - got timeout"):
     )
 
 
+def _is_cleanup(command):
+    return command[0] == "rm" or command[-1].startswith(("rm -f ", "del /f /q "))
+
+
 class Guest:
     def __init__(
         self,
@@ -56,6 +63,9 @@ class Guest:
         upload_failures=0,
         read_failures=0,
         upload_delay=0,
+        stdout_delay=0,
+        cleanup_delay=0,
+        cleanup_error=None,
         runtime=0,
         returncodes=(0,),
         stall=False,
@@ -63,6 +73,9 @@ class Guest:
         self.upload_failures = upload_failures
         self.read_failures = read_failures
         self.upload_delay = upload_delay
+        self.stdout_delay = stdout_delay
+        self.cleanup_delay = cleanup_delay
+        self.cleanup_error = cleanup_error
         self.runtime = runtime
         self.returncodes = returncodes
         self.stall = stall
@@ -70,10 +83,12 @@ class Guest:
         self.upload_paths = {}
         self.reads = []
         self.launches = []
+        self.cleanups = []
         self.current_path = None
         self.launched_path = None
         self.started = asyncio.Event()
         self.cancelled = False
+        self.cleanup_cancelled = False
 
     async def request(self, method, path, *, json=None):
         now = asyncio.get_running_loop().time()
@@ -94,6 +109,16 @@ class Guest:
             await asyncio.sleep(self.upload_delay)
             return None
         if path.endswith("/exec"):
+            if _is_cleanup(json["command"]):
+                self.cleanups.append(now)
+                if self.cleanup_error is not None:
+                    raise self.cleanup_error
+                try:
+                    await asyncio.sleep(self.cleanup_delay)
+                except asyncio.CancelledError:
+                    self.cleanup_cancelled = True
+                    raise
+                return {"pid": 456}
             if self.current_path != self.launched_path:
                 self.launches.append(now)
                 self.launched_path = self.current_path
@@ -111,6 +136,8 @@ class Guest:
                 raise http_failure("failed to open file - No such file")
             index = min(len(self.launches) - 1, len(self.returncodes) - 1)
             return str(self.returncodes[index]).encode(), False
+        if filepath.endswith("script.stdout"):
+            await asyncio.sleep(self.stdout_delay)
         return b"", False
 
     def runner(self, loop, *, os_type, spec=None):
@@ -244,3 +271,75 @@ def test_cancellation_stops_transport_without_launch_or_retry(os_type):
     assert len(guest.uploads) == 1
     assert guest.cancelled
     assert guest.launches == []
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_cleanup_cannot_extend_original_execution_deadline(os_type, returncode):
+    guest = Guest(
+        upload_delay=179,
+        stdout_delay=38,
+        cleanup_delay=3600,
+        returncodes=(returncode,),
+    )
+    agent = AgentCommands(guest, "pve")  # type: ignore[arg-type]
+    executor = GuestExecutor(agent, 100, os_type)
+    with virtual_clock() as loop:
+        start = loop.time()
+        result = loop.run_until_complete(executor.exec(["echo", "ready"], timeout=30))
+        assert loop.time() - start == 218
+
+    assert result.returncode == returncode
+    assert result.success is (returncode == 0)
+    assert guest.launches == [start + 179]
+    assert guest.cleanups == [start + 217]
+    assert guest.cleanup_cancelled
+    assert len(guest.uploads) == 1
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
+def test_cleanup_does_not_start_when_execution_allowance_is_spent(os_type):
+    guest = Guest(upload_delay=179, stdout_delay=38)
+    agent = AgentCommands(guest, "pve")  # type: ignore[arg-type]
+    executor = GuestExecutor(agent, 100, os_type)
+    exec_once = agent.exec_command_once
+    cleanup = None
+    with virtual_clock() as loop:
+
+        def elapsed_before_cleanup(vm_id, command):
+            nonlocal cleanup
+            operation = exec_once(vm_id, command)
+            if _is_cleanup(command):
+                # Time can pass after result confirmation but before cleanup starts.
+                loop.now += 1
+                cleanup = operation
+            return operation
+
+        start = loop.time()
+        with patch.object(agent, "exec_command_once", elapsed_before_cleanup):
+            result = loop.run_until_complete(
+                executor.exec(["echo", "ready"], timeout=30)
+            )
+        assert loop.time() - start == 218
+
+    assert result.success
+    assert guest.launches == [start + 179]
+    assert guest.cleanups == []
+    assert cleanup is not None
+    assert inspect.getcoroutinestate(cleanup) == inspect.CORO_CLOSED
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
+def test_cleanup_transport_failure_preserves_result_without_retry(os_type):
+    guest = Guest(cleanup_error=httpx.ReadTimeout("lost cleanup acknowledgement"))
+    agent = AgentCommands(guest, "pve")  # type: ignore[arg-type]
+    executor = GuestExecutor(agent, 100, os_type)
+    with virtual_clock() as loop:
+        start = loop.time()
+        result = loop.run_until_complete(executor.exec(["echo", "ready"], timeout=30))
+        assert loop.time() == start
+
+    assert result.success
+    assert guest.launches == [start]
+    assert guest.cleanups == [start]
+    assert len(guest.uploads) == 1
