@@ -214,9 +214,9 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     attempt is a non-zero exit, a guest-side timeout, a `test` that is not
     executable, or output over the exec size limit; each consumes one of
     `retries`. Transport failures that leave no unresolved command do not count
-    toward `retries`. The executor first retries safe operations; 25 consecutive
-    unreachable attempts then fail the VM. Once passed, the healthcheck is not
-    re-run for the rest of the sample.
+    toward `retries`. One budget of 25 failed transport requests spans each
+    execution, with recovery spaced by `interval`; exhaustion fails startup.
+    Once passed, the healthcheck is not re-run for the rest of the sample.
 
     A Windows check that outlives its completion wait ends sample setup,
     regardless of `retries` or `start_period`, because the timeout does not stop

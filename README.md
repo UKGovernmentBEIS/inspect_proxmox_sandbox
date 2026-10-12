@@ -567,11 +567,15 @@ Two things worth knowing:
 
 ## Guest-agent replies and command waiting
 
-`exec()` retries safe uploads and status reads, but sends each command launch once on both Linux and Windows. A connection failure known to happen before sending the launch remains retryable. If the command may have started and completion cannot be confirmed, `GuestExecIncompleteError` ends the sample with the VM, PID if known and script path. It does not automatically launch the command again.
+`exec()` gives each command an execution ID on both Linux and Windows. A guest-side claim prevents repeated launch requests from running it again, including after it finishes. Uploads, launches and result reads can therefore recover from transient transport failures without starting a new command. The claim and terminal result remain until the VM is removed; per-command cleanup removes only scripts, input and output.
+
+Completion comes from the command's terminal result, not a retry's PID. If it cannot be confirmed, `GuestExecIncompleteError` ends the sample with the VM, PID if known and script path. If completion is confirmed but output cannot be retrieved, `GuestExecResultError` retains that identity and exit code. Neither error permits automatic replay. Recovery assumes the guest records remain intact; it does not cover snapshot rollback, deleted records or power-loss durability.
 
 Linux enforces command timeouts inside the guest. Windows currently only limits the completion wait, so expiry raises `GuestExecIncompleteError`: the guest command may still be running. Windows guest-side timeout enforcement is not implemented.
 
-Uploads, retries and result collection share a waiting allowance: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup gets a separate two-minute allowance per step.
+Uploads, retries and result collection share a waiting allowance: the command timeout plus 188 seconds for grace and communication. Preparation and launch recovery are capped at 180 seconds within that allowance. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Sample resource cleanup gets a separate two-minute allowance per step.
+
+Each healthcheck execution has one budget of 25 failed transport requests across upload, launch, status and result reads, with retries spaced by its `interval`. Exhaustion fails startup rather than starting another transport budget. Confirmed unhealthy results still use the healthcheck's service retry policy.
 
 Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
 
