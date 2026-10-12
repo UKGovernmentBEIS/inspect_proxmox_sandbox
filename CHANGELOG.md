@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fix: a `sample_init` failure (e.g. a VM whose QEMU guest agent never answers) no longer tears down the partially-created VMs and SDN itself; they are left for `task_cleanup`, so `--no-sandbox-cleanup` now keeps them for inspection. The next sample to acquire the instance sweeps leftover `inspect`-tagged VMs as well as leftover ephemeral VNETs
+- Fix: with `--no-sandbox-cleanup`, a failed `sample_init` now leaves its partial VMs and SDN up for inspection instead of destroying them
 - VMs with `is_sandbox=False` are no longer given to Inspect as sandboxes, fixing a bug where Inspect since 0.3.274 tries to `exec()` on every sandbox, causing ~7-minute timeouts for each VM without a guest agent during sample init.
 - `kali2025.4` built-in now installs `kali-linux-everything`; delete any existing `builtin-kali2025.4` template to pick this up
 - Bundled provisioners restrict guest access to host services before connection tracking, retaining management ingress and DHCP/DNS. New hosts carry contract `aisi3`.
