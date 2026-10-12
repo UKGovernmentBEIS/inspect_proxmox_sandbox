@@ -109,9 +109,5 @@ def build_launch(tmp_start: str, parts: Sequence[str] = ()) -> list[str]:
 
 def build_cleanup(paths: Sequence[str]) -> list[str]:
     """Remove only the exact output/staging files chosen by the shared owner."""
-    command = (
-        "del /f /q " + " ".join(paths) + " 2>nul"
-        if paths
-        else "exit /b 0"
-    )
+    command = "del /f /q " + " ".join(paths) + " 2>nul" if paths else "exit /b 0"
     return [*_CMD, command]
