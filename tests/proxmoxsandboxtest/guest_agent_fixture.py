@@ -114,7 +114,11 @@ def execution_stage(command: list[str]) -> Literal["prepare", "launch", "cleanup
         return "launch"
     if "CreateDirectory" in body or ("stat -c" in body and "mkdir -m 700" in body):
         return "prepare"
-    if "Remove-Item" in body or "[IO.File]::Delete(" in body:
+    if (
+        "Remove-Item" in body
+        or "[IO.File]::Delete(" in body
+        or (command[:2] == ["sh", "-c"] and "rm -f -- " in body)
+    ):
         return "cleanup"
     # Generic write_file's ISO copy still invokes a raw guest command.
     return "launch"
