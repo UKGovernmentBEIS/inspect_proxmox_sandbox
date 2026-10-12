@@ -97,30 +97,32 @@ def test_claim_precedes_assembly_and_duplicate_branch_cannot_mutate_files() -> N
     argv = exec_windows.build_launch(PREFIX, parts)
     assert argv[:5] == ["cmd.exe", "/d", "/e:on", "/v:off", "/c"]
     launch = argv[-1]
-    assert launch.startswith(f'mkdir "{PREFIX}claimed" 2>nul & ')
+    assert launch.startswith(f"mkdir {PREFIX}claimed 2>nul & ")
     assert (
-        f'if errorlevel 1 (if exist "{PREFIX}claimed\\" '
+        f"if errorlevel 1 (if exist {PREFIX}claimed\\ "
         "(exit /b 0) else (echo Cannot claim guest execution 1>&2 & exit /b 125))"
     ) in launch
     assert launch.endswith(
-        f'else (copy /b "{parts[0]}"+"{parts[1]}" "{PREFIX}script.bat" >nul '
-        f'&& "{PREFIX}script.bat")'
+        f"else (copy /b {parts[0]}+{parts[1]} {PREFIX}script.bat >nul "
+        f"&& {PREFIX}script.bat)"
     )
+    assert '"' not in launch
     assert "del " not in launch
     assert "rmdir" not in launch
 
 
 def test_unchunked_launch_still_claims_first() -> None:
     launch = exec_windows.build_launch(PREFIX)[-1]
-    assert launch.startswith(f'mkdir "{PREFIX}claimed"')
-    assert launch.endswith(f'else ("{PREFIX}script.bat")')
+    assert launch.startswith(f"mkdir {PREFIX}claimed")
+    assert launch.endswith(f"else ({PREFIX}script.bat)")
     assert "copy " not in launch
 
 
 def test_cleanup_has_only_exact_files() -> None:
     paths = [f"{PREFIX}script.stdout", f"{PREFIX}script.stderr"]
     command = exec_windows.build_cleanup(paths)[-1]
-    assert command == f'del /f /q "{paths[0]}" "{paths[1]}" 2>nul'
+    assert command == f"del /f /q {paths[0]} {paths[1]} 2>nul"
+    assert '"' not in command
     assert "*" not in command
     assert "claimed" not in command
     assert "returncode" not in command

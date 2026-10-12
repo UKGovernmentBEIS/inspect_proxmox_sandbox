@@ -90,15 +90,17 @@ def build_launch(tmp_start: str, parts: Sequence[str] = ()) -> list[str]:
     """Claim before assembly or execution; duplicates leave all files intact."""
     claim = f"{tmp_start}claimed"
     script = f"{tmp_start}script{SCRIPT_SUFFIX}"
-    launch = f'"{script}"'
+    # These paths are generated without whitespace or shell metacharacters.
+    # QGA escapes embedded quotes for a C argv parser, not cmd's /c parser.
+    launch = script
     if parts:
-        sources = "+".join(f'"{part}"' for part in parts)
-        launch = f'copy /b {sources} "{script}" >nul && {launch}'
+        sources = "+".join(parts)
+        launch = f"copy /b {sources} {script} >nul && {launch}"
     # Check the directory only after the atomic creation attempt. An unrelated
     # mkdir failure must not be reported as a duplicate execution.
     command = (
-        f'mkdir "{claim}" 2>nul & '
-        f'if errorlevel 1 (if exist "{claim}\\" '
+        f"mkdir {claim} 2>nul & "
+        f"if errorlevel 1 (if exist {claim}\\ "
         "(exit /b 0) else (echo Cannot claim guest execution 1>&2 & exit /b 125)) "
         f"else ({launch})"
     )
@@ -108,7 +110,7 @@ def build_launch(tmp_start: str, parts: Sequence[str] = ()) -> list[str]:
 def build_cleanup(paths: Sequence[str]) -> list[str]:
     """Remove only the exact output/staging files chosen by the shared owner."""
     command = (
-        "del /f /q " + " ".join(f'"{path}"' for path in paths) + " 2>nul"
+        "del /f /q " + " ".join(paths) + " 2>nul"
         if paths
         else "exit /b 0"
     )
