@@ -497,7 +497,7 @@ headless too — its template display setting is overridden to `none`.
 > shows an empty serial terminal even though the guest agent is working — that is
 > expected, and not a reason to re-expose the device.
 
-The `os_type` field determines how commands are executed inside the VM. Windows types (any value starting with `w`) use batch scripts instead of shell scripts. The QEMU guest agent channel on Windows is less reliable than on Linux, so transient errors are automatically retried.
+The `os_type` field determines how commands are executed inside the VM. Windows types (any value starting with `w`) use batch scripts instead of shell scripts. Both use the upload, launch and result-collection policy described below.
 
 ## Observing the VMs
 
@@ -567,7 +567,11 @@ Two things worth knowing:
 
 ## Guest-agent replies and command waiting
 
-`exec()` shares a waiting allowance across uploads, retries and result collection: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup gets a separate two-minute allowance per step, and the guest command may keep running after the provider raises `TimeoutError`.
+`exec()` retries safe uploads and status reads, but sends each command launch once on both Linux and Windows. A connection failure known to happen before sending the launch remains retryable. If the command may have started and completion cannot be confirmed, `GuestExecIncompleteError` ends the sample with the VM, PID if known and script path. It does not automatically launch the command again.
+
+Linux enforces command timeouts inside the guest. Windows currently only limits the completion wait, so expiry raises `GuestExecIncompleteError`: the guest command may still be running. Windows guest-side timeout enforcement is not implemented.
+
+Uploads, retries and result collection share a waiting allowance: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup gets a separate two-minute allowance per step.
 
 Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
 
