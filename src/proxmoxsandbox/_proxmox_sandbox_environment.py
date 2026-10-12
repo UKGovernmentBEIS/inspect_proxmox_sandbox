@@ -524,8 +524,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             self.agent_commands,
             self.vm_id,
             self.os_type,
-            write_file=self.write_file,
-            try_iso_write=self._try_iso_write,
         )
         return await executor.exec(cmd, input, cwd, env, user, timeout)
 

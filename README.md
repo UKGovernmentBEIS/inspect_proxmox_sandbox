@@ -577,7 +577,15 @@ Uploads, retries and result collection share a waiting allowance: the command ti
 
 Each healthcheck execution has one budget of 25 failed transport requests across upload, launch, status and result reads, with retries spaced by its `interval`. Exhaustion fails startup instead of starting another transport budget. Confirmed unhealthy results still use the healthcheck's service retry policy.
 
-Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
+### Execution permissions and trust
+
+QGA must run as root on Linux or LocalSystem on Windows. Before uploading any execution data, the provider creates and verifies a private directory: service-owned `0700` on Linux, or a protected SYSTEM-only inheritable DACL on Windows. Existing objects with unexpected permissions, owners or links are rejected, not repaired. Windows preparation uses the built-in Windows PowerShell and .NET Framework. The OS temporary directory and its ancestors must retain their normal protected ownership and deletion permissions.
+
+Scripts, input, output and recovery records stay inside that directory. Large execution inputs use private QGA chunks, not the general `write_file` or ISO transfer paths. A Linux command with `user=` receives its intended input through an already-open descriptor; it does not gain access to the directory. No privileges or capabilities are granted. These controls do not hide secrets the caller explicitly puts in a payload's process arguments, or restrict files the payload itself creates.
+
+Root, SYSTEM and accounts with equivalent privileges can still alter every guest record and response. Execution IDs prevent accidental replay; they do not authenticate a hostile guest's output or prove that its command stopped. Guest output stays data: the provider does not evaluate it as host code, open it as a host path or use it to choose a network destination. Callers must not treat guest output as trusted instructions or expose privileged host tools on that basis.
+
+Guest HTTP responses are size-limited before JSON parsing, then checked for the expected types, bounded process IDs, return codes and file content. HTTP diagnostics escape terminal control characters; returned command output remains unchanged text. Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent a guest from denying service.
 
 ## Feature Roadmap
 

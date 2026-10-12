@@ -3,7 +3,6 @@
 import asyncio
 import os
 import re
-from collections.abc import Awaitable, Callable
 from logging import getLogger
 from uuid import uuid4
 
@@ -36,9 +35,6 @@ _EXEC_AGENT_BUDGET_SECONDS = 180
 _EXEC_POLL_MAX_INTERVAL_SECONDS = 30
 _EXEC_UNTIMED_WAIT_SECONDS = 4 * 60 * 60
 _RETURNCODE_RE = re.compile(r"-?\d{1,10}")
-
-WriteFile = Callable[[str, str | bytes], Awaitable[None]]
-TryIsoWrite = Callable[[str, str | bytes], Awaitable[bool]]
 
 
 def _split_chunks(
@@ -80,9 +76,6 @@ class GuestExecutor:
         agent_commands: AgentCommands,
         vm_id: int,
         os_type: str | None = None,
-        *,
-        write_file: WriteFile | None = None,
-        try_iso_write: TryIsoWrite | None = None,
     ) -> None:
         self.agent_commands = agent_commands
         self.vm_id = vm_id
@@ -90,8 +83,6 @@ class GuestExecutor:
         self.platform = exec_windows if windows else exec_linux
         self._separator = "\\" if windows else "/"
         self._inline_stdin_limit = -1 if windows else _INLINE_STDIN_LIMIT
-        self._write_file = write_file
-        self._try_iso_write = try_iso_write
 
     async def exec(
         self,
@@ -103,9 +94,10 @@ class GuestExecutor:
         timeout: int | None = None,
     ) -> ExecResult[str]:
         """Run a command once and recover its result through transport errors."""
-        tmp_start = (
-            f"{self.platform.TMP_DIR}{self._separator}proxmox_exec_{uuid4().hex}_"
+        workspace = (
+            f"{self.platform.TMP_DIR}{self._separator}proxmox_exec_{uuid4().hex}"
         )
+        tmp_start = f"{workspace}{self._separator}"
         script_path = f"{tmp_start}script{self.platform.SCRIPT_SUFFIX}"
         poll_timeout = timeout if timeout is not None else remaining_budget()
         if poll_timeout is None:
@@ -122,24 +114,25 @@ class GuestExecutor:
 
         async def prepare_and_launch() -> int:
             nonlocal launch_attempted
+            # Validate the private workspace before QGA creates any data files.
+            await self._prepare_workspace(workspace)
             stdin = input
             stdin_file = None
+            stdin_parts: list[str] = []
             if input is not None:
                 data = input if isinstance(input, bytes) else input.encode("utf-8")
                 if len(data) > self._inline_stdin_limit:
                     stdin, stdin_file = None, f"{tmp_start}stdin"
-                    disposable.append(stdin_file)
-                    if len(data) > _WRITE_CHUNK_SIZE and self._write_file is not None:
-                        await self._write_file(stdin_file, data)
-                    else:
-                        await self.agent_commands.write_file(
-                            vm_id=self.vm_id, filepath=stdin_file, content=data
-                        )
+                    stdin_parts, uploaded = await self._stage_file(stdin_file, data)
+                    disposable.extend(uploaded)
             script = self.platform.build_script(
                 tmp_start, cmd, stdin, cwd, env or {}, user, timeout, stdin_file
             )
-            launch, uploaded = await self._upload_script(tmp_start, script)
+            parts, uploaded = await self._stage_file(
+                script_path, script.encode("utf-8")
+            )
             disposable.extend(uploaded)
+            launch = self.platform.build_launch(tmp_start, parts, stdin_parts)
             launch_attempted = True
             return await self.agent_commands.exec_command(self.vm_id, launch)
 
@@ -252,28 +245,52 @@ class GuestExecutor:
             raise PermissionError("Permission denied executing command")
         return result
 
-    async def _upload_script(
-        self, tmp_start: str, script: str
+    async def _prepare_workspace(self, workspace: str) -> None:
+        """Confirm private directory creation before uploading sensitive bytes."""
+        command = self.platform.build_prepare(workspace)
+        delay = 0.1
+        while True:
+            pid = await self.agent_commands.exec_command(self.vm_id, command)
+            while True:
+                status = await self.agent_commands.get_agent_exec_status(
+                    self.vm_id, pid
+                )
+                if status.exited:
+                    break
+                await asyncio.sleep(delay)
+                delay = min(delay * 1.3, _EXEC_POLL_MAX_INTERVAL_SECONDS)
+            if status.exitcode == 0 and status.signal is None:
+                return
+            if status.exitcode is not None or status.signal is not None:
+                raise RuntimeError(
+                    f"VM {self.vm_id}: unable to prepare private execution directory "
+                    f"{workspace} (exit code {status.exitcode}, signal {status.signal})"
+                )
+            # A consumed status record is not proof that preparation succeeded.
+            # Creation/validation is idempotent and shares the preparation deadline.
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.3, _EXEC_POLL_MAX_INTERVAL_SECONDS)
+
+    async def _stage_file(
+        self, filepath: str, data: bytes
     ) -> tuple[list[str], list[str]]:
-        """Stage immutable bytes; only the claimed launcher may assemble them."""
-        script_path = f"{tmp_start}script{self.platform.SCRIPT_SUFFIX}"
-        data = script.encode("utf-8")
-        if self._try_iso_write is not None and await self._try_iso_write(
-            script_path, data
-        ):
-            return self.platform.build_launch(tmp_start), [script_path]
+        """Upload only into the private workspace; the claimant assembles chunks.
+
+        Generic file transfers can expose staging files or attached ISO contents
+        to other guest users, independently of the destination's permissions.
+        """
         if len(data) <= _WRITE_CHUNK_SIZE:
             await self.agent_commands.write_file(
-                vm_id=self.vm_id, filepath=script_path, content=data
+                vm_id=self.vm_id, filepath=filepath, content=data
             )
-            return self.platform.build_launch(tmp_start), [script_path]
+            return [], [filepath]
         chunks, width = _split_chunks(data)
-        parts = [f"{script_path}.part{i:0{width}d}" for i in range(len(chunks))]
+        parts = [f"{filepath}.part{i:0{width}d}" for i in range(len(chunks))]
         for part, chunk in zip(parts, chunks):
             await self.agent_commands.write_file(
                 vm_id=self.vm_id, filepath=part, content=chunk
             )
-        return self.platform.build_launch(tmp_start, parts), [script_path, *parts]
+        return parts, [filepath, *parts]
 
     async def _read_return_code(self, tmp_start: str) -> int | None:
         """Read the atomically published terminal record, if it exists."""
