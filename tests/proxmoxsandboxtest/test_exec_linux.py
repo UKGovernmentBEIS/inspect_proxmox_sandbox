@@ -4,6 +4,7 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -28,7 +29,7 @@ class _Execution:
 
     @property
     def prefix(self) -> str:
-        return str(self.directory / "execution_")
+        return str(self.directory / "execution") + "/"
 
     def path(self, suffix: str) -> Path:
         return Path(f"{self.prefix}{suffix}")
@@ -57,19 +58,32 @@ class _Execution:
         self.path("script.sh").write_text(script)
         return script
 
-    def launch(self, parts: Sequence[str] = ()) -> subprocess.Popen[bytes]:
+    def launch(
+        self,
+        parts: Sequence[str] = (),
+        stdin_parts: Sequence[str] = (),
+        *,
+        umask: int = -1,
+    ) -> subprocess.Popen[bytes]:
         process = subprocess.Popen(
-            exec_linux.build_launch(self.prefix, parts),
+            exec_linux.build_launch(self.prefix, parts, stdin_parts),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            umask=umask,
         )
         self.processes.append(process)
         return process
 
-    def run(self, parts: Sequence[str] = (), *, timeout: float = 5) -> int:
-        process = self.launch(parts)
+    def run(
+        self,
+        parts: Sequence[str] = (),
+        stdin_parts: Sequence[str] = (),
+        *,
+        timeout: float = 5,
+    ) -> int:
+        process = self.launch(parts, stdin_parts)
         process.communicate(timeout=timeout)
         assert process.returncode is not None
         return process.returncode
@@ -98,6 +112,9 @@ class _Execution:
 @pytest.fixture
 def execution(tmp_path: Path) -> Generator[_Execution, None, None]:
     instance = _Execution(tmp_path)
+    subprocess.run(
+        exec_linux.build_prepare(instance.prefix.rstrip("/")), check=True, timeout=5
+    )
     try:
         yield instance
     finally:
@@ -114,6 +131,77 @@ def execution(tmp_path: Path) -> Generator[_Execution, None, None]:
 def _snapshot(path: Path) -> tuple[bytes, int, int]:
     stat = path.stat()
     return path.read_bytes(), stat.st_ino, stat.st_mtime_ns
+
+
+def test_prepare_is_private_and_replay_safe(tmp_path: Path) -> None:
+    workspace = tmp_path / "directory with 'quotes' and $shell syntax"
+    prepare = exec_linux.build_prepare(str(workspace))
+    subprocess.run(prepare, check=True, timeout=5, umask=0)
+    metadata = workspace.stat()
+    assert metadata.st_uid == os.geteuid()
+    assert stat.S_IMODE(metadata.st_mode) == 0o700
+    assert stat.S_ISDIR(metadata.st_mode)
+    marker = workspace / "retained"
+    marker.write_text("existing state")
+    before = _snapshot(marker)
+
+    subprocess.run(prepare, check=True, timeout=5, umask=0)
+
+    assert _snapshot(marker) == before
+    assert workspace.stat().st_ino == metadata.st_ino
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize(
+    "kind", ["file", "symlink", "dangling_symlink", "readable_directory"]
+)
+def test_prepare_rejects_unsafe_existing_object_unchanged(
+    tmp_path: Path, kind: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    target = tmp_path / "target"
+    if kind == "file":
+        workspace.write_text("unowned state")
+    elif kind in {"symlink", "dangling_symlink"}:
+        if kind == "symlink":
+            target.mkdir(mode=0o700)
+        workspace.symlink_to(target, target_is_directory=True)
+    else:
+        workspace.mkdir(mode=0o755)
+        workspace.chmod(0o755)
+    before = workspace.lstat()
+
+    completed = subprocess.run(
+        exec_linux.build_prepare(str(workspace)), capture_output=True, timeout=5
+    )
+
+    assert completed.returncode != 0
+    assert b"Unsafe guest execution workspace" in completed.stderr
+    after = workspace.lstat()
+    assert (after.st_ino, after.st_mode, after.st_uid) == (
+        before.st_ino,
+        before.st_mode,
+        before.st_uid,
+    )
+    if kind == "file":
+        assert workspace.read_text() == "unowned state"
+    if kind == "symlink":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="verifies another guest uid")
+def test_prepare_rejects_foreign_owner_unchanged(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o700)
+    os.chown(workspace, 65534, 65534)
+
+    completed = subprocess.run(
+        exec_linux.build_prepare(str(workspace)), capture_output=True, timeout=5
+    )
+
+    assert completed.returncode != 0
+    assert workspace.stat().st_uid == 65534
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
 
 
 @pytest.mark.parametrize(
@@ -374,8 +462,9 @@ def test_payload_observes_cwd_and_environment(execution: _Execution) -> None:
     assert execution.path("script.stdout").read_text() == f"{cwd}\n{value}"
 
 
+@pytest.mark.parametrize("user", ["requested user", "--help"])
 def test_user_payload_forwarding_preserves_supervision(
-    execution: _Execution, monkeypatch: pytest.MonkeyPatch
+    execution: _Execution, monkeypatch: pytest.MonkeyPatch, user: str
 ) -> None:
     binaries = execution.directory / "bin"
     binaries.mkdir()
@@ -392,13 +481,13 @@ def test_user_payload_forwarding_preserves_supervision(
     cwd.mkdir()
     execution.write(
         ["sh", "-c", 'printf "%s:%s" "$PWD" "$EXEC_TEST_VALUE"; exit 17'],
-        user="requested user",
+        user=user,
         env={"EXEC_TEST_VALUE": "forwarded"},
         cwd=str(cwd),
     )
 
     assert execution.run() == 0
-    assert arguments.read_text() == "-l\nrequested user\n"
+    assert arguments.read_text() == f"-l\n--\n{user}\n"
     assert execution.path("script.stdout").read_text() == f"{cwd}:forwarded"
     assert execution.path("script.returncode").read_text() == "17"
 
@@ -452,6 +541,111 @@ def test_staged_stdin_round_trips(execution: _Execution) -> None:
     assert execution.run() == 0
     assert execution.path("script.stdout").read_bytes() == stdin
     assert execution.path("script.returncode").read_text() == "0"
+
+
+def test_user_payload_gets_staged_input_on_a_private_descriptor(
+    execution: _Execution, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binaries = execution.directory / "bin"
+    binaries.mkdir()
+    fake_su = binaries / "su"
+    fake_su.write_text("#!/bin/sh\nexec /bin/sh\n")
+    fake_su.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binaries}:{os.environ['PATH']}")
+    data = b"\x00\xff\ninput from the private workspace"
+    source = execution.path("stdin")
+    source.write_bytes(data)
+    source.chmod(0o600)
+    execution.write(
+        ["sh", "-c", "cat; test ! -e /proc/self/fd/3"],
+        user="requested user",
+        stdin_file=str(source),
+    )
+
+    assert execution.run() == 0
+
+    assert execution.path("script.stdout").read_bytes() == data
+    assert execution.path("script.returncode").read_text() == "0"
+    assert stat.S_IMODE(source.stat().st_mode) == 0o600
+    assert stat.S_IMODE(source.parent.stat().st_mode) == 0o700
+
+
+def test_user_payload_source_stays_off_argv_and_preserves_arbitrary_text(
+    execution: _Execution, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binaries = execution.directory / "bin"
+    binaries.mkdir()
+    fake_su = binaries / "su"
+    fake_su.write_text('#!/bin/sh\n[ "$#" -eq 3 ] || exit 91\nexec /bin/sh\n')
+    fake_su.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binaries}:{os.environ['PATH']}")
+    value = f"first\nEOF{execution.prefix}EOF\n'quotes' and $syntax"
+    execution.write(
+        ["printf", "%s", value],
+        env={"EXEC_TEST_VALUE": value},
+        user="requested user",
+    )
+
+    assert execution.run() == 0
+    assert execution.path("script.stdout").read_text() == value
+    assert execution.path("script.returncode").read_text() == "0"
+
+
+def test_chunked_stdin_is_assembled_after_the_persistent_claim(
+    execution: _Execution,
+) -> None:
+    data = b"\x00\xff\ninput with multiple chunks"
+    parts = [execution.path("stdin.part0"), execution.path("stdin.part1")]
+    parts[0].write_bytes(data[:5])
+    parts[1].write_bytes(data[5:])
+    execution.write(["cat"], stdin_file=str(execution.path("stdin")))
+    names = [str(part) for part in parts]
+
+    assert execution.run(stdin_parts=names) == 0
+    before = _snapshot(execution.path("stdin"))
+    assert before[0] == data
+    assert stat.S_IMODE(execution.path("stdin").stat().st_mode) == 0o600
+    assert execution.path("script.stdout").read_bytes() == data
+    assert execution.path("script.returncode").read_text() == "0"
+
+    parts[0].write_bytes(b"changed after completion")
+    assert execution.run(stdin_parts=names) == 0
+    assert _snapshot(execution.path("stdin")) == before
+    assert execution.path("script.stdout").read_bytes() == data
+
+
+def test_failed_stdin_assembly_keeps_claim(execution: _Execution) -> None:
+    execution.write(["cat"], stdin_file=str(execution.path("stdin")))
+    part = execution.path("stdin.part0")
+
+    assert execution.run(stdin_parts=[str(part)]) != 0
+    assert execution.path("claimed").is_dir()
+    assert not execution.path("script.returncode").exists()
+
+    part.write_bytes(b"late input")
+    assert execution.run(stdin_parts=[str(part)]) == 0
+    assert not execution.path("script.stdout").exists()
+    assert not execution.path("script.returncode").exists()
+
+
+def test_provider_permissions_do_not_change_payload_umask(
+    execution: _Execution,
+) -> None:
+    created = shlex.quote(str(execution.path("payload_created")))
+    script = execution.write(["sh", "-c", f"umask; : > {created}"])
+    execution.path("script.sh").unlink()
+    part = execution.path("part0")
+    part.write_text(script)
+
+    process = execution.launch([str(part)], umask=0o027)
+    process.communicate(timeout=5)
+
+    assert process.returncode == 0
+    assert execution.path("script.stdout").read_text().strip() == "0027"
+    assert stat.S_IMODE(execution.path("payload_created").stat().st_mode) == 0o640
+    assert stat.S_IMODE(execution.path("claimed").stat().st_mode) == 0o700
+    for suffix in ("script.sh", "script.stdout", "script.stderr", "script.returncode"):
+        assert stat.S_IMODE(execution.path(suffix).stat().st_mode) == 0o600
 
 
 @pytest.mark.skipif(shutil.which("timeout") is None, reason="needs GNU timeout")
