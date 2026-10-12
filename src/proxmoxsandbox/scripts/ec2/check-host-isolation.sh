@@ -1,12 +1,12 @@
 #!/bin/bash
-# Run *on the host*. Checks the guest-isolation mechanism from ../userdata.sh: the units
+# Run *on the host*. Checks the guest-isolation mechanism from userdata.sh: the units
 # are installed, enabled and last ran OK (guards against stale AMIs), and the rules they
 # install are loaded. check-guest-isolation.sh probes the effect from inside a guest; run
 # both — this one ends by printing the guest command line to paste.
 # One PASS/FAIL/SKIP line per check. Every check runs; the exit status is nonzero if any
 # failed, and the trailing summary line says how many.
 #
-# Assumes the configuration in the parent README's "Properly isolating the host": egress
+# Assumes the configuration in the README's "Properly isolating the host": egress
 # lockdown armed, no route off the VPC, reachable only via interface endpoints. That is
 # the configuration worth checking; an ordinary host fails these by design.
 # shellcheck disable=SC2329  # the check helpers are invoked indirectly, via check
@@ -94,7 +94,7 @@ node=$(hostname)
 marker=/etc/inspect-proxmox-egress-lockdown
 echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev/null | head -1)"
 
-# The contract stamped by ../userdata.sh. Read locally rather than over the API: if the halt
+# The contract stamped by userdata.sh. Read locally rather than over the API: if the halt
 # unit has masked pvedaemon, an API read fails and a fine host looks like a stale one.
 WANT_CONTRACT=3
 contract=$(pveversion 2>/dev/null | head -1)
@@ -170,7 +170,7 @@ fw_enabled() {
 # An ACCEPT with no --iface applies on every SDN gateway as well as the management address,
 # so it is open to guests on any vnet; one bound to an SDN bridge is open to that vnet. Both
 # are invisible to a check that only asks whether the wanted rules are there, so the whole
-# inbound ACCEPT set is compared against the set ../userdata.sh creates. pvesh reports .enable
+# inbound ACCEPT set is compared against the set userdata.sh creates. pvesh reports .enable
 # only for rules that carry it, and a rule without it is enabled.
 oneline() { printf '%s' "${1:-<none>}" | tr '\n' ' '; }
 inbound_accepts() { # one "proto/dport@iface" per inbound ACCEPT, sorted; macros by name
@@ -231,6 +231,52 @@ check "guest DNS rejected rather than dropped: INPUT udp/53 -j REJECT" \
     has_rule filter INPUT "! -i lo -p udp -m udp --dport 53 " "-j REJECT"
 check "guest DNS rejected rather than dropped: INPUT tcp/53 -j REJECT" \
     has_rule filter INPUT "! -i lo -p tcp -m tcp --dport 53 " "-j REJECT --reject-with tcp-reset"
+
+echo
+echo "# instance metadata service, as seen from the host"
+imdsv1_refused() {
+    local code
+    code=$(http_code http://169.254.169.254/latest/meta-data/)
+    [ "$code" = 401 ] && return 0
+    echo "HTTP ${code:-<none>}, want 401"
+    return 1
+}
+check "IMDSv2 required: GET with no session token is refused" imdsv1_refused
+# IMDS exposes no field for HttpPutResponseHopLimit and the AMI has no tcpdump, so the limit
+# is read off the wire with iptables: AWS stamps the data segments of a token PUT response with
+# IP TTL = hop limit, so on a hop-limit-1 host every reply segment arrives with TTL 1 and none
+# with more. The SYN-ACK carries an ordinary TTL, so segments with the SYN bit set are left
+# out. The two rules have no target, so they count and decide nothing; they sit at position 1
+# only for the duration of this check, which is why it runs after the raw PREROUTING ordering
+# check above. Pinning curl's source port to a range keeps other IMDS clients on the host (SSM
+# agent, OTel) out of the counts.
+imds_hop_rule() { # -I|-D, --ttl-eq|--ttl-gt
+    local op=$1 ttl=$2
+    set -- -w -t raw "$op" PREROUTING
+    [ "$op" = -I ] && set -- "$@" 1
+    iptables "$@" -s 169.254.169.254 -p tcp --sport 80 --dport 40123:40133 --tcp-flags SYN NONE \
+        -m ttl "$ttl" 1 -m comment --comment inspect-imds-hop-probe
+}
+imds_hop_count() { iptables -w -t raw -vnxL PREROUTING | awk -v m="TTL $1 1" '/inspect-imds-hop-probe/ && index($0, m) { print $1; exit }'; }
+imds_hop_limit_is_1() {
+    local err token eq gt
+    if ! err=$(imds_hop_rule -I --ttl-eq 2>&1 && imds_hop_rule -I --ttl-gt 2>&1); then
+        imds_hop_rule -D --ttl-eq 2>/dev/null
+        imds_hop_rule -D --ttl-gt 2>/dev/null
+        echo "cannot insert counting rules: $err"
+        return 1
+    fi
+    token=$(curl -s --max-time 5 --local-port 40123-40133 -X PUT \
+        -H 'X-aws-ec2-metadata-token-ttl-seconds: 30' http://169.254.169.254/latest/api/token 2>/dev/null)
+    eq=$(imds_hop_count '==')
+    gt=$(imds_hop_count '>')
+    imds_hop_rule -D --ttl-eq 2>/dev/null
+    imds_hop_rule -D --ttl-gt 2>/dev/null
+    [ -n "$token" ] && [ "${eq:-0}" -ge 1 ] && [ "${gt:-0}" -eq 0 ] && return 0
+    echo "token length ${#token}; reply segments with TTL 1: ${eq:-?}, with TTL above 1: ${gt:-?}"
+    return 1
+}
+check "IMDS token replies stay on the host: hop limit 1" imds_hop_limit_is_1
 
 echo
 echo "# AWS-level controls, as seen from the host"
