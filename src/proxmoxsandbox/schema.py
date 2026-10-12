@@ -221,7 +221,7 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     A Windows check that outlives its completion wait ends sample setup,
     regardless of `retries` or `start_period`, because the timeout does not stop
     the guest process. Unknown completion on either OS aborts startup with the
-    VM, PID if known and script path, rather than starting an overlapping probe.
+    VM, PID if known and script path, instead of starting an overlapping probe.
 
     Attributes:
         test: Command to run inside the guest.

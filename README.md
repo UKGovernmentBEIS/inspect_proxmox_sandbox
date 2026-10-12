@@ -575,7 +575,7 @@ Linux enforces command timeouts inside the guest. Windows currently only limits 
 
 Uploads, retries and result collection share a waiting allowance: the command timeout plus 188 seconds for grace and communication. Preparation and launch recovery are capped at 180 seconds within that allowance. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Sample resource cleanup gets a separate two-minute allowance per step.
 
-Each healthcheck execution has one budget of 25 failed transport requests across upload, launch, status and result reads, with retries spaced by its `interval`. Exhaustion fails startup rather than starting another transport budget. Confirmed unhealthy results still use the healthcheck's service retry policy.
+Each healthcheck execution has one budget of 25 failed transport requests across upload, launch, status and result reads, with retries spaced by its `interval`. Exhaustion fails startup instead of starting another transport budget. Confirmed unhealthy results still use the healthcheck's service retry policy.
 
 Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
 

@@ -33,7 +33,7 @@ def build_script(
     if stdin is not None and stdin_file is None:
         raise NotImplementedError("Windows standard input must be staged in a file")
 
-    # Re-enter the same immutable batch file rather than quote the arbitrary
+    # Re-enter the same immutable batch file instead of quoting the arbitrary
     # command twice. A payload's `exit` or batch-file transfer cannot bypass the
     # supervising cmd's publication of the real child exit status.
     child = (

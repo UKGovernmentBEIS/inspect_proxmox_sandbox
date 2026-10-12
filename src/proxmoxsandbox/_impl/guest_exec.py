@@ -116,6 +116,7 @@ class GuestExecutor:
         deadline = asyncio.get_running_loop().time() + waiting_allowance
         pid: int | None = None
         launch_attempted = False
+        launch_error: httpx.HTTPError | TimeoutError | None = None
         returncode: int | None = None
         disposable: list[str] = []
 
@@ -143,14 +144,15 @@ class GuestExecutor:
             return await self.agent_commands.exec_command(self.vm_id, launch)
 
         async def collect() -> ExecResult[str]:
-            nonlocal pid, returncode
+            nonlocal pid, returncode, launch_error
             try:
                 pid = await within_budget(
                     prepare_and_launch(), _EXEC_AGENT_BUDGET_SECONDS
                 )
-            except (httpx.TransportError, httpx.HTTPStatusError, TimeoutError):
+            except (httpx.TransportError, httpx.HTTPStatusError, TimeoutError) as exc:
                 if not launch_attempted:
                     raise
+                launch_error = exc
                 # All launch acknowledgements may have been lost. The retained
                 # record can still recover the command without another launch.
                 logger.debug(
@@ -207,6 +209,10 @@ class GuestExecutor:
                     self.vm_id, pid, script_path, returncode
                 ) from exc
             if launch_attempted:
+                # A missing-result deadline adds no diagnostic detail to a lost
+                # launch response. Preserve it, but prefer a concrete read error.
+                if isinstance(exc, TimeoutError) and launch_error is not None:
+                    exc = launch_error
                 raise GuestExecIncompleteError(self.vm_id, pid, script_path) from exc
             if isinstance(exc, TimeoutError):
                 raise GuestAgentCommunicationTimeoutError(
