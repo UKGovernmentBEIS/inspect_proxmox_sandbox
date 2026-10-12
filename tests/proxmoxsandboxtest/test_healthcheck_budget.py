@@ -18,6 +18,8 @@ from proxmoxsandbox._impl.healthcheck import HealthCheckFailed, HealthCheckRunne
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox.schema import HealthCheck, VmConfig, VmSourceConfig
 
+from .guest_agent_fixture import execution_stage
+
 
 class VirtualLoop(asyncio.SelectorEventLoop):
     def __init__(self):
@@ -53,13 +55,16 @@ def http_failure(message="guest-file-close failed - got timeout"):
 
 
 def _is_cleanup(command):
-    return command[0] == "rm" or command[-1].startswith(("rm -f ", "del /f /q "))
+    return execution_stage(command) == "cleanup"
 
 
 class Guest:
     def __init__(
         self,
         *,
+        prepare_failures=0,
+        prepare_status_failures=0,
+        prepare_delay=0,
         upload_failures=0,
         read_failures=0,
         upload_delay=0,
@@ -70,6 +75,9 @@ class Guest:
         returncodes=(0,),
         stall=False,
     ):
+        self.prepare_failures = prepare_failures
+        self.prepare_status_failures = prepare_status_failures
+        self.prepare_delay = prepare_delay
         self.upload_failures = upload_failures
         self.read_failures = read_failures
         self.upload_delay = upload_delay
@@ -82,6 +90,8 @@ class Guest:
         self.uploads = []
         self.upload_paths = {}
         self.reads = []
+        self.prepares = []
+        self.prepare_statuses = []
         self.launches = []
         self.cleanups = []
         self.current_path = None
@@ -109,6 +119,12 @@ class Guest:
             await asyncio.sleep(self.upload_delay)
             return None
         if path.endswith("/exec"):
+            if execution_stage(json["command"]) == "prepare":
+                self.prepares.append(now)
+                if len(self.prepares) <= self.prepare_failures:
+                    raise http_failure("guest-exec failed - got timeout")
+                await asyncio.sleep(self.prepare_delay)
+                return {"pid": 321}
             if _is_cleanup(json["command"]):
                 self.cleanups.append(now)
                 if self.cleanup_error is not None:
@@ -124,6 +140,11 @@ class Guest:
                 self.launched_path = self.current_path
             return {"pid": 123}
         if "/exec-status?" in path:
+            if path.endswith("pid=321"):
+                self.prepare_statuses.append(now)
+                if len(self.prepare_statuses) <= self.prepare_status_failures:
+                    raise http_failure("guest-exec-status failed - got timeout")
+                return {"exited": 1, "exitcode": 0}
             return {"exited": int(now >= self.launches[-1] + self.runtime)}
         raise AssertionError((method, path))
 
@@ -154,6 +175,51 @@ class Guest:
             label="dc",
             clock=loop.time,
         )
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_workspace_preparation_and_upload_share_one_transport_budget(
+    os_type, exhausted
+):
+    guest = Guest(
+        prepare_failures=10,
+        prepare_status_failures=5,
+        upload_failures=10 if exhausted else 9,
+    )
+    with virtual_clock() as loop:
+        start = loop.time()
+        check = guest.runner(loop, os_type=os_type)
+        if exhausted:
+            with pytest.raises(HealthCheckFailed) as error:
+                loop.run_until_complete(check.run())
+            cause = error.value.__cause__
+            assert isinstance(cause, HealthcheckTransportExhaustedError)
+            assert cause.failures == 25
+        else:
+            loop.run_until_complete(check.run())
+        assert loop.time() - start == 120
+
+    assert guest.prepares == [start + 5 * attempt for attempt in range(11)]
+    assert guest.prepare_statuses == [start + 50 + 5 * attempt for attempt in range(6)]
+    assert guest.uploads == [start + 75 + 5 * attempt for attempt in range(10)]
+    assert len(guest.upload_paths) == 1
+    assert guest.launches == ([] if exhausted else [start + 120])
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
+def test_workspace_preparation_and_upload_share_one_deadline(os_type):
+    guest = Guest(prepare_delay=90, upload_delay=91)
+    with virtual_clock() as loop:
+        start = loop.time()
+        with pytest.raises(HealthCheckFailed):
+            loop.run_until_complete(guest.runner(loop, os_type=os_type).run())
+        assert loop.time() - start == 180
+
+    assert guest.prepares == [start]
+    assert guest.prepare_statuses == [start + 90]
+    assert guest.uploads == [start + 90]
+    assert guest.launches == []
 
 
 @pytest.mark.parametrize("os_type", ["l26", "win11"])

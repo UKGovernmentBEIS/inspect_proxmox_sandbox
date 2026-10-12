@@ -14,6 +14,8 @@ from proxmoxsandbox._impl.healthcheck import HealthCheckFailed, HealthCheckRunne
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox.schema import HealthCheck, VmConfig, VmSourceConfig
 
+from .guest_agent_fixture import execution_stage
+
 
 def http_failure(message="guest-file-close failed - got timeout"):
     request = httpx.Request("POST", "https://pve.test/agent/file-write")
@@ -41,6 +43,7 @@ class Guest:
         self.fault = fault
         self.returncodes = returncodes
         self.writes = []
+        self.prepares = []
         self.launches = []
         self.script_paths = []
         self.status_failures = status_failures
@@ -62,9 +65,11 @@ class Guest:
             return None
         if path.endswith("/exec"):
             command = json["command"]
-            if command[:2] == ["rm", "-f"] or any(
-                "del /f /q " in arg or "rm -f " in arg for arg in command
-            ):
+            stage = execution_stage(command)
+            if stage == "prepare":
+                self.prepares.append(command)
+                return {"pid": 321}
+            if stage == "cleanup":
                 self.cleanups.append(command)
                 if self.fault == "cleanup-wait":
                     await asyncio.sleep(60)
@@ -74,6 +79,8 @@ class Guest:
                 raise self.launch_error
             return {"pid": 123}
         if "/exec-status?" in path:
+            if path.endswith("pid=321"):
+                return {"exited": 1, "exitcode": 0}
             self.status_reads += 1
             if self.status_reads <= self.status_failures:
                 raise self.status_error
