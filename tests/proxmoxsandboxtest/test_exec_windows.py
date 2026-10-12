@@ -50,8 +50,8 @@ def test_result_write_checks_its_own_status_not_command_failure() -> None:
     assert (
         'set "proxmox_returncode=%ERRORLEVEL%"\r\n'
         "setlocal EnableExtensions\r\n"
-        f'>"{PREFIX}script.returncode.tmp" echo %proxmox_returncode%\r\n'
-        "if errorlevel 1 exit /b 125\r\n"
+        f'>"{PREFIX}script.returncode.tmp" '
+        "echo %proxmox_returncode% || exit /b 125\r\n"
     ) in script
 
 

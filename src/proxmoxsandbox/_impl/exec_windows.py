@@ -52,11 +52,10 @@ def build_script(
         'set "ERRORLEVEL="',
         child,
         'set "proxmox_returncode=%ERRORLEVEL%"',
-        # Reset the status before writing so a write failure can be distinguished
-        # from a successfully recorded nonzero command result.
+        # Reset the command's status before writing. Redirection can fail without
+        # setting ERRORLEVEL, so test the write directly before attempting move.
         "setlocal EnableExtensions",
-        f'>"{tmp_start}script.returncode.tmp" echo %proxmox_returncode%',
-        "if errorlevel 1 exit /b 125",
+        f'>"{tmp_start}script.returncode.tmp" echo %proxmox_returncode% || exit /b 125',
         f'move /y "{tmp_start}script.returncode.tmp" '
         f'"{tmp_start}script.returncode" >nul',
         "exit /b %ERRORLEVEL%",
