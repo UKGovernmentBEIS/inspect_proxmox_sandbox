@@ -19,7 +19,7 @@ from proxmoxsandbox._impl.qga_responses import (
     parse_guest,
 )
 
-# Transient failures talking to the QEMU guest agent (QGA), all retried:
+# Transient failures talking to the QEMU guest agent (QGA):
 #   * httpx transport errors - the Proxmox API host was briefly unreachable,
 #     timed out, or dropped the connection mid-request (ConnectError,
 #     ConnectTimeout, ReadTimeout, ReadError, RemoteProtocolError, ...).
@@ -29,12 +29,11 @@ from proxmoxsandbox._impl.qga_responses import (
 #     by another process", etc.) and Proxmox's non-standard 596/597
 #     "Broken pipe" returned when streaming large file-reads back.
 #
-# QGA calls are retried on these except non-idempotent exec-starts. Linux's
-# wrapper has a flock guard, so exec_command may retry a lost pid response.
-# Windows has no such guard and uses exec_command_once instead. The exec-status
-# read is single-shot (the agent discards a finished process's output once
-# read), so get_agent_exec_status falls back to the on-disk results if a retry
-# finds the PID gone.
+# Uploads and reads retry these failures. Arbitrary command launches use
+# exec_command_once: losing a PID response does not make a launch safe to
+# repeat. The exec-status read is single-shot (the agent discards a finished
+# process's output once read), so get_agent_exec_status falls back to the
+# on-disk results if a retry finds the PID gone.
 # Exception: a 500 for a missing file, an unreadable file (e.g. "Is a
 # directory"), or a gone PID is surfaced immediately (it will not change on
 # retry); callers turn those into empty content / a disk fallback / an error.
@@ -205,8 +204,8 @@ class AgentCommands:
     async def exec_command(self, vm_id: int, command: List[str]) -> int:
         """Execute an idempotent command with transport retries; return its pid.
 
-        A lost response may cause multiple launches. The command must tolerate
-        this, as the Linux exec wrapper does with its flock guard.
+        A lost response may cause multiple launches, including after the first
+        command has completed. Use exec_command_once for arbitrary commands.
         """
         return await self._retry_on_qga_error(
             f"exec_command vm={vm_id}",

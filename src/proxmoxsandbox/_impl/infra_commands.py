@@ -252,8 +252,8 @@ class InfraCommands(abc.ABC):
         This reuses the Linux/Windows command scripts (Linux guest-side timeout,
         result files) rather than raw agent/exec, so a healthcheck behaves
         exactly like sandbox().exec() would for the same command. Keep transport
-        retries for idempotent uploads, status reads and guarded Linux launches.
-        Windows launches remain single-shot; unresolved completion aborts the
+        retries for idempotent uploads and status reads. Command launches remain
+        single-shot on both platforms; unresolved completion aborts the
         healthcheck instead of starting a new probe.
         """
         # Imported here: the environment module imports this one.

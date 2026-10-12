@@ -1,10 +1,9 @@
 """Unit tests for QGA transient-error retry logic (no Proxmox infra required).
 
-Every QGA call is retried on the same transient set (httpx transport errors +
-5xx, including Proxmox 596/597 "Broken pipe"). Permanent errors (4xx, missing
-file, gone PID) are not. exec-start is made safe to retry by the wrapper
-script's flock guard (see test_exec_idempotency); the exec-status single-shot
-read is made safe by get_agent_exec_status' PID-gone disk fallback.
+Safe QGA operations retry httpx transport errors and 5xx, including Proxmox
+596/597 "Broken pipe". Permanent errors (4xx, missing file, gone PID) are not
+retried. Arbitrary launches are single-shot; exec-status retries use the
+PID-gone disk fallback when a completed status response was lost.
 """
 
 import httpx

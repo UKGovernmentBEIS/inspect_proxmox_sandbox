@@ -146,9 +146,12 @@ def runner(sandbox):
     )
 
 
-async def test_upload_retries_identical_path_and_bytes_before_one_launch(monkeypatch):
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_upload_retries_identical_path_and_bytes_before_one_launch(
+    monkeypatch, os_type
+):
     guest = Guest(upload_failures=2)
-    execute = guest.production_executor(monkeypatch)
+    execute = guest.production_executor(monkeypatch, os_type=os_type)
     result = await execute(HealthCheck(test=("echo", "test"), timeout=1))
     assert result.success
     assert len(guest.writes) == 3
@@ -157,9 +160,10 @@ async def test_upload_retries_identical_path_and_bytes_before_one_launch(monkeyp
     assert guest.launches[0][-1] == guest.writes[0]["file"]
 
 
-async def test_exhausted_upload_cannot_launch_partial_script(monkeypatch):
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_exhausted_upload_cannot_launch_partial_script(monkeypatch, os_type):
     guest = Guest(upload_failures=agent_commands._QGA_MAX_RETRIES)
-    execute = guest.production_executor(monkeypatch)
+    execute = guest.production_executor(monkeypatch, os_type=os_type)
     with pytest.raises(httpx.HTTPStatusError, match="guest-file-close"):
         await execute(HealthCheck(test=("echo", "test"), timeout=1))
     assert len(guest.writes) == agent_commands._QGA_MAX_RETRIES
@@ -237,9 +241,10 @@ async def test_indeterminate_execution_aborts_healthcheck_without_relaunch(
 
 
 @pytest.mark.parametrize("returncode", [1, 124])
-async def test_confirmed_terminal_failure_remains_retryable(returncode):
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_confirmed_terminal_failure_remains_retryable(os_type, returncode):
     guest = Guest(returncodes=(returncode, 0))
-    await runner(guest.sandbox()).run()
+    await runner(guest.sandbox(os_type=os_type)).run()
     assert len(guest.launches) == 2
 
 
@@ -294,9 +299,10 @@ async def test_production_healthcheck_retries_known_pid_without_relaunch(
 @pytest.mark.parametrize(
     "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
 )
-async def test_windows_launch_not_sent_is_an_unreachable_probe(error_type):
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_launch_not_sent_is_an_unreachable_probe(os_type, error_type):
     guest = Guest()
-    sandbox = guest.sandbox()
+    sandbox = guest.sandbox(os_type=os_type)
     sandbox.agent_commands.exec_command_once = AsyncMock(
         side_effect=error_type("request not sent")
     )
@@ -311,9 +317,12 @@ async def test_windows_launch_not_sent_is_an_unreachable_probe(error_type):
 @pytest.mark.parametrize(
     "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
 )
-async def test_status_request_not_sent_still_leaves_execution_unknown(error_type):
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_status_request_not_sent_still_leaves_execution_unknown(
+    os_type, error_type
+):
     guest = Guest()
-    sandbox = guest.sandbox()
+    sandbox = guest.sandbox(os_type=os_type)
     sandbox.agent_commands.get_agent_exec_status = AsyncMock(
         side_effect=error_type("status request not sent")
     )
@@ -325,8 +334,9 @@ async def test_status_request_not_sent_still_leaves_execution_unknown(error_type
     assert len(guest.launches) == 1
 
 
-async def test_linux_launch_retry_not_sent_does_not_disprove_an_earlier_launch():
-    sandbox = Guest().sandbox(os_type="l26")
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_lost_launch_response_stops_before_a_potential_retry(os_type):
+    sandbox = Guest().sandbox(os_type=os_type)
     sandbox.agent_commands._qga_max_retries = 2
     sandbox.agent_commands.exec_command_once = AsyncMock(
         side_effect=[
@@ -339,5 +349,5 @@ async def test_linux_launch_retry_not_sent_does_not_disprove_an_earlier_launch()
         await runner(sandbox).run()
 
     assert error.value.pid is None
-    assert sandbox.agent_commands.exec_command_once.await_count == 2
-    assert isinstance(error.value.__cause__, httpx.ConnectError)
+    sandbox.agent_commands.exec_command_once.assert_awaited_once()
+    assert isinstance(error.value.__cause__, httpx.ReadTimeout)

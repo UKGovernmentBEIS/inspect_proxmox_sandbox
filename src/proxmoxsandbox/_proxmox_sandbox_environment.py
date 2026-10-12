@@ -221,7 +221,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         user: str | None,
         timeout: int | None,
     ) -> str:
-        """Build a batch script for Windows VMs."""
+        """Build a batch script for Windows VMs.
+
+        This wrapper does not enforce timeout in the guest; exec() only bounds
+        the host wait and fails if the command's completion remains unknown.
+        """
         lines = ["@echo off"]
 
         # Remove old output files
@@ -285,32 +289,20 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 yield f"cd {shlex.quote(cwd)} || exit $?\n"
             for key, value in env.items():
                 yield f"export {shlex.quote(key)}={shlex.quote(value)}\n"
-            # Make the launch idempotent. agent/exec is retried on transient
-            # errors, so the same script can be launched more than once for this
-            # tmp_start. flock keyed on the temp path lets exactly one launch run
-            # the command and write the outputs; any duplicate blocks until that
-            # one finishes, so whichever pid we end up polling reads a consistent
-            # result and the command runs once. fd 9 (single digit) works in
-            # dash, which is /bin/sh on the default image.
             stdin_prefix = self._pipe_user_input(stdin) if stdin is not None else ""
             cmd_line = f"{self._prefix_timeout(timeout)}{shlex.join(command)}"
             if stdin_file is not None:
                 cmd_line += f" <{shlex.quote(stdin_file)}"
-            yield f"exec 9>{tmp_start}script.lock\n"
-            yield "if flock -n 9; then\n"
             yield (
-                f"  rm -f {tmp_start}script.stdout {tmp_start}script.stderr"
+                f"rm -f {tmp_start}script.stdout {tmp_start}script.stderr"
                 f" {tmp_start}script.returncode\n"
             )
             yield (
-                f"  {stdin_prefix}{cmd_line}"
+                f"{stdin_prefix}{cmd_line}"
                 f" >{tmp_start}script.stdout 2>{tmp_start}script.stderr\n"
-                f'  echo -n "$?" > {tmp_start}script.returncode\n'
-                "  sync\n"
+                f'echo -n "$?" > {tmp_start}script.returncode\n'
+                "sync\n"
             )
-            yield "else\n"
-            yield "  flock 9\n"  # duplicate launch: wait for the real one
-            yield "fi\n"
             if user is not None:
                 yield f"EOF{tmp_start}EOF\n"
 
@@ -822,15 +814,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             launch = await self._upload_exec_script(
                 script_path, script, is_windows=is_windows
             )
-            # Windows has no launch guard. A lost PID response must remain
-            # unresolved rather than retrying a potentially running command.
-            start_command = (
-                self.agent_commands.exec_command_once
-                if is_windows
-                else self.agent_commands.exec_command
-            )
+            # A lost PID response cannot distinguish an unstarted command from
+            # a running or completed one. Never replay an arbitrary launch.
             launch_attempted = True
-            exec_response_pid = await start_command(vm_id=self.vm_id, command=launch)
+            exec_response_pid = await self.agent_commands.exec_command_once(
+                vm_id=self.vm_id, command=launch
+            )
             launched_pid = exec_response_pid
             self.logger.debug(
                 f"VM {self.vm_id} exec pid={exec_response_pid}: {cmd[:100]}"
@@ -928,13 +917,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             ) from ex
         except httpx.HTTPError as ex:
             if launch_attempted and not completion_observed:
-                if (
-                    is_windows
-                    and launched_pid is None
-                    and isinstance(
-                        ex,
-                        (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
-                    )
+                if launched_pid is None and isinstance(
+                    ex,
+                    (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
                 ):
                     # The single-shot launch failed before sending the request.
                     raise

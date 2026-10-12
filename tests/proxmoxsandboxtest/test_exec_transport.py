@@ -1,4 +1,4 @@
-"""Default Windows exec must not replay a launch whose response was lost."""
+"""Both platforms recover safe operations without replaying arbitrary commands."""
 
 import json
 import time
@@ -92,28 +92,32 @@ def immediate_retries(monkeypatch):
 
 @pytest.mark.parametrize("fault", ["transport", "http"])
 @pytest.mark.parametrize("command", [["echo", "test"], ["echo", "x" * 100_000]])
-async def test_lost_windows_start_response_is_not_replayed(monkeypatch, fault, command):
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_lost_start_response_is_not_replayed(
+    monkeypatch, os_type, fault, command
+):
     guest = Guest(launch_fault=fault)
     with pytest.raises(
         GuestExecIncompleteError, match="completion is unknown"
     ) as error:
-        await guest.sandbox(monkeypatch).exec(command)
+        await guest.sandbox(monkeypatch, os_type=os_type).exec(command)
     assert len(guest.launches) == 1
     assert guest.status_reads == 0
     assert guest.cleanups == []
     assert error.value.vm_id == 130
     assert error.value.pid is None
-    assert error.value.script_path.endswith("script.bat")
+    assert error.value.script_path.endswith(
+        "script.bat" if os_type == "win11" else "script.sh"
+    )
     assert error.value.script_path in guest.launches[0][-1]
     assert error.value.script_path in str(error.value)
 
 
 @pytest.mark.parametrize("upload_failures", [0, 2])
-async def test_default_windows_exec_uploads_then_launches_once(
-    monkeypatch, upload_failures
-):
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_exec_uploads_then_launches_once(monkeypatch, os_type, upload_failures):
     guest = Guest(upload_failures=upload_failures)
-    result = await guest.sandbox(monkeypatch).exec(["echo", "test"])
+    result = await guest.sandbox(monkeypatch, os_type=os_type).exec(["echo", "test"])
     assert result.success
     assert result.returncode == 0
     assert result.stdout == "output\n"
@@ -125,27 +129,20 @@ async def test_default_windows_exec_uploads_then_launches_once(
     assert len(guest.cleanups) == 1
 
 
-async def test_default_windows_exec_never_launches_after_exhausted_upload(monkeypatch):
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_exec_never_launches_after_exhausted_upload(monkeypatch, os_type):
     guest = Guest(upload_failures=agent_commands._QGA_MAX_RETRIES)
     with pytest.raises(httpx.HTTPStatusError, match="guest-file-close"):
-        await guest.sandbox(monkeypatch).exec(["echo", "test"])
+        await guest.sandbox(monkeypatch, os_type=os_type).exec(["echo", "test"])
     assert len(guest.writes) == agent_commands._QGA_MAX_RETRIES
     assert guest.writes == [guest.writes[0]] * len(guest.writes)
     assert guest.launches == []
 
 
-async def test_windows_status_retry_does_not_relaunch(monkeypatch):
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_status_retry_does_not_relaunch(monkeypatch, os_type):
     guest = Guest(status_failures=1)
-    result = await guest.sandbox(monkeypatch).exec(["echo", "test"])
+    result = await guest.sandbox(monkeypatch, os_type=os_type).exec(["echo", "test"])
     assert result.success
     assert guest.status_reads == 2
     assert len(guest.launches) == 1
-
-
-async def test_linux_keeps_retrying_the_same_guarded_script(monkeypatch):
-    guest = Guest(launch_fault="transport")
-    result = await guest.sandbox(monkeypatch, os_type="l26").exec(["echo", "test"])
-    assert result.success
-    assert len(guest.launches) == 2
-    assert guest.launches[0] == guest.launches[1]
-    assert guest.launches[0] == ["sh", guest.writes[0]["file"]]
