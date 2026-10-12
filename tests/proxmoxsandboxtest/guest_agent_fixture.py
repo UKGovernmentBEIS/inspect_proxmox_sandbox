@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.guest_exec import GuestExecResultError
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
@@ -75,7 +76,15 @@ class Scenario(BaseModel):
 class Observation(BaseModel):
     """Visible result, or the failure reported by the provider."""
 
-    kind: Literal["file", "exec", "rejected", "timeout", "incomplete", "error"]
+    kind: Literal[
+        "file",
+        "exec",
+        "rejected",
+        "timeout",
+        "incomplete",
+        "result_unavailable",
+        "error",
+    ]
     content: str | None = None
     truncated: bool | None = None
     returncode: int | None = None
@@ -145,7 +154,9 @@ class GuestReplies:
             data = {}
         elif route == "exec":
             command = json.loads(request.content)["command"]
-            cleanup = any("rm -f " in word or "del /f /q " in word for word in command)
+            cleanup = command[:2] == ["rm", "-f"] or any(
+                "rm -f " in word or "del /f /q " in word for word in command
+            )
             await self.apply_fault("cleanup" if cleanup else "launch")
             data = scenario.exec_reply
         elif route == "exec-status":
@@ -259,9 +270,21 @@ async def exercise(scenario: Scenario) -> Observation:
                 stdout=result.stdout,
                 stderr=result.stderr,
                 status_reads=replies.seen.get("status", 0),
+                cancelled=replies.cancelled,
+                launched=replies.seen.get("launch", 0) > 0,
             )
         except GuestAgentTamperError as exc:
             return Observation(kind="rejected", vm_id=exc.vm_id)
+        except GuestExecResultError as exc:
+            return Observation(
+                kind="result_unavailable",
+                vm_id=exc.vm_id,
+                pid=exc.pid,
+                script_path=exc.script_path,
+                returncode=exc.returncode,
+                cancelled=replies.cancelled,
+                launched=replies.seen.get("launch", 0) > 0,
+            )
         except GuestExecIncompleteError as exc:
             return Observation(
                 kind="incomplete",

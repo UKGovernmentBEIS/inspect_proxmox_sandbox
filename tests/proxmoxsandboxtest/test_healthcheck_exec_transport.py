@@ -1,19 +1,17 @@
-"""Healthchecks retry uploads, but never replay an unresolved command."""
+"""Healthchecks recover one execution within one transport budget."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-import tenacity
 
-from proxmoxsandbox import _proxmox_sandbox_environment as environment
-from proxmoxsandbox._impl import agent_commands
+from proxmoxsandbox._impl import agent_commands, guest_exec
 from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
 from proxmoxsandbox._impl.deadline import within_budget
+from proxmoxsandbox._impl.guest_exec import GuestExecResultError
 from proxmoxsandbox._impl.healthcheck import HealthCheckFailed, HealthCheckRunner
 from proxmoxsandbox._impl.infra_commands import InfraCommands
-from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 from proxmoxsandbox.schema import HealthCheck, VmConfig, VmSourceConfig
 
 
@@ -29,19 +27,28 @@ class Guest:
         self,
         *,
         upload_failures=0,
+        launch_failures=0,
+        launch_error=None,
         fault=None,
         returncodes=(0,),
         status_failures=0,
         status_error=None,
+        missing_results=0,
     ):
         self.upload_failures = upload_failures
+        self.launch_failures = launch_failures
+        self.launch_error = launch_error or httpx.ReadTimeout("lost launch response")
         self.fault = fault
         self.returncodes = returncodes
         self.writes = []
         self.launches = []
+        self.script_paths = []
         self.status_failures = status_failures
         self.status_error = status_error
         self.status_reads = 0
+        self.result_reads = []
+        self.missing_results = missing_results
+        self.cleanups = []
 
     async def request(self, method, path, *, json=None):
         if path.endswith("/file-write"):
@@ -50,61 +57,43 @@ class Guest:
                 await asyncio.sleep(60)
             if len(self.writes) <= self.upload_failures:
                 raise http_failure()
+            if json["file"] not in self.script_paths:
+                self.script_paths.append(json["file"])
             return None
         if path.endswith("/exec"):
             command = json["command"]
-            if command[:2] in (["cmd.exe", "/c"], ["sh", "-c"]) and command[
-                2
-            ].startswith(("del ", "rm -f ")):
+            if command[:2] == ["rm", "-f"] or any(
+                "del /f /q " in arg or "rm -f " in arg for arg in command
+            ):
+                self.cleanups.append(command)
                 if self.fault == "cleanup-wait":
                     await asyncio.sleep(60)
                 return {"pid": 456}
             self.launches.append(command)
-            if self.fault == "launch-transport":
-                raise httpx.ReadTimeout("lost start response")
-            if self.fault == "launch-http":
-                raise http_failure("guest-exec response lost")
+            if len(self.launches) <= self.launch_failures:
+                raise self.launch_error
             return {"pid": 123}
         if "/exec-status?" in path:
             self.status_reads += 1
             if self.status_reads <= self.status_failures:
                 raise self.status_error
-            if self.fault == "status-transport":
-                raise httpx.ReadTimeout("lost status response")
-            if self.fault == "outer-timeout":
+            if self.fault == "status-wait":
                 await asyncio.sleep(60)
-            return {"exited": 0 if self.fault == "poll-timeout" else 1}
+            return {"exited": 1}
         raise AssertionError((method, path, json))
 
     async def read(self, *, vm_id, filepath, count):
         if self.fault == f"{filepath.rsplit('.', 1)[-1]}-wait":
             await asyncio.sleep(60)
         if filepath.endswith("script.returncode"):
+            self.result_reads.append(filepath)
+            if len(self.result_reads) <= self.missing_results:
+                return b"", False
             code = self.returncodes[
-                min(len(self.launches) - 1, len(self.returncodes) - 1)
+                min(len(self.script_paths) - 1, len(self.returncodes) - 1)
             ]
             return str(code).encode(), False
         return b"", False
-
-    def sandbox(self, *, os_type="win11"):
-        api = MagicMock(request=AsyncMock(side_effect=self.request))
-        agent = AgentCommands(api, "pve", qga_max_retries=1)
-        agent.read_file_capped_or_blank = AsyncMock(side_effect=self.read)
-        return ProxmoxSandboxEnvironment(
-            infra_commands=MagicMock(),
-            agent_commands=agent,
-            ipam_mappings=(),
-            vm_id=130,
-            name="dc01",
-            all_vms={
-                130: VmConfig(
-                    name="dc01",
-                    vm_source_config=VmSourceConfig(existing_vm_template_tag="dc01"),
-                )
-            },
-            sdn_zone_id=None,
-            os_type=os_type,
-        )
 
     def production_executor(self, monkeypatch, *, os_type="win11"):
         monkeypatch.setattr(
@@ -126,24 +115,23 @@ class Guest:
 
 
 @pytest.fixture(autouse=True)
-def immediate_write_retries(monkeypatch):
+def immediate_normal_retries(monkeypatch):
     monkeypatch.setattr(agent_commands, "_QGA_RETRY_BASE_DELAY", 0)
 
 
-def runner(sandbox):
-    async def execute(spec):
-        return await sandbox.exec(list(spec.test), timeout=spec.timeout)
-
+def runner(execute, *, retries=2):
     return HealthCheckRunner(
-        HealthCheck(
-            test=("powershell.exe", "-EncodedCommand", "ZQB4AGkAdAAgADAA"),
-            timeout=1,
-            interval=0.01,
-            retries=2,
-        ),
+        HealthCheck(test=("echo", "test"), timeout=1, interval=0.001, retries=retries),
         execute,
         label="dc01 (ID=130)",
     )
+
+
+def shorten_budget(monkeypatch):
+    async def short_budget(operation, seconds, **kwargs):
+        return await within_budget(operation, min(seconds, 0.02), **kwargs)
+
+    monkeypatch.setattr(guest_exec, "within_budget", short_budget)
 
 
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
@@ -151,117 +139,148 @@ async def test_upload_retries_identical_path_and_bytes_before_one_launch(
     monkeypatch, os_type
 ):
     guest = Guest(upload_failures=2)
-    execute = guest.production_executor(monkeypatch, os_type=os_type)
-    result = await execute(HealthCheck(test=("echo", "test"), timeout=1))
-    assert result.success
+    await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
+
     assert len(guest.writes) == 3
     assert guest.writes == [guest.writes[0]] * 3
     assert len(guest.launches) == 1
-    assert guest.launches[0][-1] == guest.writes[0]["file"]
+    assert guest.writes[0]["file"] in " ".join(guest.launches[0])
 
 
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
-async def test_exhausted_upload_cannot_launch_partial_script(monkeypatch, os_type):
+async def test_exhausted_upload_cannot_launch_or_start_a_new_healthcheck(
+    monkeypatch, os_type
+):
     guest = Guest(upload_failures=agent_commands._QGA_MAX_RETRIES)
-    execute = guest.production_executor(monkeypatch, os_type=os_type)
-    with pytest.raises(httpx.HTTPStatusError, match="guest-file-close"):
-        await execute(HealthCheck(test=("echo", "test"), timeout=1))
+    with pytest.raises(HealthCheckFailed, match="could not reach"):
+        await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
+
     assert len(guest.writes) == agent_commands._QGA_MAX_RETRIES
     assert guest.writes == [guest.writes[0]] * agent_commands._QGA_MAX_RETRIES
     assert guest.launches == []
 
 
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
-@pytest.mark.parametrize(
-    "fault",
-    ["upload-wait", "upload-retries", "stdout-wait", "returncode-wait", "cleanup-wait"],
-)
-async def test_production_healthcheck_communication_wait_is_unreachable(
+@pytest.mark.parametrize("fault", ["upload-wait"])
+async def test_communication_deadline_cannot_start_a_new_healthcheck(
     monkeypatch, os_type, fault
 ):
-    async def short_budget(operation, seconds):
-        return await within_budget(operation, 0.01)
-
-    monkeypatch.setattr(environment, "within_budget", short_budget)
-    monkeypatch.setattr(agent_commands, "_QGA_RETRY_BASE_DELAY", 1)
-    guest = Guest(
-        fault=fault,
-        upload_failures=agent_commands._QGA_MAX_RETRIES
-        if fault == "upload-retries"
-        else 0,
-    )
-    check = HealthCheckRunner(
-        HealthCheck(test=("echo", "test"), timeout=1, retries=1),
-        guest.production_executor(monkeypatch, os_type=os_type),
-        label="dc01 (ID=130)",
-    )
-
-    probe = await check._probe()
+    shorten_budget(monkeypatch)
+    guest = Guest(fault=fault)
+    with pytest.raises(HealthCheckFailed, match="could not reach"):
+        await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
 
     assert len(guest.writes) == 1
-    expected_launches = 0 if fault.startswith("upload") else 1
-    assert (probe.outcome, len(guest.launches)) == ("unreachable", expected_launches)
-    assert guest.status_reads == expected_launches
+    assert len(guest.launches) == (0 if fault == "upload-wait" else 1)
 
 
-@pytest.mark.parametrize(
-    "fault",
-    [
-        "launch-transport",
-        "launch-http",
-        "status-transport",
-        "poll-timeout",
-        "outer-timeout",
-    ],
-)
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
-async def test_indeterminate_execution_aborts_healthcheck_without_relaunch(
-    monkeypatch, fault, os_type
+@pytest.mark.parametrize("fault", ["stdout-wait", "stderr-wait"])
+async def test_output_collection_failure_preserves_terminal_identity(
+    monkeypatch, os_type, fault
 ):
+    shorten_budget(monkeypatch)
     guest = Guest(fault=fault)
-    if fault == "poll-timeout":
-        monkeypatch.setattr(
-            environment.tenacity,
-            "stop_after_delay",
-            lambda _: tenacity.stop_after_attempt(1),
-        )
-    if fault == "outer-timeout":
+    with pytest.raises(GuestExecResultError) as error:
+        await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
 
-        async def short_budget(operation, seconds):
-            return await within_budget(operation, 0.02)
+    assert error.value.vm_id == 130
+    assert error.value.pid == 123
+    assert error.value.returncode == 0
+    assert error.value.script_path == guest.writes[0]["file"]
+    assert len(guest.launches) == 1
+    assert guest.cleanups == []
 
-        monkeypatch.setattr(environment, "within_budget", short_budget)
+
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+@pytest.mark.parametrize("fault", ["status-wait", "returncode-wait"])
+async def test_unresolved_execution_deadline_retains_identity(
+    monkeypatch, os_type, fault
+):
+    shorten_budget(monkeypatch)
+    guest = Guest(fault=fault)
     with pytest.raises(GuestExecIncompleteError) as error:
-        await runner(guest.sandbox(os_type=os_type)).run()
+        await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
+
     assert len(guest.launches) == 1
     assert error.value.vm_id == 130
-    assert error.value.pid == (None if fault.startswith("launch") else 123)
+    assert error.value.pid == 123
     assert error.value.script_path == guest.writes[0]["file"]
     assert error.value.script_path in str(error.value)
 
 
-@pytest.mark.parametrize("returncode", [1, 124])
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
-async def test_confirmed_terminal_failure_remains_retryable(os_type, returncode):
-    guest = Guest(returncodes=(returncode, 0))
-    await runner(guest.sandbox(os_type=os_type)).run()
+async def test_cleanup_deadline_preserves_confirmed_success(monkeypatch, os_type):
+    shorten_budget(monkeypatch)
+    guest = Guest(fault="cleanup-wait")
+    await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
+
+    assert len(guest.launches) == 1
+    assert len(guest.cleanups) == 1
+    assert len(guest.result_reads) == 1
+
+
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("lost launch response"),
+        http_failure("guest-exec response lost"),
+        httpx.ConnectError("request not sent"),
+        httpx.ConnectTimeout("connection not established"),
+        httpx.PoolTimeout("connection not acquired"),
+    ],
+)
+async def test_guarded_launch_recovery_keeps_one_execution_identity(
+    monkeypatch, os_type, error
+):
+    guest = Guest(launch_failures=1, launch_error=error)
+    await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
+
+    assert len(guest.writes) == 1
     assert len(guest.launches) == 2
+    assert guest.launches[0] == guest.launches[1]
+    assert len(guest.result_reads) == 1
+
+
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_exhausted_launch_recovery_cannot_create_a_new_execution(
+    monkeypatch, os_type
+):
+    guest = Guest(launch_failures=agent_commands._QGA_MAX_RETRIES)
+    with pytest.raises(GuestExecIncompleteError) as error:
+        await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
+
+    assert len(guest.writes) == 1
+    assert len(guest.launches) == agent_commands._QGA_MAX_RETRIES
+    assert guest.launches == [guest.launches[0]] * agent_commands._QGA_MAX_RETRIES
+    assert error.value.pid is None
+    assert error.value.script_path == guest.writes[0]["file"]
+
+
+@pytest.mark.parametrize("returncode", [1, 124])
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_confirmed_terminal_failure_remains_retryable(
+    monkeypatch, os_type, returncode
+):
+    guest = Guest(returncodes=(returncode, 0))
+    await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
+
+    assert len(guest.launches) == 2
+    assert guest.launches[0] != guest.launches[1]
+    assert len(guest.script_paths) == 2
 
 
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
 @pytest.mark.parametrize("returncode", [1, 124])
-async def test_production_healthcheck_terminal_failure_consumes_service_retry(
+async def test_terminal_failure_consumes_service_retry(
     monkeypatch, os_type, returncode
 ):
     guest = Guest(returncodes=(returncode,))
-    check = HealthCheckRunner(
-        HealthCheck(test=("echo", "test"), timeout=1, retries=1),
-        guest.production_executor(monkeypatch, os_type=os_type),
-        label="dc01 (ID=130)",
-    )
-
     with pytest.raises(HealthCheckFailed, match="failed 1 consecutive"):
-        await check.run()
+        await runner(
+            guest.production_executor(monkeypatch, os_type=os_type), retries=1
+        ).run()
     assert len(guest.launches) == 1
 
 
@@ -271,19 +290,14 @@ async def test_production_healthcheck_terminal_failure_consumes_service_retry(
     "status_error",
     [httpx.ReadTimeout("lost status response"), http_failure("lost status response")],
 )
-async def test_production_healthcheck_retries_known_pid_without_relaunch(
+async def test_status_recovery_keeps_known_pid_without_relaunch(
     monkeypatch, os_type, exhausted, status_error
 ):
     guest = Guest(
         status_failures=agent_commands._QGA_MAX_RETRIES if exhausted else 1,
         status_error=status_error,
     )
-    execute = guest.production_executor(monkeypatch, os_type=os_type)
-    check = HealthCheckRunner(
-        HealthCheck(test=("echo", "test"), timeout=1, interval=0.01, retries=2),
-        execute,
-        label="dc01 (ID=130)",
-    )
+    check = runner(guest.production_executor(monkeypatch, os_type=os_type))
     if exhausted:
         with pytest.raises(GuestExecIncompleteError) as error:
             await check.run()
@@ -296,58 +310,28 @@ async def test_production_healthcheck_retries_known_pid_without_relaunch(
     assert len(guest.launches) == 1
 
 
-@pytest.mark.parametrize(
-    "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
-)
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
-async def test_launch_not_sent_is_an_unreachable_probe(os_type, error_type):
-    guest = Guest()
-    sandbox = guest.sandbox(os_type=os_type)
-    sandbox.agent_commands.exec_command_once = AsyncMock(
-        side_effect=error_type("request not sent")
-    )
+async def test_exited_duplicate_wrapper_waits_for_original_result(monkeypatch, os_type):
+    guest = Guest(launch_failures=1, missing_results=1)
+    await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
 
-    probe = await runner(sandbox)._probe()
-
-    assert probe.outcome == "unreachable"
-    sandbox.agent_commands.exec_command_once.assert_awaited_once()
-    assert guest.launches == []
+    assert guest.launches == [guest.launches[0]] * 2
+    assert guest.status_reads == 1
+    assert len(guest.result_reads) == 2
+    assert guest.result_reads[0] == guest.result_reads[1]
+    assert len(guest.writes) == 1
 
 
-@pytest.mark.parametrize(
-    "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
-)
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
-async def test_status_request_not_sent_still_leaves_execution_unknown(
-    os_type, error_type
+async def test_exited_wrapper_without_terminal_record_is_not_a_command_failure(
+    monkeypatch, os_type
 ):
-    guest = Guest()
-    sandbox = guest.sandbox(os_type=os_type)
-    sandbox.agent_commands.get_agent_exec_status = AsyncMock(
-        side_effect=error_type("status request not sent")
-    )
-
+    shorten_budget(monkeypatch)
+    guest = Guest(missing_results=100)
     with pytest.raises(GuestExecIncompleteError) as error:
-        await runner(sandbox).run()
+        await runner(guest.production_executor(monkeypatch, os_type=os_type)).run()
 
     assert error.value.pid == 123
+    assert guest.status_reads == 1
     assert len(guest.launches) == 1
-
-
-@pytest.mark.parametrize("os_type", ["win11", "l26"])
-async def test_lost_launch_response_stops_before_a_potential_retry(os_type):
-    sandbox = Guest().sandbox(os_type=os_type)
-    sandbox.agent_commands._qga_max_retries = 2
-    sandbox.agent_commands.exec_command_once = AsyncMock(
-        side_effect=[
-            httpx.ReadTimeout("first launch response lost"),
-            httpx.ConnectError("retry request not sent"),
-        ]
-    )
-
-    with pytest.raises(GuestExecIncompleteError) as error:
-        await runner(sandbox).run()
-
-    assert error.value.pid is None
-    sandbox.agent_commands.exec_command_once.assert_awaited_once()
-    assert isinstance(error.value.__cause__, httpx.ReadTimeout)
+    assert guest.cleanups == []

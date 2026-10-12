@@ -7,13 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from proxmoxsandbox._impl.guest_exec import GuestExecutor
 
 from proxmoxsandbox._impl.agent_commands import (
     AgentCommands,
     GuestExecIncompleteError,
     HealthcheckTransportExhaustedError,
 )
+from proxmoxsandbox._impl.guest_exec import GuestExecutor
 from proxmoxsandbox._impl.healthcheck import HealthCheckFailed, HealthCheckRunner
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox.schema import HealthCheck, VmConfig, VmSourceConfig

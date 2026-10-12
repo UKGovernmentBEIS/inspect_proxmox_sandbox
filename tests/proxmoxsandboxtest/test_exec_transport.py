@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from proxmoxsandbox._impl import agent_commands
-from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
+from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
@@ -33,7 +33,7 @@ class Guest:
             return httpx.Response(200, json={"data": None})
         if path.endswith("/exec"):
             command = json.loads(request.content)["command"]
-            if command[-1].startswith(("del ", "rm -f ")):
+            if command[:2] == ["rm", "-f"] or command[-1].startswith("del /f /q "):
                 self.cleanups.append(command)
                 return httpx.Response(200, json={"data": {"pid": 456}})
             # Record acceptance before dropping the first reply. A second
@@ -93,24 +93,21 @@ def immediate_retries(monkeypatch):
 @pytest.mark.parametrize("fault", ["transport", "http"])
 @pytest.mark.parametrize("command", [["echo", "test"], ["echo", "x" * 100_000]])
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
-async def test_lost_start_response_is_not_replayed(
+async def test_lost_start_response_relaunches_the_same_claimed_execution(
     monkeypatch, os_type, fault, command
 ):
     guest = Guest(launch_fault=fault)
-    with pytest.raises(
-        GuestExecIncompleteError, match="completion is unknown"
-    ) as error:
-        await guest.sandbox(monkeypatch, os_type=os_type).exec(command)
-    assert len(guest.launches) == 1
-    assert guest.status_reads == 0
-    assert guest.cleanups == []
-    assert error.value.vm_id == 130
-    assert error.value.pid is None
-    assert error.value.script_path.endswith(
-        "script.bat" if os_type == "win11" else "script.sh"
+    result = await guest.sandbox(monkeypatch, os_type=os_type).exec(command)
+    assert result.success
+    assert len(guest.launches) == 2
+    assert guest.launches[0] == guest.launches[1]
+    assert "claimed" in guest.launches[0][-1]
+    assert guest.status_reads == 1
+    assert len(guest.cleanups) == 1
+    assert "script.returncode" not in " ".join(guest.cleanups[0]).replace(
+        "script.returncode.tmp", ""
     )
-    assert error.value.script_path in guest.launches[0][-1]
-    assert error.value.script_path in str(error.value)
+    assert "claimed" not in " ".join(guest.cleanups[0])
 
 
 @pytest.mark.parametrize("upload_failures", [0, 2])
@@ -125,7 +122,7 @@ async def test_exec_uploads_then_launches_once(monkeypatch, os_type, upload_fail
     assert len(guest.writes) == upload_failures + 1
     assert guest.writes == [guest.writes[0]] * len(guest.writes)
     assert len(guest.launches) == 1
-    assert guest.launches[0][-1] == guest.writes[0]["file"]
+    assert guest.writes[0]["file"] in guest.launches[0][-1]
     assert len(guest.cleanups) == 1
 
 
