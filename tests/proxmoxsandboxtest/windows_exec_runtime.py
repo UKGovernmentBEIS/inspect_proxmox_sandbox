@@ -50,6 +50,10 @@ def build_harness() -> str:
         returncode: int = 0,
         waiting: bool = False,
         chunked: bool = False,
+        body_commands: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        stdin_bytes: bytes | None = None,
     ) -> None:
         prefix = rf"{root}\{name}_"
         body_path = prefix + "body.bat"
@@ -68,17 +72,22 @@ def build_harness() -> str:
                     ":finished",
                 ]
             )
-        body.extend(["echo stdout", "echo stderr 1>&2", f"exit /b {returncode}"])
+        body.extend(body_commands or ["echo stdout", "echo stderr 1>&2"])
+        body.append(f"exit /b {returncode}")
+        stdin_file = prefix + "stdin" if stdin_bytes is not None else None
         script = renderer.build_script(
             tmp_start=prefix,
             command=command or [body_path],
             stdin=None,
-            cwd=None,
-            env={},
+            cwd=cwd,
+            env=env or {},
             user=None,
             timeout=20,
+            stdin_file=stdin_file,
         ).encode("ascii")
         files = {body_path: ("\r\n".join(body) + "\r\n").encode("ascii")}
+        if stdin_file is not None and stdin_bytes is not None:
+            files[stdin_file] = stdin_bytes
         parts: list[str] = []
         if chunked:
             split = len(script) // 2
@@ -113,6 +122,22 @@ def build_harness() -> str:
     case("chunked", waiting=True, chunked=True)
     case("preclaimed")
     case("cleanup")
+    case("inherited_errorlevel", returncode=31)
+    case(
+        "payload_errorlevel",
+        returncode=41,
+        env={"ERRORLEVEL": "777"},
+        body_commands=["echo %ERRORLEVEL%"],
+    )
+    case(
+        "context",
+        cwd=root,
+        env={"PROXMOX_TEST_VALUE": "literal%value%"},
+        stdin_bytes=b"payload line\r\n",
+        body_commands=["cd", "echo %PROXMOX_TEST_VALUE%", "findstr /r .*"],
+    )
+    case("claim_failure")
+    case("publication_failure")
     payload = base64.b64encode(
         json.dumps({"root": root, "cases": fixtures}).encode("utf-8")
     ).decode("ascii")
@@ -132,7 +157,7 @@ $total = [Diagnostics.Stopwatch]::StartNew()
 function Assert-True([bool]$condition, [string]$message) {
     if (-not $condition) { throw $message }
 }
-function Start-Native($command) {
+function Start-Native($command, [hashtable]$environment = @{}) {
     $info = [Diagnostics.ProcessStartInfo]::new()
     $info.FileName = [string]$command.exe
     $info.Arguments = [string]$command.arguments
@@ -140,21 +165,26 @@ function Start-Native($command) {
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
+    foreach ($key in $environment.Keys) {
+        $info.EnvironmentVariables[$key] = [string]$environment[$key]
+    }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $info
     Assert-True ($process.Start()) 'Native process failed to start'
     $processes.Add($process)
     return $process
 }
-function Wait-Native($process) {
+function Wait-Native($process, [int]$expected = 0) {
     Assert-True ($process.WaitForExit(10000)) 'Native process exceeded 10 seconds'
     $out = $process.StandardOutput.ReadToEnd()
     $err = $process.StandardError.ReadToEnd()
-    Assert-True ($process.ExitCode -eq 0) (
+    Assert-True ($process.ExitCode -eq $expected) (
         'Wrapper exited {0}: {1}' -f $process.ExitCode,
         (($out + $err).Substring(0, [Math]::Min(1000, ($out + $err).Length))))
 }
-function Run-Native($command) { Wait-Native (Start-Native $command) }
+function Run-Native($command, [int]$expected = 0, [hashtable]$environment = @{}) {
+    Wait-Native (Start-Native $command $environment) $expected
+}
 function Wait-File([string]$path) {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     while (-not (Test-Path -LiteralPath $path)) {
@@ -226,6 +256,53 @@ try {
         Run-Native $case.launch
         Assert-Result $case 23
         Assert-SideOnce $case
+    }
+    Test-Case 'inherited ERRORLEVEL cannot shadow terminal status' {
+        $case = $data.cases.inherited_errorlevel
+        Run-Native $case.launch 0 @{ ERRORLEVEL = '999' }
+        Assert-Result $case 31
+        Assert-SideOnce $case
+    }
+    Test-Case 'payload ERRORLEVEL is isolated from supervisor status' {
+        $case = $data.cases.payload_errorlevel
+        Run-Native $case.launch 0 @{ ERRORLEVEL = '999' }
+        Assert-Result $case 41
+        Assert-True ((Read-Text ($case.prefix + 'script.stdout')) -eq '777') (
+            'Payload ERRORLEVEL was not preserved')
+    }
+    Test-Case 'working directory, literal percent environment and staged stdin' {
+        $case = $data.cases.context
+        Run-Native $case.launch
+        Assert-Result $case 0
+        $lines = [IO.File]::ReadAllLines($case.prefix + 'script.stdout')
+        Assert-True ($lines.Length -eq 3) 'Context output has unexpected lines'
+        Assert-True ($lines[0] -eq $root) 'Working directory was not applied'
+        Assert-True ($lines[1] -eq 'literal%value%') 'Environment value was altered'
+        Assert-True ($lines[2] -eq 'payload line') 'Staged standard input was altered'
+    }
+    Test-Case 'claim creation failure cannot masquerade as a duplicate' {
+        $case = $data.cases.claim_failure
+        [IO.File]::WriteAllText($case.prefix + 'claimed', 'not a directory')
+        Run-Native $case.launch 125
+        Assert-True (-not (Test-Path -LiteralPath ($case.prefix + 'side'))) (
+            'Command ran without claiming')
+        $terminal = $case.prefix + 'script.returncode'
+        Assert-True (-not (Test-Path -LiteralPath $terminal)) (
+            'Claim failure published a terminal result')
+    }
+    Test-Case 'publication failure remains incomplete and cannot replay' {
+        $case = $data.cases.publication_failure
+        $terminal = $case.prefix + 'script.returncode'
+        $null = [IO.Directory]::CreateDirectory($terminal + '.tmp')
+        Run-Native $case.launch 125
+        Assert-SideOnce $case
+        Assert-True (-not (Test-Path -LiteralPath $terminal)) (
+            'Failed publication produced a terminal record')
+        Assert-True (Test-Path -LiteralPath ($case.prefix + 'claimed')) 'Claim missing'
+        Run-Native $case.launch
+        Assert-SideOnce $case
+        Assert-True (-not (Test-Path -LiteralPath $terminal)) (
+            'Duplicate falsely completed an unpublished execution')
     }
     Test-Case 'concurrent and delayed duplicates do not replay' {
         $case = $data.cases.concurrent
