@@ -1,7 +1,10 @@
 import asyncio
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from logging import getLogger
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
 import httpx
 from inspect_ai.util import (
@@ -29,9 +32,8 @@ from proxmoxsandbox._impl.qga_responses import (
 #     by another process", etc.) and Proxmox's non-standard 596/597
 #     "Broken pipe" returned when streaming large file-reads back.
 #
-# QGA calls are retried on these except non-idempotent exec-starts. Linux's
-# wrapper has a flock guard, so exec_command may retry a lost pid response.
-# Windows has no such guard and uses exec_command_once instead. The exec-status
+# Linux retains exec_command launch retries; its flock guard only excludes
+# overlapping launches. Windows uses exec_command_once. The exec-status
 # read is single-shot (the agent discards a finished process's output once
 # read), so get_agent_exec_status falls back to the on-disk results if a retry
 # finds the PID gone.
@@ -43,7 +45,6 @@ _QGA_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt, capped below
 _QGA_RETRY_MAX_DELAY = 20.0  # seconds
 # Limit requests and retry sleeps together, including a request that never returns.
 _QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
-_QGA_FILE_WRITE_MIN_ATTEMPTS = 3
 
 
 class GuestAgentCommunicationTimeoutError(TimeoutError):
@@ -97,6 +98,49 @@ def is_transient_qga_error(exc: Exception) -> bool:
     return False
 
 
+class HealthcheckTransportExhaustedError(RuntimeError):
+    """A healthcheck exhausted its shared guest-agent retry budget."""
+
+    def __init__(self, failures: int):
+        self.failures = failures
+        super().__init__(
+            f"Guest-agent transport budget exhausted after {failures} failed requests"
+        )
+
+
+@dataclass
+class _HealthcheckTransportBudget:
+    interval: float
+    failures: int = 0
+
+    def record_failure(self) -> None:
+        self.failures += 1
+        if self.failures >= _QGA_MAX_RETRIES:
+            raise HealthcheckTransportExhaustedError(self.failures)
+
+
+_healthcheck_budget: ContextVar[_HealthcheckTransportBudget | None] = ContextVar(
+    "healthcheck_transport_budget", default=None
+)
+
+
+@contextmanager
+def healthcheck_transport_budget(
+    interval: float,
+) -> Iterator[_HealthcheckTransportBudget]:
+    """Share one allowance across uploads and unreachable healthcheck probes."""
+    existing = _healthcheck_budget.get()
+    if existing is not None:
+        yield existing
+        return
+    budget = _HealthcheckTransportBudget(interval)
+    token = _healthcheck_budget.set(budget)
+    try:
+        yield budget
+    finally:
+        _healthcheck_budget.reset(token)
+
+
 class AgentCommands:
     logger = getLogger(__name__)
 
@@ -116,24 +160,48 @@ class AgentCommands:
         self.node = node
         self._qga_max_retries = qga_max_retries
 
+    @property
+    def exec_attempt_limit(self) -> int:
+        """Maximum requests per retrying command launch."""
+        return self._qga_max_retries
+
     async def _retry_on_qga_error(
-        self, label: str, coro_fn, *, max_retries: int | None = None
+        self,
+        label: str,
+        coro_fn,
+        *,
+        upload_budget: _HealthcheckTransportBudget | None = None,
     ):
         """Retry a coroutine function on transient QGA / transport errors."""
-        if max_retries is None:
-            max_retries = self._qga_max_retries
+        max_retries = (
+            _QGA_MAX_RETRIES if upload_budget is not None else self._qga_max_retries
+        )
 
         async def retry():
             for attempt in range(1, max_retries + 1):
+                if (
+                    upload_budget is not None
+                    and upload_budget.failures >= _QGA_MAX_RETRIES
+                ):
+                    raise HealthcheckTransportExhaustedError(upload_budget.failures)
                 try:
                     return await coro_fn()
                 except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                    if attempt == max_retries or not is_transient_qga_error(e):
+                    if not is_transient_qga_error(e):
                         raise
-                    delay = min(
-                        _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
-                        _QGA_RETRY_MAX_DELAY,
-                    )
+                    if upload_budget is not None:
+                        try:
+                            upload_budget.record_failure()
+                        except HealthcheckTransportExhaustedError as exhausted:
+                            raise exhausted from e
+                        delay = upload_budget.interval
+                    else:
+                        if attempt == max_retries:
+                            raise
+                        delay = min(
+                            _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
+                            _QGA_RETRY_MAX_DELAY,
+                        )
                     self.logger.warning(
                         "%s failed (attempt %s/%s), retrying in %.1fs: %s",
                         label,
@@ -200,9 +268,9 @@ class AgentCommands:
             return await self._retry_on_qga_error(
                 f"write_file vm={vm_id} {filepath}",
                 lambda: self.async_proxmox.request("POST", path, json=data),
-                # Rewriting the same bytes at the same path is safe, including
-                # after a guest-file-close timeout. It never launches a script.
-                max_retries=max(self._qga_max_retries, _QGA_FILE_WRITE_MIN_ATTEMPTS),
+                # Upload recovery shares the runner's allowance. Other calls
+                # retain the configured attempt limit, including command launch.
+                upload_budget=_healthcheck_budget.get(),
             )
 
     async def exec_command(self, vm_id: int, command: List[str]) -> int:

@@ -15,18 +15,15 @@ import httpx
 from inspect_ai.util import ExecResult, OutputLimitExceededError
 
 from proxmoxsandbox._impl.agent_commands import (
+    GuestAgentCommunicationTimeoutError,
     GuestExecIncompleteError,
+    HealthcheckTransportExhaustedError,
+    healthcheck_transport_budget,
     is_transient_qga_error,
 )
 from proxmoxsandbox.schema import HealthCheck
 
 logger = getLogger(__name__)
-
-# Consecutive guest-agent transport failures tolerated before giving up. These
-# do not count towards `HealthCheck.retries`: a flaky QGA channel (Windows
-# drops a few percent of calls) must not masquerade as a failing service.
-# The only transport retry budget: the executor's AgentCommands does not retry.
-_TRANSPORT_ERROR_LIMIT = 25
 
 HealthCheckExecutor = Callable[[HealthCheck], Awaitable[ExecResult[str]]]
 
@@ -78,50 +75,54 @@ class HealthCheckRunner:
     async def run(self) -> None:
         start = self.clock()
         failures = 0
-        transport_errors = 0
-        for attempt in itertools.count(1):
-            probe_started = self.clock()
-            probe = await self._probe()
+        with healthcheck_transport_budget(self.spec.interval) as transport:
+            for attempt in itertools.count(1):
+                probe_started = self.clock()
+                probe = await self._probe()
 
-            if probe.outcome == "healthy":
-                logger.info(f"{self.label}: healthcheck passed on attempt {attempt}")
-                return
-
-            if probe.outcome == "unreachable":
-                transport_errors += 1
-                logger.warning(
-                    f"{self.label}: healthcheck attempt {attempt} could not reach "
-                    f"the guest agent ({probe.detail}), "
-                    f"{transport_errors}/{_TRANSPORT_ERROR_LIMIT}"
-                )
-                if transport_errors >= _TRANSPORT_ERROR_LIMIT:
-                    raise HealthCheckFailed(
-                        f"{self.label}: healthcheck could not reach the guest agent "
-                        f"in {transport_errors} consecutive attempts "
-                        f"(last error: {probe.detail})"
+                if probe.outcome == "healthy":
+                    logger.info(
+                        f"{self.label}: healthcheck passed on attempt {attempt}"
                     )
+                    return
+
+                if probe.outcome == "unreachable":
+                    try:
+                        transport.record_failure()
+                    except HealthcheckTransportExhaustedError as exc:
+                        raise HealthCheckFailed(
+                            f"{self.label}: healthcheck could not reach "
+                            "the guest agent "
+                            f"after {transport.failures} failed requests "
+                            f"(last error: {probe.detail})"
+                        ) from exc
+                    logger.warning(
+                        f"{self.label}: healthcheck attempt {attempt} could not reach "
+                        f"the guest agent ({probe.detail}), "
+                        f"{transport.failures} transport failures"
+                    )
+                    await self.sleep(self.spec.interval)
+                    continue
+
+                # A confirmed service result ends the transport failure streak.
+                transport.failures = 0
+                if probe_started - start < self.spec.start_period:
+                    logger.debug(
+                        f"{self.label}: healthcheck attempt {attempt} failed "
+                        f"({probe.detail}) during start_period; not counted"
+                    )
+                else:
+                    failures += 1
+                    logger.info(
+                        f"{self.label}: healthcheck attempt {attempt} failed "
+                        f"({probe.detail}), {failures}/{self.spec.retries}"
+                    )
+                    if failures >= self.spec.retries:
+                        raise HealthCheckFailed(
+                            f"{self.label}: healthcheck failed {failures} consecutive "
+                            f"time(s); last attempt {probe.detail}"
+                        )
                 await self.sleep(self.spec.interval)
-                continue
-
-            # unhealthy: the guest answered, so the transport streak is over.
-            transport_errors = 0
-            if probe_started - start < self.spec.start_period:
-                logger.debug(
-                    f"{self.label}: healthcheck attempt {attempt} failed "
-                    f"({probe.detail}) during start_period; not counted"
-                )
-            else:
-                failures += 1
-                logger.info(
-                    f"{self.label}: healthcheck attempt {attempt} failed "
-                    f"({probe.detail}), {failures}/{self.spec.retries}"
-                )
-                if failures >= self.spec.retries:
-                    raise HealthCheckFailed(
-                        f"{self.label}: healthcheck failed {failures} consecutive "
-                        f"time(s); last attempt {probe.detail}"
-                    )
-            await self.sleep(self.spec.interval)
 
     async def _probe(self) -> Probe:
         """Run the check once and classify what happened."""
@@ -131,6 +132,14 @@ class HealthCheckRunner:
             # A new probe could overlap a still-running command. Preserve its
             # execution identity and abort startup instead of retrying.
             raise
+        except (
+            HealthcheckTransportExhaustedError,
+            GuestAgentCommunicationTimeoutError,
+        ) as exc:
+            raise HealthCheckFailed(
+                f"{self.label}: healthcheck guest-agent communication failed "
+                f"({type(exc).__name__})"
+            ) from exc
         except httpx.TransportError as e:
             return Probe("unreachable", type(e).__name__)
         except httpx.HTTPStatusError as e:
@@ -138,8 +147,8 @@ class HealthCheckRunner:
                 return Probe("unreachable", f"HTTP {e.response.status_code}")
             # A non-transient status means the agent answered: a missing or
             # unreadable `test` or result file, or an API error that will not
-            # come good. Either way it is this VM's problem, so spend a retry
-            # rather than the transport budget. The body can quote guest
+            # come good. Either way it is this VM's problem, so spend a service
+            # retry. The body can quote guest
             # output, so keep it to debug and report the status code.
             logger.debug(f"{self.label}: non-transient guest agent error: {e}")
             return Probe("unhealthy", f"HTTP {e.response.status_code}")
