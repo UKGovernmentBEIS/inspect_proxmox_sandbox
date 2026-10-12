@@ -186,6 +186,101 @@ apt upgrade -y
 apt install -y dnsmasq xterm patch jq
 systemctl disable --now dnsmasq
 
+cat > /root/patch-pve-qemu.sh << 'PVE_QEMU_PATCH'
+#!/bin/bash
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+PATCHED_VERSION="11.0.5-0+aisi1"
+PVE_QEMU_BASE_COMMIT="c3b7a675a52c11a1c4a5873ff2bd1696df7bf98c"
+QEMU_COMMIT="19def23adfcece2bc138cda371aa08299d574fe4"
+AHCI_FIX_COMMIT="a2fbf1785b7a464d61c0f60c4ad0a86d82925e5d"
+BUILD_DIR="/root/pve-qemu-build"
+
+INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
+if dpkg --compare-versions "$INSTALLED_VERSION" ge "$PATCHED_VERSION"; then
+    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the backported fixes, nothing to do"
+    exit 0
+fi
+
+apt-get -o DPkg::Lock::Timeout=600 update
+apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends \
+    build-essential devscripts equivs git quilt python3 lintian
+
+rm -rf "$BUILD_DIR"
+git clone https://git.proxmox.com/git/pve-qemu.git "$BUILD_DIR"
+cd "$BUILD_DIR"
+git checkout "$PVE_QEMU_BASE_COMMIT"
+sed -i 's|url = ../mirror_qemu|url = https://gitlab.com/qemu-project/qemu.git|' .gitmodules
+git update-index --cacheinfo "160000,$QEMU_COMMIT,qemu"
+sed -i -E '/^extra\/00(03|0[6-9]|1[1-9]|2[0-5])-/d' debian/patches/series
+patches="debian/patches/extra"
+git init -q /root/qemu-ahci-fix
+git -C /root/qemu-ahci-fix fetch -q --depth=3 \
+    https://gitlab.com/qemu-project/qemu.git "$AHCI_FIX_COMMIT"
+git -C /root/qemu-ahci-fix format-patch -1 --stdout --no-signature FETCH_HEAD~1 \
+    > "$patches/0027-hw-ide-ahci-refuse-a-PIO-transfer-with-no-command-he.patch"
+git -C /root/qemu-ahci-fix format-patch -1 --stdout --no-signature FETCH_HEAD \
+    > "$patches/0028-hw-ide-ahci-clear-cur_cmd-when-the-command-list-is-u.patch"
+rm -rf /root/qemu-ahci-fix
+
+anchor="extra/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA.patch"
+grep -qxF "$anchor" debian/patches/series
+sed -i "\|^$anchor\$|a\\
+extra/0027-hw-ide-ahci-refuse-a-PIO-transfer-with-no-command-he.patch\\
+extra/0028-hw-ide-ahci-clear-cur_cmd-when-the-command-list-is-u.patch" debian/patches/series
+sed -i 's/clean -xdfi/clean -xdff/' Makefile
+
+mv debian/changelog debian/changelog.orig
+cat > debian/changelog <<'CHANGELOG_END'
+pve-qemu-kvm (11.0.5-0+aisi1) trixie; urgency=high
+
+  * rebase onto upstream QEMU 11.0.5, which carries the virtio-net RSC
+    fixes (CVE-2026-66900, CVE-2026-63321), the VAPIC fixes and the
+    io-channel-socket zero-length write fix (CVE-2026-84788); drop the
+    stable patches it already includes.
+  * backport the AHCI fixes refusing a PIO transfer with no command header
+    and clearing cur_cmd when the command list is unmapped (upstream qemu
+    commits d7f16bad8f and a2fbf1785b).
+
+ -- AISI <coretech@dsit.gov.uk>  Wed, 30 Sep 2026 14:00:00 +0000
+
+pve-qemu-kvm (11.0.3-3+aisi2) trixie; urgency=high
+
+  * backport VAPIC region confinement, the matching MemoryRegion unref fix
+    and the io-channel-socket zero-length write fix (CVE-2026-84788) from
+    pve-qemu master, ahead of the official 11.1.1-1 release.
+
+ -- AISI <coretech@dsit.gov.uk>  Wed, 30 Sep 2026 10:00:00 +0000
+
+pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
+
+  * backport scsi-disk WRITE SAME out-of-bounds read fix and MODE SELECT
+    block size quirk from pve-qemu master (upstream qemu commits merged
+    2026-08-27), ahead of the official 11.1.1-1 release.
+
+ -- AISI <coretech@dsit.gov.uk>  Thu, 17 Sep 2026 13:55:04 +0000
+
+CHANGELOG_END
+cat debian/changelog.orig >> debian/changelog
+rm debian/changelog.orig
+
+mk-build-deps -ir -t 'apt-get -o DPkg::Lock::Timeout=600 -y --no-install-recommends' debian/control
+make deb
+
+dpkg -i "pve-qemu-kvm_${PATCHED_VERSION}_amd64.deb"
+/usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -F quirk_mode_page_set_block_size
+
+apt-get -o DPkg::Lock::Timeout=600 -y purge pve-qemu-kvm-build-deps
+apt-get -o DPkg::Lock::Timeout=600 -y autoremove
+cd /
+rm -rf "$BUILD_DIR"
+echo "pve-qemu-kvm patched to $(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
+PVE_QEMU_PATCH
+bash /root/patch-pve-qemu.sh
+rm -f /root/patch-pve-qemu.sh
+
 # Fix IPAM bug, see https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/
 # and https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
@@ -233,8 +328,22 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
  
 EOFPATCH
 
-# modify version to indicate we patched
-sed -i "s/\('version' => '[0-9]\+\.[0-9]\+\.[0-9]\+\)',/\1.aisi1',/" /usr/share/perl5/PVE/pvecfg.pm
+STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
+cat > "$STAMP" << 'STAMP_CONTRACT'
+#!/bin/bash
+set -euo pipefail
+C=aisi3
+F=/usr/share/perl5/PVE/pvecfg.pm
+before=$(md5sum < "$F")
+sed -i -E "s/\.aisi[0-9]+//g
+           s/('version' => '[0-9.]+)'/\1.$C'/
+           s|(return '[0-9.]+)/|\1.$C/|" "$F"
+grep -q "'version' => '[0-9.]*\.$C'," "$F" || { echo "ERROR: $F not stamped $C" >&2; exit 1; }
+[ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
+STAMP_CONTRACT
+chmod +x "$STAMP"
+echo "DPkg::Post-Invoke { \"$STAMP || true\"; };" > /etc/apt/apt.conf.d/80inspect-proxmox-contract
+"$STAMP"
 
 # Host isolation - see README
 # Delete our own rules (matched by comment) then recreate, so the rule set
@@ -255,35 +364,65 @@ pvesh create /nodes/proxmox/firewall/rules --type in --action ACCEPT --proto udp
 pvesh set /nodes/proxmox/firewall/options --enable 1
 pvesh set /cluster/firewall/options --enable 1
 
-# IPv6 is not supported for sandbox guests on this provider. SDN vnet bridges are
-# created per sample with generated names, so we can't pin a rule to them; instead
-# default.disable_ipv6 makes every interface created after boot (i.e. the vnets)
-# come up with no IPv6. The already-up management NIC keeps its own setting.
+# Apply to future guest interfaces; leave the running management NIC unchanged.
 cat > /etc/sysctl.d/99-inspect-proxmox-disable-ipv6.conf << 'SYSCTL_V6'
 net.ipv6.conf.default.disable_ipv6 = 1
 SYSCTL_V6
 
-# Confine sandbox guests at the host's forwarding layer. Re-applied every boot
-# because the template is powered off below and later cloned into fresh instances;
-# iptables rules live in kernel state and don't survive the clone/reboot.
+# Reapply on each boot: kernel firewall rules do not survive powering off and
+# cloning the template into fresh hosts.
+mkdir -p /etc/inspect-proxmox
+cat > /etc/inspect-proxmox/host-local.rules << 'HOST_LOCAL_RULES'
+-A INSP-SANDBOX-HOST-LOCAL -p udp --sport 68 --dport 67 -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -p udp --dport 53 -m addrtype --dst-type LOCAL -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -p tcp --dport 53 -m addrtype --dst-type LOCAL -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -p icmp --icmp-type echo-request -m addrtype --dst-type LOCAL -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -m addrtype --dst-type LOCAL -j DROP
+-A INSP-SANDBOX-HOST-LOCAL -j RETURN
+HOST_LOCAL_RULES
+
 cat > /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh << 'BLOCK_METADATA'
 #!/bin/bash
 set -euo pipefail
 
-# Enforce RFC 3927: a router must not forward IPv4 link-local (169.254.0.0/16).
-#
-# Destination drop in raw PREROUTING (interface-agnostic, ahead of any FORWARD
-# ACCEPT; host requests are OUTPUT so unaffected) -- this blocks the metadata vector.
+CHAIN=INSP-SANDBOX-HOST-LOCAL
+C=isp
+MGMT=$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
+[ -n "$MGMT" ] || exit 1
+for NIC in $MGMT; do
+    [ ! -d "/sys/class/net/$NIC/brif" ] || ls "/sys/class/net/$NIC"/brif/*/../device >/dev/null 2>&1 || exit 1
+done
+JUMPS=$(iptables -w -t raw -S PREROUTING |
+    sed -n "s/^-A PREROUTING -m comment --comment $C -j $CHAIN$/-D PREROUTING -m comment --comment $C -j $CHAIN/p")
+{
+    cat <<RULES
+*raw
+:$CHAIN - [0:0]
+-F $CHAIN
+-A $CHAIN -i lo -j RETURN
+RULES
+    for NIC in $MGMT; do
+        if [ -d "/sys/class/net/$NIC/brif" ]; then
+            for MEMBER in "/sys/class/net/$NIC"/brif/*; do
+                [ -e "/sys/class/net/${MEMBER##*/}/device" ] || continue
+                echo "-A $CHAIN -m physdev --physdev-in ${MEMBER##*/} -j RETURN"
+            done
+        else
+            echo "-A $CHAIN -i $NIC -j RETURN"
+        fi
+    done
+    cat /etc/inspect-proxmox/host-local.rules || exit 1
+    echo "$JUMPS"
+    echo "-I PREROUTING 1 -m comment --comment $C -j $CHAIN"
+    echo COMMIT
+} | iptables-restore -w --noflush
+
+# Guest link-local and IPv6 forwarding are unsupported.
 iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
-    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
-# Source drop in FORWARD, not raw PREROUTING: belt-and-braces for full RFC
-# conformance. FORWARD leaves the host's own on-link replies (IMDS/DNS, at INPUT)
-# intact; a raw PREROUTING -s rule would drop them and break the host.
+    || iptables -w -t raw -I PREROUTING 2 -d 169.254.0.0/16 -j DROP
 iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
     || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
 
-# Belt-and-braces for the unsupported IPv6 case: drop forwarded guest v6 outright.
-# FORWARD only sees transit traffic, so the host's own v6 (INPUT/OUTPUT) is intact.
 if command -v ip6tables >/dev/null; then
     ip6tables -w -C FORWARD -j DROP 2>/dev/null \
         || ip6tables -w -A FORWARD -j DROP
@@ -293,17 +432,20 @@ chmod +x /usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
 
 cat > /etc/systemd/system/inspect-proxmox-block-cloud-metadata.service << 'BLOCK_METADATA_UNIT'
 [Unit]
-Description=Confine sandbox guests (link-local forwarding block, IPv6 drop)
+Description=Confine sandbox guests
 After=network-online.target pve-firewall.service proxmox-firewall.service
 Wants=network-online.target
+Before=pvedaemon.service pveproxy.service pve-guests.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
+ExecReload=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=pvedaemon.service pveproxy.service pve-guests.service
 BLOCK_METADATA_UNIT
 
 # NOTE: keep in sync with scripts/ec2/userdata.sh.
@@ -323,11 +465,13 @@ reload_dnsmasq() {
 }
 
 gc_stale_rules() {
-    iptables-save -t mangle | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
-        case "$rule" in
-            *"$COMMENT $RUN_ID"*) continue ;;
-        esac
-        echo "${rule#-A }" | xargs iptables -w -t mangle -D || true
+    for table in mangle filter; do
+        iptables-save -t "$table" | { grep -F -- "$COMMENT" || true; } | while read -r rule; do
+            case "$rule" in
+                *"$COMMENT $RUN_ID"*) continue ;;
+            esac
+            echo "${rule#-A }" | xargs iptables -w -t "$table" -D || true
+        done
     done
 }
 
@@ -341,6 +485,8 @@ blank_resolv() {
 }
 
 if [ -f "$MARKER" ]; then
+    iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT
+    iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 -m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset
     MGMT_NICS=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
     if [ -z "$MGMT_NICS" ]; then
         iptables -w -t mangle -I FORWARD 1 -m comment --comment "$COMMENT $RUN_ID" -j DROP
@@ -375,10 +521,12 @@ Description=Optional egress lockdown for sandbox guests (gated on /etc/inspect-p
 After=network-online.target pve-firewall.service proxmox-firewall.service
 Wants=network-online.target
 OnFailure=inspect-proxmox-egress-lockdown-halt.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh
+SuccessExitStatus=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
@@ -410,6 +558,15 @@ systemctl daemon-reload
 systemctl enable inspect-proxmox-block-cloud-metadata.service
 systemctl enable inspect-proxmox-egress-lockdown.service
 systemctl enable inspect-proxmox-egress-lockdown.timer
+
+set -o pipefail
+pveum user list --output-format json | jq -r '.[].userid' |
+while IFS= read -r userid; do
+    pveum user token list "$userid" --output-format json | jq -r '.[].tokenid' |
+    while IFS= read -r tokenid; do
+        pveum user token remove "$userid" "$tokenid"
+    done
+done
 
 touch /var/local/inspect-proxmox-on-first-boot.done
 

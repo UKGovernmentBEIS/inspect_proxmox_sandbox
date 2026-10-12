@@ -14,7 +14,9 @@ from proxmoxsandbox._impl.agent_commands import (
     _QGA_MAX_RETRIES,
     AgentCommands,
     _is_pid_gone,
+    is_transient_qga_error,
 )
+from proxmoxsandbox._impl.qga_responses import ExecStatus
 
 
 def _http_error(status_code: int, message: str = "") -> httpx.HTTPStatusError:
@@ -73,7 +75,7 @@ class _FakeApi:
 
 @pytest.fixture
 def agent_commands() -> AgentCommands:
-    # _retry_on_qga_error / _is_transient_qga_error don't touch these.
+    # _retry_on_qga_error doesn't touch these.
     return AgentCommands(async_proxmox=None, node="proxmox")  # type: ignore[arg-type]
 
 
@@ -89,13 +91,13 @@ def _no_sleep(monkeypatch):
 
 
 @pytest.mark.parametrize("exc", TRANSIENT_ERRORS)
-def test_transient_errors_are_retryable(agent_commands, exc):
-    assert agent_commands._is_transient_qga_error(exc) is True
+def test_transient_errors_are_retryable(exc):
+    assert is_transient_qga_error(exc) is True
 
 
 @pytest.mark.parametrize("exc", PERMANENT_ERRORS)
-def test_permanent_errors_are_not_retryable(agent_commands, exc):
-    assert agent_commands._is_transient_qga_error(exc) is False
+def test_permanent_errors_are_not_retryable(exc):
+    assert is_transient_qga_error(exc) is False
 
 
 def test_is_pid_gone():
@@ -143,6 +145,23 @@ async def test_retry_exhausts_then_raises(agent_commands):
     assert calls["n"] == _QGA_MAX_RETRIES
 
 
+async def test_retry_budget_is_configurable():
+    calls = {"n": 0}
+
+    async def always_down():
+        calls["n"] += 1
+        raise _http_error(500, "500 QEMU guest agent is not running")
+
+    single_shot = AgentCommands(
+        async_proxmox=None,  # type: ignore[arg-type]
+        node="proxmox",
+        qga_max_retries=1,
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await single_shot._retry_on_qga_error("read", always_down)
+    assert calls["n"] == 1
+
+
 async def test_too_large_write_not_retried(agent_commands):
     calls = {"n": 0}
 
@@ -177,7 +196,7 @@ async def test_exec_status_pid_gone_reports_finished():
     # to a synthetic completed status so exec() reads results from disk.
     api = _FakeApi([_PID_GONE])
     ac = AgentCommands(async_proxmox=api, node="proxmox")  # type: ignore[arg-type]
-    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == {"exited": 1}
+    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == ExecStatus(exited=1)
     assert api.calls == 1
 
 
@@ -186,15 +205,14 @@ async def test_exec_status_recovers_consumed_after_lost_response():
     # finds the PID gone -> fall back to "finished".
     api = _FakeApi([httpx.ReadTimeout(""), _PID_GONE])
     ac = AgentCommands(async_proxmox=api, node="proxmox")  # type: ignore[arg-type]
-    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == {"exited": 1}
+    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == ExecStatus(exited=1)
     assert api.calls == 2
 
 
 async def test_exec_status_returns_status_when_present():
     api = _FakeApi([{"exited": 1, "exitcode": 0}])
     ac = AgentCommands(async_proxmox=api, node="proxmox")  # type: ignore[arg-type]
-    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == {
-        "exited": 1,
-        "exitcode": 0,
-    }
+    assert await ac.get_agent_exec_status(vm_id=101, pid=868) == ExecStatus(
+        exited=1, exitcode=0
+    )
     assert api.calls == 1

@@ -2,7 +2,7 @@ import abc
 import re
 import tarfile
 from logging import getLogger
-from typing import Collection, Dict, List, Literal, Set
+from typing import Collection, Dict, List, Literal, Set, Tuple
 
 import httpx
 import tenacity
@@ -17,6 +17,27 @@ from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCom
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
 
+# Budgets for the two VM readiness preconditions, in seconds.
+_RUNNING_TIMEOUT = 1200.0
+_AGENT_TIMEOUT = 300.0
+# Uncapped, the backoff reaches 30-50 s gaps after ~70 s; slow (Windows) guests
+# paid that on top of their boot time.
+_POLL_MAX_WAIT = 5.0
+_POLL_WAIT = tenacity.wait_exponential(min=0.1, max=_POLL_MAX_WAIT, exp_base=1.3)
+
+
+def vm_label(*, name: str, vm_id: int) -> str:
+    """Human-readable VM identifier for log messages and errors."""
+    return f"{name} (ID={vm_id})"
+
+
+class VmNotRunningError(TimeoutError):
+    """Proxmox did not report the VM in the awaited status within the budget."""
+
+
+class GuestAgentUnavailableError(TimeoutError):
+    """The QEMU guest agent never answered a ping within the budget."""
+
 
 class QemuCommands(abc.ABC):
     logger = getLogger(__name__)
@@ -28,7 +49,7 @@ class QemuCommands(abc.ABC):
     image_storage: str
     storage_commands: LocalStorageCommands
     node: str
-    _tracked_vm_ids: Set[int]
+    _tracked_vms: dict[int, VmConfig]
 
     def __init__(
         self,
@@ -43,22 +64,28 @@ class QemuCommands(abc.ABC):
         self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
-        self._tracked_vm_ids: Set[int] = set()
+        self._tracked_vms: dict[int, VmConfig] = {}
 
-    def register_vm(self, vm_id: int) -> None:
-        self._tracked_vm_ids.add(vm_id)
+    def register_vm(self, *, vm_id: int, vm_config: VmConfig) -> None:
+        self._tracked_vms[vm_id] = vm_config
+
+    def deregister_vm(self, vm_id: int) -> None:
+        # Tolerate untracked IDs: sample_cleanup deregisters after destroying
+        # VMs that a task_cleanup sweep may already have dropped.
+        self._tracked_vms.pop(vm_id, None)
 
     def deregister_vms(self, vm_ids: Collection[int]) -> None:
         for vm_id in vm_ids:
-            self._tracked_vm_ids.discard(vm_id)
+            self.deregister_vm(vm_id)
 
     async def task_cleanup(self) -> None:
-        self.logger.debug(f"qemu_commands task_cleanup; vms={self._tracked_vm_ids}")
-        for vm_id in list(self._tracked_vm_ids):
-            self.logger.debug(f"task_cleanup: destroy_vm {vm_id=}")
+        self.logger.debug(f"qemu_commands task_cleanup; vms={list(self._tracked_vms)}")
+        for vm_id, vm_config in list(self._tracked_vms.items()):
+            label = vm_label(name=vm_config.name, vm_id=vm_id)
+            self.logger.debug(f"task_cleanup: destroy_vm {label}")
             try:
-                await self.destroy_vm(vm_id)
-                self._tracked_vm_ids.discard(vm_id)
+                await self.destroy_vm(vm_id=vm_id, name=vm_config.name)
+                self.deregister_vm(vm_id)
             except httpx.HTTPStatusError as e:
                 # Proxmox returns 500 (not 404) when a VM config file is missing
                 already_gone = (
@@ -66,23 +93,41 @@ class QemuCommands(abc.ABC):
                     and "does not exist" in e.response.text
                 )
                 if already_gone:
-                    self._tracked_vm_ids.discard(vm_id)
+                    self.deregister_vm(vm_id)
                 else:
                     self.logger.warning(
-                        f"task_cleanup: failed to destroy VM {vm_id}: {e}"
+                        f"task_cleanup: failed to destroy VM {label}: {e}"
                     )
             except Exception as e:
-                self.logger.warning(f"task_cleanup: failed to destroy VM {vm_id}: {e}")
+                self.logger.warning(f"task_cleanup: failed to destroy VM {label}: {e}")
 
     async def await_vm(
         self,
         vm_id: int,
-        is_sandbox: bool,
+        *,
+        requires_guest_agent: bool,
+        name: str,
         status_for_wait: str = "running",
     ) -> None:
+        """Wait for the VM's status and, if required, a guest-agent ping."""
+        await self.await_running(vm_id, status_for_wait=status_for_wait, name=name)
+        if requires_guest_agent and status_for_wait == "running":
+            await self.await_agent(vm_id, name=name)
+
+    async def await_running(
+        self,
+        vm_id: int,
+        *,
+        name: str,
+        status_for_wait: str = "running",
+        timeout: float = _RUNNING_TIMEOUT,
+    ) -> None:
+        """Poll Proxmox until the VM reports `status_for_wait`."""
+        label = vm_label(name=name, vm_id=vm_id)
+
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(1200),
+            wait=_POLL_WAIT,
+            stop=tenacity.stop_before_delay(timeout),
         )
         async def is_in_status() -> None:
             vm_status = await self.async_proxmox.request(
@@ -91,43 +136,59 @@ class QemuCommands(abc.ABC):
             current_status = vm_status["status"]
             if current_status != status_for_wait:
                 self.logger.debug(
-                    f"VM {vm_id} status is {current_status}, "
+                    f"VM {label} status is {current_status}, "
                     f"waiting for {status_for_wait}"
                 )
-                raise ValueError(f"vm {vm_id} not {status_for_wait}")
+                raise ValueError(f"vm {label} not {status_for_wait}")
 
         with trace_action(
             self.logger,
             self.TRACE_NAME,
-            f"await VM {vm_id} to be in status {status_for_wait}",
+            f"await VM {label} to be in status {status_for_wait}",
         ):
-            await is_in_status()
+            try:
+                await is_in_status()
+            except tenacity.RetryError as e:
+                raise VmNotRunningError(
+                    f"VM {label} did not reach status {status_for_wait!r} "
+                    f"within {timeout:g}s"
+                ) from e
 
-        if is_sandbox and status_for_wait == "running":
-            attempt_count = [0]  # Use list to allow mutation in nested function
+    async def await_agent(
+        self, vm_id: int, *, name: str, timeout: float = _AGENT_TIMEOUT
+    ) -> None:
+        """Ping the QEMU guest agent until it answers."""
+        label = vm_label(name=name, vm_id=vm_id)
+        attempt_count = [0]  # Use list to allow mutation in nested function
 
-            @tenacity.retry(
-                wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                stop=tenacity.stop_after_delay(300),
-            )
-            async def qemu_agent_reachable() -> None:
-                attempt_count[0] += 1
-                if attempt_count[0] % 10 == 1:  # Log every 10 attempts
-                    self.logger.info(
-                        f"VM {vm_id} QEMU agent ping attempt {attempt_count[0]}"
-                    )
-                await self.ping_qemu_agent(vm_id)
+        @tenacity.retry(
+            wait=_POLL_WAIT,
+            stop=tenacity.stop_before_delay(timeout),
+        )
+        async def qemu_agent_reachable() -> None:
+            attempt_count[0] += 1
+            if attempt_count[0] % 10 == 1:  # Log every 10 attempts
+                self.logger.info(
+                    f"VM {label} QEMU agent ping attempt {attempt_count[0]}"
+                )
+            await self.ping_qemu_agent(vm_id)
 
-            with trace_action(
-                self.logger, self.TRACE_NAME, f"await VM {vm_id} QEMU agent"
-            ):
+        with trace_action(self.logger, self.TRACE_NAME, f"await VM {label} QEMU agent"):
+            try:
                 await qemu_agent_reachable()
-            self.logger.info(
-                f"VM {vm_id} QEMU agent responded after {attempt_count[0]} attempts"
-            )
+            except tenacity.RetryError as e:
+                raise GuestAgentUnavailableError(
+                    f"VM {label} QEMU guest agent did not answer within "
+                    f"{timeout:g}s ({attempt_count[0]} pings). Check that "
+                    f"qemu-guest-agent is installed and running in the guest."
+                ) from e
+        self.logger.info(
+            f"VM {label} QEMU agent responded after {attempt_count[0]} attempts"
+        )
 
-    async def destroy_vm(self, vm_id: int) -> None:
-        with trace_action(self.logger, self.TRACE_NAME, f"stop VM {vm_id}"):
+    async def destroy_vm(self, *, vm_id: int, name: str) -> None:
+        label = vm_label(name=name, vm_id=vm_id)
+        with trace_action(self.logger, self.TRACE_NAME, f"stop VM {label}"):
             await self.async_proxmox.request(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
@@ -141,12 +202,12 @@ class QemuCommands(abc.ABC):
                 "GET", f"/nodes/{self.node}/qemu/{vm_id}/status/current"
             )
             if vm_status["status"] != "stopped":
-                raise ValueError(f"vm {vm_id} still running")
+                raise ValueError(f"vm {label} still running")
 
-        with trace_action(self.logger, self.TRACE_NAME, f"await VM {vm_id} stopped"):
+        with trace_action(self.logger, self.TRACE_NAME, f"await VM {label} stopped"):
             await is_not_running()
 
-        with trace_action(self.logger, self.TRACE_NAME, f"delete VM {vm_id}"):
+        with trace_action(self.logger, self.TRACE_NAME, f"delete VM {label}"):
             await self.async_proxmox.request(
                 "DELETE", f"/nodes/{self.node}/qemu/{vm_id}"
             )
@@ -162,9 +223,9 @@ class QemuCommands(abc.ABC):
                 raise_errors=False,
             )
             if "vmid" in current:
-                raise ValueError(f"vm {vm_id} still exists")
+                raise ValueError(f"vm {label} still exists")
 
-        with trace_action(self.logger, self.TRACE_NAME, f"await VM {vm_id} deleted"):
+        with trace_action(self.logger, self.TRACE_NAME, f"await VM {label} deleted"):
             await vm_deleted()
 
     async def list_vms(self):
@@ -176,6 +237,17 @@ class QemuCommands(abc.ABC):
             "GET", f"/nodes/{self.node}/qemu/{vm_id}/config"
         )
 
+    async def vm_bridges(self, vm_id: int) -> Set[str]:
+        """Bridges (VNet IDs) the VM's NICs are attached to."""
+        bridges: Set[str] = set()
+        for key, value in (await self.read_vm(vm_id)).items():
+            if re.fullmatch(r"net\d+", key):
+                # 'virtio=BC:24:11:3E:C3:BA,bridge=tcc919v0'
+                for part in str(value).split(","):
+                    if part.startswith("bridge="):
+                        bridges.add(part.removeprefix("bridge="))
+        return bridges
+
     async def find_next_available_vm_id(self) -> int:
         return await self.async_proxmox.request("GET", "/cluster/nextid")
 
@@ -183,25 +255,11 @@ class QemuCommands(abc.ABC):
         self,
         vm_id: int,
     ) -> None:
-        async def do_start() -> None:
-            await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{vm_id}/status/start",
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(do_start)
-
-    async def start_and_await(
-        self,
-        vm_id: int,
-        is_sandbox: bool,
-    ) -> None:
-        await self.start(vm_id=vm_id)
-
-        await self.await_vm(
-            vm_id=vm_id,
-            is_sandbox=is_sandbox,
+        upid = await self.async_proxmox.request(
+            "POST",
+            f"/nodes/{self.node}/qemu/{vm_id}/status/start",
         )
+        await self.async_proxmox.wait_for_task(upid=upid)
 
     def _convert_sdn_vnet_aliases(
         self, sdn_vnet_aliases: VnetAliases
@@ -295,7 +353,6 @@ class QemuCommands(abc.ABC):
         sdn_vnet_aliases: VnetAliases,
         vm_config: VmConfig,
         built_in_vm_ids: Dict[str, int],
-        wait_until_ready: bool,
     ) -> int:
         if (
             vm_config.os_type != "l26"
@@ -306,6 +363,28 @@ class QemuCommands(abc.ABC):
                 "os_type is only supported for OVA or existing_vm_template_tag"
             )
 
+        vm_id_to_clone, preserve_tags = await self._resolve_source_template(
+            vm_config, sdn_vnet_aliases, built_in_vm_ids
+        )
+        return await self.clone_vm_and_start(
+            vm_config=vm_config,
+            vm_id_to_clone=vm_id_to_clone,
+            sdn_vnet_aliases=sdn_vnet_aliases,
+            preserve_tags=preserve_tags,
+        )
+
+    async def _resolve_source_template(
+        self,
+        vm_config: VmConfig,
+        sdn_vnet_aliases: VnetAliases,
+        built_in_vm_ids: Dict[str, int],
+    ) -> Tuple[int, bool]:
+        """Find or make the template this VmConfig clones from.
+
+        Returns (template_id, preserve_tags). An OVA is imported and baked into
+        an inspect-tagged template on first use; the tag encodes the file name
+        and size so later runs reuse it.
+        """
         vm_id_to_clone: int
         preserve_tags: bool
 
@@ -377,13 +456,11 @@ class QemuCommands(abc.ABC):
                     self.TRACE_NAME,
                     f"create VM from OVA {new_vm_template_id=}",
                 ):
+                    upid = await self.async_proxmox.request(
+                        "POST", f"/nodes/{self.node}/qemu", json=json_for_create
+                    )
 
-                    async def create() -> None:
-                        await self.async_proxmox.request(
-                            "POST", f"/nodes/{self.node}/qemu", json=json_for_create
-                        )
-
-                    await self.task_wrapper.do_action_and_wait_for_tasks(create)
+                    await self.async_proxmox.wait_for_task(upid=upid)
 
                 await self.configure_network_and_tags(
                     vm_config=vm_config,
@@ -392,15 +469,11 @@ class QemuCommands(abc.ABC):
                     extra_tags=[ova_tag],
                 )
 
-                async def convert_to_template() -> None:
-                    await self.async_proxmox.request(
-                        "POST",
-                        f"/nodes/{self.node}/qemu/{new_vm_template_id}/template",
-                    )
-
-                await self.task_wrapper.do_action_and_wait_for_tasks(
-                    convert_to_template
+                upid = await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{new_vm_template_id}/template",
                 )
+                await self.async_proxmox.wait_for_task(upid=upid)
 
                 await self.remove_existing_nics(new_vm_template_id)
                 self.logger.info(f"New template created: vmid={new_vm_template_id}")
@@ -423,17 +496,7 @@ class QemuCommands(abc.ABC):
         else:
             raise NotImplementedError(f"Not supported: {vm_config.vm_source_config=}")
 
-        new_vm_id = await self.clone_vm_and_start(
-            vm_config=vm_config,
-            vm_id_to_clone=vm_id_to_clone,
-            sdn_vnet_aliases=sdn_vnet_aliases,
-            preserve_tags=preserve_tags,
-            wait_until_ready=wait_until_ready,
-        )
-
-        if new_vm_id is None:
-            raise ValueError("No VM ID?")
-        return new_vm_id
+        return vm_id_to_clone, preserve_tags
 
     async def remove_existing_nics(self, vm_id):
         existing_config = await self.read_vm(vm_id)
@@ -537,15 +600,14 @@ class QemuCommands(abc.ABC):
                     json=network_update_json,
                 )
 
-        async def update_tags() -> None:
-            await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{vm_id}/config",
-                json={"tags": ",".join(set(extra_tags + ["inspect"]))},
-            )
-
         await self.task_wrapper.do_action_and_wait_for_tasks(update_network)
-        await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
+
+        upid = await self.async_proxmox.request(
+            "POST",
+            f"/nodes/{self.node}/qemu/{vm_id}/config",
+            json={"tags": ",".join(set(extra_tags + ["inspect"]))},
+        )
+        await self.async_proxmox.wait_for_task(upid=upid)
 
     async def clone_vm_and_start(
         self,
@@ -553,21 +615,23 @@ class QemuCommands(abc.ABC):
         vm_id_to_clone: int,
         sdn_vnet_aliases: VnetAliases,
         preserve_tags: bool,
-        wait_until_ready: bool,
     ) -> int:
+        """Clone, configure and start a VM; it is tracked for cleanup once cloned."""
         new_vm_id = await self.find_next_available_vm_id()
 
-        async def create_clone() -> None:
-            await self.async_proxmox.request(
+        with trace_action(
+            self.logger, self.TRACE_NAME, f"clone VM {vm_id_to_clone} -> {new_vm_id}"
+        ):
+            upid = await self.async_proxmox.request(
                 "POST",
                 f"/nodes/{self.node}/qemu/{vm_id_to_clone}/clone",
                 json={"newid": new_vm_id, "full": 0, "name": vm_config.name},
             )
+            await self.async_proxmox.wait_for_task(upid=upid)
 
-        await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
-        # Tracked from here, not once it's ready: if start or the QGA wait
-        # fails, task_cleanup still needs to know about it
-        self.register_vm(new_vm_id)
+        # Registered before configure/start so a failure there still gets it
+        # destroyed by task_cleanup.
+        self.register_vm(vm_id=new_vm_id, vm_config=vm_config)
 
         extra_tags = []
         if preserve_tags:
@@ -579,34 +643,32 @@ class QemuCommands(abc.ABC):
             vm_config, sdn_vnet_aliases, new_vm_id, extra_tags=extra_tags
         )
 
-        async def other_updates() -> None:
-            other_update_json: ProxmoxJsonDataType = {}
-            self.other_config_json(vm_config, other_update_json)
+        other_update_json: ProxmoxJsonDataType = {}
+        self.other_config_json(vm_config, other_update_json)
 
-            await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{new_vm_id}/config",
-                json=other_update_json,
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(other_updates)
+        upid = await self.async_proxmox.request(
+            "POST",
+            f"/nodes/{self.node}/qemu/{new_vm_id}/config",
+            json=other_update_json,
+        )
+        await self.async_proxmox.wait_for_task(upid=upid)
 
         await self.start(vm_id=new_vm_id)
-        if wait_until_ready:
-            await self.await_vm(
-                vm_id=new_vm_id,
-                is_sandbox=vm_config.is_sandbox,
-            )
         return new_vm_id
 
     def other_config_json(
         self, vm_config: VmConfig, json_for_create: ProxmoxJsonDataType
     ) -> None:
-        json_for_create["agent"] = f"enabled={1 if vm_config.is_sandbox else 0}"
+        json_for_create["agent"] = (
+            f"enabled={1 if vm_config.requires_guest_agent else 0}"
+        )
         json_for_create["memory"] = vm_config.ram_mb
         json_for_create["cores"] = vm_config.vcpus
-        if vm_config.name is not None:
-            json_for_create["name"] = vm_config.name
+        json_for_create["name"] = vm_config.name
+        json_for_create["serial0"] = "socket"
+        json_for_create["vga"] = vm_config.vga
+        # Proxmox defaults the tablet on, so this must be sent explicitly.
+        json_for_create["tablet"] = 1 if vm_config.tablet else 0
         if vm_config.uefi_boot:
             json_for_create["efidisk0"] = (
                 f"{self.image_storage}:0,efitype=4m,pre-enrolled-keys=0"
@@ -626,4 +688,9 @@ class QemuCommands(abc.ABC):
         )
 
     async def connection_url(self, vm_id: int) -> str:
+        vm = await self.read_vm(vm_id)
+        # Headless VMs (vga=none) have only a serial console. console=kvm scopes
+        # it to the VM; console=serial would open the node's host shell instead.
+        if str(vm.get("vga", "")) == "none":
+            return f"{self.async_proxmox.base_url}/?console=kvm&xtermjs=1&vmid={vm_id}&node={self.node}"  # noqa: E501
         return f"{self.async_proxmox.base_url}/?console=kvm&novnc=1&vmid={vm_id}&node={self.node}"  # noqa: E501

@@ -54,7 +54,11 @@ them are isolated out of the box.
 If you provision Proxmox some other way, configure equivalent persistent rules
 **on the node**. The Proxmox rules accept management ports only on the
 default-route interface (where external callers arrive) and leave SDN DNS/DHCP
-open. The remaining rules enforce RFC 3927 section 7: a router must not forward IPv4 link-local (`169.254.0.0/16`) traffic.
+open. An early IPv4 guard also blocks guest traffic to host services before
+connection tracking, allowing management ingress, DHCP, DNS and gateway ping.
+Bridged management requires a detectable physical uplink; guest ports are not
+exempt. The remaining rules enforce RFC 3927 section 7: a router must not forward
+IPv4 link-local (`169.254.0.0/16`) traffic.
 Dropping it stops a sandbox guest reaching the host's
 cloud metadata service — and any other link-local endpoint. The
 destination drop goes in `raw PREROUTING` (host requests are `OUTPUT`, never
@@ -65,24 +69,14 @@ destination drop goes in `raw PREROUTING` (host requests are `OUTPUT`, never
 
 We also recommend disabling forwarding of IPv6 for VMs, unless you really know what you are doing.
 
-```bash
-NIC=$(ip route show default | awk '{print $5}' | head -1)
-pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 8006 --iface "$NIC" --enable 1
-pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 22 --iface "$NIC" --enable 1
-pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto udp --dport 53 --enable 1
-pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport 53 --enable 1
-pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto udp --dport 67 --enable 1
-pvesh set /nodes/$(hostname)/firewall/options --enable 1
-pvesh set /cluster/firewall/options --enable 1
-iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
-    || iptables -w -t raw -I PREROUTING 1 -d 169.254.0.0/16 -j DROP
-iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
-    || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
-sysctl -w net.ipv6.conf.default.disable_ipv6=1   # new SDN bridges come up v6-off
-if command -v ip6tables >/dev/null; then
-    ip6tables -w -C FORWARD -j DROP 2>/dev/null || ip6tables -w -A FORWARD -j DROP
-fi
-```
+For the complete persistent setup, use the firewall sections of the
+[EC2 provisioner](src/proxmoxsandbox/scripts/ec2/userdata.sh) or
+[virtualized provisioner](src/proxmoxsandbox/scripts/virtualized_proxmox/build_proxmox_auto.sh).
+Edit `/etc/inspect-proxmox/host-local.rules` to change host-service exceptions,
+then run `systemctl reload inspect-proxmox-block-cloud-metadata.service`.
+Use reload: stopping or restarting the guard also stops its dependent services
+and guests. At boot, the API and automatic guest startup require the guard to
+succeed; repair a failed policy or uplink configuration and reboot to recover.
 
 Most clouds (AWS, GCP, Azure, Oracle, DigitalOcean) serve metadata from
 `169.254.169.254`, covered above. Two providers sit outside the link-local
@@ -104,11 +98,11 @@ The provisioning scripts also install but don't activate an egress lockdown
 for sandbox guests. When active, all traffic forwarded between guests and
 every interface carrying a default route is dropped, and the per-zone SDN
 `dnsmasq` instances are stopped from recursing to any upstream resolver.
-Together these close both direct egress and the DNS-resolution channel a guest
-could otherwise tunnel through (names no longer resolve beyond the internal
-vnets). Unaffected: guest↔guest traffic across vnets (it never crosses the
-management NIC) and the host's own egress and DNS (package installs, cloud
-agents, SSH).
+Together these close both direct egress and the host DNS-resolution channel.
+Guest queries to host port 53 are rejected, including internal names; DNS in
+another guest remains reachable. Unaffected: guest↔guest traffic across vnets
+(it never crosses the management NIC) and the host's own egress and DNS
+(package installs, cloud agents, SSH).
 
 Guests must not need egress to boot: the built-in VM template bake (first use
 of a `built_in` image on a host) installs packages from inside the guest, so
@@ -152,7 +146,10 @@ The drop rules live in the mangle table's `FORWARD` chain, which is evaluated
 before every filter-table rule, so activating the lockdown also cuts off guest
 connections that are already established (e.g. a download started beforehand).
 Neither firewall backend touches the mangle table, so there are no coexistence
-conflicts.
+conflicts. The port-53 REJECT has to sit in the filter table's `INPUT` chain
+(`xt_REJECT` is filter-only); it coexists with the node firewall's port-53 ACCEPT
+because a REJECT verdict is final wherever it is reached, and `pve-firewall`
+manages only its own `PVEFW-*` chains.
 
 The DNS side works by blanking the upstream resolver file (`/run/dnsmasq/resolv.conf`)
 the SDN `dnsmasq` instances forward through and reloading them, so they keep
@@ -259,16 +256,17 @@ sandbox=SandboxEnvironmentSpec(
                 vm_source_config=VmSourceConfig(
                     built_in="ubuntu24.04" # currently supported: "ubuntu24.04", "debian13", "kali2025.4"; see schema.py
                 ),
-                name="romeo", # name is optional, but recommended - it will be shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name.
+                name="romeo", # shown in the Proxmox GUI and registered as the Inspect sandbox environment identifier. Must be a valid DNS name. Optional only for the first is_sandbox VM, which is otherwise named "default". See "VM Names" below.
                 ram_mb=512, # optional, default is 2048 MB
                 vcpus=4, # optional, default is 2. No attempt is made to check that this will fit in the Proxmox host.
                 uefi_boot=True, # optional, default is False. Generally only needed for Windows VMs.
-                is_sandbox=False, # optional, default is True. A virtual machine that is not a sandbox; the qemu-guest-agent need not be installed.
                 disk_controller="scsi", # optional, default will be SCSI. Can also use "ide" for older VM images.
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
                 cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
-                firewall=True, # optional, default is False. Enables the Proxmox firewall on all NICs for VM isolation.
-                await_before_next_vm=False, # optional, default is False, i.e. all VMs boot concurrently. Set to True if the VMs listed after this one need it to have booted first.
+                vga="none", # optional, default "none" (no emulated display, mitigates the QEMU #4215 escape path). "std" re-adds the vulnerable device — read the warning under "Windows VMs" before using it.
+                tablet=False, # optional, default False. True adds a USB tablet so the noVNC mouse tracks accurately; only useful with vga="std".
+                firewall=True, # optional, default is False. Enables the NIC firewall flag; VM-level filtering needs separate configuration.
+                depends_on=("router",), # optional. Names of VMs that must be ready before this one is created. See "Dependency-based VM startup" below.
                 # If you have more than one VNet, assign the VM to the VNet via nics.
                 # You can assign more than one, to give the VM more than one network interface.
                 # If you leave this blank, your VM will be assigned to the first VNet.
@@ -291,6 +289,7 @@ sandbox=SandboxEnvironmentSpec(
             ),
             # A virtual machine from a local OVA, which will be uploaded from here to the Proxmox server.
             VmConfig(
+                name="tinycore",
                 vm_source_config=VmSourceConfig(
                     ova=Path("./tests/oVirtTinyCore64-13.11.ova")
                 ),
@@ -301,6 +300,7 @@ sandbox=SandboxEnvironmentSpec(
             # customised Proxmox instance that contains the template VM before
             # the eval start.
             VmConfig(
+                name="java-server",
                 vm_source_config=VmSourceConfig(
                     existing_vm_template_tag="java_server"
                 ),
@@ -310,6 +310,7 @@ sandbox=SandboxEnvironmentSpec(
             # customised Proxmox instance that contains SDN configurations before
             # the eval start.
             VmConfig(
+                name="legacy-net",
                 vm_source_config=VmSourceConfig(
                     built_in="ubuntu24.04"
                 ),
@@ -322,9 +323,16 @@ sandbox=SandboxEnvironmentSpec(
                     ),
                 )
             ),
+            # A virtual machine that is not a sandbox.
+            VmConfig(
+                name="router",
+                vm_source_config=VmSourceConfig(built_in="debian13"),
+                is_sandbox=False, 
+            ),
             # A virtual machine with no network access.
             VmConfig(
-                # ... snip ...           
+                name="airgapped",
+                # ... snip ...
                 nics=()
             ),
         ),
@@ -362,13 +370,20 @@ sandbox=SandboxEnvironmentSpec(
 
 ### VM Names
 
-It is recommended that you set the `name=` parameter for your defined VMs. This name serves two purposes:
-- It will be displayed in the Proxmox web interface
-- It will be the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
+Every VM has a name, which serves three purposes:
+- It is displayed in the Proxmox web interface
+- It is the identifier you use to reference the VM in Inspect (e.g., `sandbox("vm_name")`)
+- It is the identifier other VMs use in `depends_on`
 
-You should avoid setting the same name for multiple VMs as this will cause conflicts in how Inspect references your VMs; later VMs with the same name will overwrite earlier ones in the sandbox name mapping. While both VMs would still be created in Proxmox, only the last one would be accessible through its name in Inspect. If you omit the name parameter, the VM will be registered in Inspect using its dynamically-generated ID, as `vm_<id>`.
+The first `is_sandbox=True` VM is Inspect's `default` sandbox, so you can always access it with `sandbox("default")`. If you give it a name, it is reachable under that name too; if you don't, it is simply named `default`, in Proxmox as well. Every other VM must be given a `name=`. Names must be valid DNS names (Proxmox rejects anything else) and unique within a sample, and `default` is reserved: naming any other VM `default` is a configuration error.
 
-> Note: The (first) sandbox VM is automatically named `default` internally, so you can always access it with `sandbox("default")`, regardless of any custom name you might set for it.
+### Dependency-based VM startup
+
+Without `depends_on`, VMs are created in `vms_config` order and all boot concurrently. A VM with `depends_on` is created only once those VMs are ready: Proxmox reports them running, their guest agent answers if they have one, and their `healthcheck` has passed if they have one. A VM with no guest agent at all (a router appliance) is therefore a valid dependency. Tuple order is otherwise only a preference, so a dependency may appear later in the tuple than the VMs that wait for it. If a dependency never becomes ready, the sample fails.
+
+### Healthchecks
+
+`HealthCheck` uses docker compose's field names (`test`, `interval`, `timeout`, `retries`, `start_period`) with defaults sized for a booting VM; see the `HealthCheck` docstring in `schema.py` for the details. The non-obvious parts: durations are plain seconds, not `"30s"`; `test` is always an argument vector, so use `("sh", "-c", "...")` when you need a shell; a healthcheck needs the QEMU guest agent even on an `is_sandbox=False` VM (declaring one enables the agent device, but the image must still have the agent installed); and it runs only during startup, never again.
 
 
 ### Static IP Address Assignment
@@ -460,6 +475,28 @@ VmConfig(
 )
 ```
 
+VMs default to `vga="none"` (no emulated display) to close the QEMU VGA
+guest-to-host out-of-bounds write path ([QEMU #4215](https://gitlab.com/qemu-project/qemu/-/work_items/4215)).
+This includes Windows: `exec`, `read_file` and `write_file` run over the QEMU
+guest agent, which needs no display, so headless Windows automation works
+normally. A Windows template supplied via `existing_vm_template_tag` is cloned
+headless too — its template display setting is overridden to `none`.
+
+> **Warning: we recommend against re-attaching a VGA device.** Setting
+> `vga="std"` restores the emulated display and, with it, the QEMU #4215
+> guest-to-host escape path for that VM. There is no safe way to re-enable it;
+> the option exists only for the rare guest that cannot function without a
+> graphical console or GUI framebuffer, and using it re-introduces the escape
+> path for that VM.
+>
+> If you do enable `vga`, also set `tablet=True`: without the USB tablet the
+> noVNC mouse pointer is inaccurate and buggy.
+>
+> Do **not** reach for `vga="std"` on Windows just because the console looks
+> blank. Windows has no serial *login* by default, so a headless Windows VM
+> shows an empty serial terminal even though the guest agent is working — that is
+> expected, and not a reason to re-expose the device.
+
 The `os_type` field determines how commands are executed inside the VM. Windows types (any value starting with `w`) use batch scripts instead of shell scripts. The QEMU guest agent channel on Windows is less reliable than on Linux, so transient errors are automatically retried.
 
 ## Observing the VMs
@@ -521,18 +558,23 @@ The project follows [semantic versioning](https://semver.org/) and is aiming for
 
 ## Large `write_file` fast path
 
-For Linux guests, `write_file` payloads larger than 128 KiB are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot, sidestepping the QEMU guest-agent's ~60 KiB per-call write cap. On any failure it falls back to the chunked-QGA path, so it can only speed writes up, never break them. Windows always uses chunked QGA.
+For Linux guests, `write_file` payloads larger than 128 KiB are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot, sidestepping the QEMU guest-agent's ~60 KiB per-call write cap. Ordinary transfer failures fall back to chunked QGA. Cancellation or a malformed guest reply fails the current call and disables the CD-ROM method for later writes. Windows always uses chunked QGA.
 
 Two things worth knowing:
 
 - **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it — move that content to `sata0`–`sata4`, or disable the fast path.
-- **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. On failure it also disables itself for the affected VM and logs a `WARNING`; the warning site in the code lists what to check.
+- **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. A failed or cancelled transfer also disables this method for the affected VM.
+
+## Guest-agent replies and command waiting
+
+`exec()` shares a waiting allowance across uploads, retries and result collection: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup gets a separate two-minute allowance per step, and the guest command may keep running after the provider raises `TimeoutError`.
+
+Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
 
 ## Feature Roadmap
 
 - Proxmox server health and config check
 - Normalize having a pfSense VM as the default route for networking
-- Firewall off the SDN from the Proxmox server and from other SDNs
 - Support cloud-init for VM definition
 - Escape hatch for Proxmox API so you can specify arbitrary parameters during VM / SDN creation 
 
@@ -540,9 +582,10 @@ Two things worth knowing:
 
 The built-in VMs (`ubuntu24.04`, `debian13`, `kali2025.4`) pin specific upstream image URLs in `built_in_vm.py`. These are not auto-updated — when a new upstream release appears (e.g. a new Kali quarterly release), the URL, the `Literal` type in `schema.py`, and all references in tests and examples must be updated together.
 
+The Kali built-in installs the `kali-linux-everything` metapackage on top of the buildpack set, so an eval can run offline.
+
 ## Tech debt
 
-- Large OVA uploads use PycURL, because neither aiohttp nor httpx worked with large uploads
 - Inconsistent use of task_wrapper and tenacity
 
 ## Developing

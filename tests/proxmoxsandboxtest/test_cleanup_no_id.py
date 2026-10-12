@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
+from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import is_ephemeral_zone
 
 
@@ -41,6 +42,9 @@ def _make_infra(
         side_effect=lambda vmid: vm_configs.get(vmid, {})
     )
     infra.qemu_commands.destroy_vm = AsyncMock()
+    infra.qemu_commands.vm_bridges = QemuCommands.vm_bridges.__get__(
+        infra.qemu_commands
+    )
 
     infra.sdn_commands = MagicMock()
     infra.sdn_commands.list_sdn_zones = AsyncMock(return_value=zones or [])

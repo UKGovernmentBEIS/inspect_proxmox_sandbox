@@ -2,7 +2,21 @@
 
 ## Unreleased
 
-- Fix: a `sample_init` failure (e.g. a VM whose QEMU guest agent never answers) no longer tears down the partially-created VMs and SDN itself; they are left for `task_cleanup`, so `--no-sandbox-cleanup` now keeps them for inspection. VMs are tracked for `task_cleanup` from the moment they are cloned, and the next sample to acquire the instance sweeps leftover `inspect`-tagged VMs as well as leftover ephemeral VNETs
+- Fix: a `sample_init` failure (e.g. a VM whose QEMU guest agent never answers) no longer tears down the partially-created VMs and SDN itself; they are left for `task_cleanup`, so `--no-sandbox-cleanup` now keeps them for inspection. The next sample to acquire the instance sweeps leftover `inspect`-tagged VMs as well as leftover ephemeral VNETs
+- VMs with `is_sandbox=False` are no longer given to Inspect as sandboxes, fixing a bug where Inspect since 0.3.274 tries to `exec()` on every sandbox, causing ~7-minute timeouts for each VM without a guest agent during sample init.
+- `kali2025.4` built-in now installs `kali-linux-everything`; delete any existing `builtin-kali2025.4` template to pick this up
+- Bundled provisioners restrict guest access to host services before connection tracking, retaining management ingress and DHCP/DNS. New hosts carry contract `aisi3`.
+- VMs no longer get a USB tablet device by default; set `VmConfig(tablet=True)` for an accurate noVNC mouse on `vga="std"` guests
+- Fix: run large storage uploads off the asyncio event loop again (in a worker thread, while staying cancellable), so concurrent VM provisioning no longer starves the loop and times out other Proxmox API calls with `ConnectTimeout`
+- `VmConfig.depends_on`: a VM is created only once the named VMs are ready. See "Dependency-based VM startup" in the README
+- `VmConfig.healthcheck`: compose-style guest command that gates a VM's readiness. See "Healthchecks" in the README
+- **Breaking:** every VM except the first `is_sandbox` VM must be named; that one defaults to `default`. See "VM Names" in the README
+- VM readiness polls are at most 5 s apart, and a VM that never runs or whose guest agent never answers fails with `VmNotRunningError` / `GuestAgentUnavailableError`
+- Reject malformed guest-agent replies with `GuestAgentTamperError`. Limit accepted file data, command output and quoted error text; limit how long commands wait; and close cancelled uploads with a time limit on cleanup.
+- Bundled provisioning scripts: `pve-qemu-kvm` is now built on upstream QEMU 11.0.5, which carries the virtio-net RSC fixes (CVE-2026-66900, CVE-2026-63321), the VAPIC region fixes and the io-channel-socket zero-length write fix (CVE-2026-84788), plus a backport of the AHCI fixes for a stale command header once the command list is unmapped, building `11.0.5-0+aisi1`.
+- Bundled provisioning scripts: under the egress lockdown the host now REJECTs guest DNS to port 53 instead of accepting it; the lockdown unit only halts the API on its own verdict; hosts carry a `.aisi<N>` contract stamp in the API version that survives `pve-manager` upgrades
+- Every VM now gets a serial port (`serial0: socket`)
+- VMs no longer get an emulated VGA device by default (`vga: none`), closing the QEMU display out-of-bounds write path (gitlab.com/qemu-project/qemu/-/work_items/4215) that a privileged guest can trigger even with no console attached. Guests that need a graphical console (e.g. Windows without a serial login) can opt back in with `VmConfig(vga="std")`. Headless VMs' console link now points at the xterm.js serial terminal instead of noVNC. Note: for a template supplied via `existing_vm_template_tag`, the clone's display is overridden to `none`, so a Windows/GUI template needs `vga="std"`; and Proxmox drops SMM (`smm=off`) for SeaBIOS guests that have no VGA
 - Clamp file-read at 16MB and hence allow Inspect's agent bridge to work
 - Anchor the ephemeral SDN zone regex so automatic cleanup is less likely to delete unrelated pre-existing zones
 - Enable extra custom headers in requests to Proxmox API.
@@ -17,7 +31,7 @@
 - Security: redact Proxmox passwords in configuration representations and validation error messages, and omit credentials from cleanup logs
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 - Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
-- Don't wait for a VM to reach "running" before starting the next one (just wait for all of them together at the end). Set `await_before_next_vm=True` on a `VmConfig` if later VMs depend on it having booted first
+- VMs boot concurrently rather than one after another
 
 ## 0.11.0 - 2026-06-01
 

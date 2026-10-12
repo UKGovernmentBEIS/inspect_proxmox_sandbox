@@ -18,10 +18,11 @@ from proxmoxsandbox._impl.iso_write import (
     _build_iso,
 )
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 
 class TestBuildIso:
-    def test_roundtrip_small_payload(self, tmp_path):
+    def test_roundtrip_small_payload(self, tmp_path) -> None:
         payload = b"hello world\n"
         iso_path = _build_iso(payload)
         try:
@@ -36,7 +37,7 @@ class TestBuildIso:
         finally:
             iso_path.unlink(missing_ok=True)
 
-    def test_roundtrip_binary_payload(self, tmp_path):
+    def test_roundtrip_binary_payload(self, tmp_path) -> None:
         payload = bytes(range(256)) * 1024
         iso_path = _build_iso(payload)
         try:
@@ -51,7 +52,7 @@ class TestBuildIso:
         finally:
             iso_path.unlink(missing_ok=True)
 
-    def test_rock_ridge_name_is_payload(self, tmp_path):
+    def test_rock_ridge_name_is_payload(self, tmp_path) -> None:
         payload = b"x" * 100
         iso_path = _build_iso(payload)
         try:
@@ -67,7 +68,7 @@ class TestBuildIso:
             iso_path.unlink(missing_ok=True)
 
 
-def test_write_slot_is_sata5():
+def test_write_slot_is_sata5() -> None:
     # qemu_commands.other_config_json cold-adds this exact slot on every
     # is_sandbox VM. Keep the constant in sync with that.
     assert _WRITE_SLOT == "sata5"
@@ -84,7 +85,13 @@ def _make_env() -> ProxmoxSandboxEnvironment:
         agent_commands=MagicMock(),
         ipam_mappings=(),
         vm_id=100,
-        all_vm_ids=(100,),
+        name="test-sandbox",
+        all_vms={
+            100: VmConfig(
+                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
+                name="test-sandbox",
+            )
+        },
         sdn_zone_id=None,
         instance=None,
         pool_id=None,
@@ -95,12 +102,12 @@ def _make_env() -> ProxmoxSandboxEnvironment:
 class TestPerEnvWriteLock:
     """The ISO write lock is per-env (per-VM), not module-level per-vm_id."""
 
-    def test_lock_is_an_asyncio_lock(self):
+    def test_lock_is_an_asyncio_lock(self) -> None:
         import asyncio
 
         assert isinstance(_make_env()._iso_write_lock, asyncio.Lock)
 
-    def test_two_envs_sharing_a_vm_id_have_distinct_locks(self):
+    def test_two_envs_sharing_a_vm_id_have_distinct_locks(self) -> None:
         # Regression: VM IDs are only unique within one singleton Proxmox
         # host (each starts numbering ~100), so two envs that share a vm_id
         # represent two different machines on two different hosts. They must

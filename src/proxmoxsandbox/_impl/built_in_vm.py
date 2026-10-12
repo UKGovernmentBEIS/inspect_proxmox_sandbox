@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import BinaryIO, Dict, cast, get_args
 from urllib.parse import urlparse
 
+import httpx
 import platformdirs
 import pycdlib
-import pycurl
 import tenacity
 from inspect_ai.util import trace_action
 
@@ -30,6 +30,11 @@ from proxmoxsandbox.schema import (
 )
 
 VM_TIMEOUT = 1200
+CLOUD_INIT_TIMEOUT = 1200
+# 41 GiB used after install (39 GiB of it /usr), so ~20 GiB free for the eval
+KALI_DISK_GIB = 64
+# Measured 25 min on a 2-vCPU guest on an r8i.4xlarge host in eu-west-2
+KALI_CLOUD_INIT_TIMEOUT = 3600
 
 TRACE_NAME = "proxmox_built_in_vm"
 
@@ -42,6 +47,23 @@ KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.4/kali-linux-2
 KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
 
 STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
+
+
+async def download_to_file(url: str, destination: Path) -> None:
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=httpx.Timeout(connect=30, read=300, write=60, pool=60),
+    ) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            partial = destination.with_name(destination.name + ".part")
+            try:
+                with partial.open("wb") as file_handle:
+                    async for chunk in response.aiter_bytes():
+                        file_handle.write(chunk)
+                partial.replace(destination)
+            finally:
+                partial.unlink(missing_ok=True)
 
 
 class BuiltInVM(abc.ABC):
@@ -96,11 +118,7 @@ class BuiltInVM(abc.ABC):
                 f"{required_major}.{required_minor}"
             )
 
-    async def create_and_upload_cloudinit_iso(
-        self,
-        vm_id: int,
-        meta_data: str = """instance-id: proxmox\n""",  # TODO sort this
-        user_data: str = """#cloud-config
+    DEFAULT_USER_DATA = """#cloud-config
 package_update: true
 # Installs packages equivalent to Inspect's default Docker image for tool compatibility
 # TODO actually install inspect-tool-support here
@@ -167,7 +185,23 @@ runcmd:
   - [ systemctl, mask, systemd-networkd-wait-online.service ]
 # systemd-networkd-wait-online.service causes startup delays
 # and makes it annoying to debug network issues
-""",  # noqa: E501
+"""  # noqa: E501
+
+    # Not in packages: the Kali image has no qemu-guest-agent, so one apt transaction
+    # would keep the agent down past await_vm's 5 min ping window.
+    # Must stay the last runcmd entry: cloud-init only reports the last command's exit
+    # status, so a failed install would otherwise still produce "status: done".
+    # apt-get clean drops ~13 GiB of cached .debs from the template
+    KALI_USER_DATA = (
+        DEFAULT_USER_DATA.rstrip("\n")
+        + "\n  - [ sh, -c, DEBIAN_FRONTEND=noninteractive apt-get install -y kali-linux-everything && apt-get clean ]\n"  # noqa: E501
+    )
+
+    async def create_and_upload_cloudinit_iso(
+        self,
+        vm_id: int,
+        meta_data: str = """instance-id: proxmox\n""",  # TODO sort this
+        user_data: str = DEFAULT_USER_DATA,
         network_config: str = """network:
   version: 2
   ethernets:
@@ -264,8 +298,10 @@ runcmd:
                             )
 
             existing_vms = await self.known_builtins()
-            for existing_vm in existing_vms:
-                await self.qemu_commands.destroy_vm(vm_id=existing_vms[existing_vm])
+            for built_in, vm_id in existing_vms.items():
+                await self.qemu_commands.destroy_vm(
+                    vm_id=vm_id, name=f"inspect-{built_in}"
+                )
 
         await self.task_wrapper.do_action_and_wait_for_tasks(inner_clear_builtins)
 
@@ -331,6 +367,9 @@ runcmd:
                 built_in=built_in_name,
                 source_image_source_url=KALI_DOWNLOAD_URL,
                 disk_renamed=KALI_DISK_RENAMED,
+                user_data=self.KALI_USER_DATA,
+                disk_gib=KALI_DISK_GIB,
+                cloud_init_timeout=KALI_CLOUD_INIT_TIMEOUT,
             )
         else:
             raise ValueError(f"Unknown built-in {built_in_name}")
@@ -380,6 +419,9 @@ runcmd:
         built_in: str,
         source_image_source_url: str,
         disk_renamed: str,
+        user_data: str,
+        disk_gib: int | None,
+        cloud_init_timeout: int,
     ) -> None:
         # Unfortunately Kali only provide VM images in .xz and .7z formats,
         # neither of which are supported by Proxmox's "download from URL".
@@ -389,7 +431,7 @@ runcmd:
 
         download_filename = Path(urlparse(source_image_source_url).path).name
 
-        if await self.content_exists(download_filename):
+        if await self.content_exists(disk_renamed):
             self.logger.debug(f"source image {built_in} already uploaded")
         else:
             with trace_action(
@@ -397,22 +439,8 @@ runcmd:
                 TRACE_NAME,
                 f"upload source image {built_in=} ",
             ):
-                download_path = os.path.join(self.cache_dir, download_filename)
-                with open(download_path, "wb") as f:
-                    c = pycurl.Curl()
-                    c.setopt(c.URL, source_image_source_url)  # type: ignore[attr-defined]
-                    c.setopt(c.WRITEDATA, f)  # type: ignore[attr-defined]
-                    c.setopt(c.FOLLOWLOCATION, True)  # type: ignore[attr-defined]
-                    c.setopt(c.FAILONERROR, True)  # type: ignore[attr-defined]
-                    try:
-                        c.perform()
-                        status_code = c.getinfo(c.RESPONSE_CODE)  # type: ignore[attr-defined]
-                        if status_code >= 400:
-                            raise ValueError(
-                                f"Download failed with status code: {status_code}"
-                            )
-                    finally:
-                        c.close()
+                download_path = Path(self.cache_dir) / download_filename
+                await download_to_file(source_image_source_url, download_path)
 
                 # shell out to tar -xf with subprocess:
                 subprocess.check_call(
@@ -437,7 +465,14 @@ runcmd:
 
         await self.ensure_static_sdn_exists()
 
-        await self.startup_vm(next_available_vm_id, built_in, f"import/{disk_renamed}")
+        await self.startup_vm(
+            next_available_vm_id,
+            built_in,
+            f"import/{disk_renamed}",
+            user_data=user_data,
+            disk_gib=disk_gib,
+            cloud_init_timeout=cloud_init_timeout,
+        )
 
     async def ensure_source_uploaded(
         self,
@@ -478,84 +513,99 @@ runcmd:
         next_available_vm_id: int,
         built_in: str,
         import_source: str,
+        user_data: str = DEFAULT_USER_DATA,
+        disk_gib: int | None = None,
+        cloud_init_timeout: int = CLOUD_INIT_TIMEOUT,
     ) -> None:
+        name = f"inspect-{built_in}"
+
         with trace_action(
             self.logger,
             TRACE_NAME,
-            f"create VM from OVA {next_available_vm_id=}",
+            f"create VM from import {next_available_vm_id=}",
         ):
+            upid = await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu",
+                json={
+                    "vmid": next_available_vm_id,
+                    "name": name,
+                    "node": self.node,
+                    "cpu": "host",
+                    "memory": 8192,
+                    "cores": 2,
+                    "ostype": "l26",
+                    "scsi0": f"{self.image_storage}:0,"
+                    + f"import-from={LOCAL_STORAGE}:{import_source},"
+                    + "format=qcow2,cache=writeback",
+                    "scsihw": "virtio-scsi-single",
+                    "net0": f"virtio,bridge={STATIC_VNET_ID}",
+                    "serial0": "socket",
+                    "vga": "none",
+                    "tablet": 0,
+                    "start": False,
+                    "agent": "enabled=1",
+                },
+            )
+            await self.async_proxmox.wait_for_task(upid=upid)
 
-            async def do_create() -> None:
-                await self.async_proxmox.request(
-                    "POST",
-                    f"/nodes/{self.node}/qemu",
-                    json={
-                        "vmid": next_available_vm_id,
-                        "name": f"inspect-{built_in}",
-                        "node": self.node,
-                        "cpu": "host",
-                        "memory": 8192,
-                        "cores": 2,
-                        "ostype": "l26",
-                        "scsi0": f"{self.image_storage}:0,"
-                        + f"import-from={LOCAL_STORAGE}:{import_source},"
-                        + "format=qcow2,cache=writeback",
-                        "scsihw": "virtio-scsi-single",
-                        "net0": f"virtio,bridge={STATIC_VNET_ID}",
-                        "serial0": "socket",
-                        "start": False,
-                        "agent": "enabled=1",
-                    },
-                )
+            if disk_gib is not None:
+                # cloud-init's growpart/resizefs pick this up on first boot
+                async def resize_disk() -> None:
+                    await self.async_proxmox.request(
+                        "PUT",
+                        f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
+                        json={"disk": "scsi0", "size": f"{disk_gib}G"},
+                    )
 
-            await self.task_wrapper.do_action_and_wait_for_tasks(do_create)
+                await self.task_wrapper.do_action_and_wait_for_tasks(resize_disk)
 
             await self.create_and_upload_cloudinit_iso(
                 vm_id=next_available_vm_id,
+                user_data=user_data,
             )
 
-            async def update_tags() -> None:
-                await self.async_proxmox.request(
-                    "POST",
-                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
-                    json={
-                        "tags": f"inspect,builtin-{built_in}",
-                    },
-                )
+            upid = await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
+                json={
+                    "tags": f"inspect,builtin-{built_in}",
+                },
+            )
+            await self.async_proxmox.wait_for_task(upid=upid)
 
-            await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
-
-            await self.qemu_commands.start_and_await(
-                vm_id=next_available_vm_id, is_sandbox=True
+            await self.qemu_commands.start(vm_id=next_available_vm_id)
+            await self.qemu_commands.await_vm(
+                vm_id=next_available_vm_id, requires_guest_agent=True, name=name
             )
 
             # now wait for cloud-init to finish
 
             agent_commands = AgentCommands(self.async_proxmox, self.node)
-            res = await agent_commands.exec_command(
+            cloud_init_pid = await agent_commands.exec_command(
                 vm_id=next_available_vm_id,
                 command=["cloud-init", "status", "--wait"],
             )
 
             @tenacity.retry(
-                wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                stop=tenacity.stop_after_delay(VM_TIMEOUT),
+                # Uncapped, the backoff reaches tens of minutes per poll inside an hour
+                wait=tenacity.wait_exponential(min=0.1, max=30, exp_base=1.3),
+                stop=tenacity.stop_after_delay(cloud_init_timeout),
                 retry=tenacity.retry_if_result(lambda x: x is False),
             )
             async def wait_for_cloud_init() -> bool:
                 exec_status = await agent_commands.get_agent_exec_status(
-                    vm_id=next_available_vm_id, pid=res["pid"]
+                    vm_id=next_available_vm_id, pid=cloud_init_pid
                 )
-                if exec_status["exited"] == 1:
+                if exec_status.exited == 1:
+                    out_data = exec_status.out_data or ""
                     # `cloud-init status --wait` prints progress dots before the
                     # final status line, so match the trailing token, not the whole
                     # output (status: error/degraded still fall through to the raise).
-                    if exec_status["out-data"].strip().endswith("status: done"):
+                    if out_data.strip().endswith("status: done"):
                         return True
                     else:
-                        raise ValueError(
-                            f"cloud-init failed: {exec_status['out-data']}"
-                        )
+                        raise ValueError(f"cloud-init failed: {out_data}")
                 else:
                     return False
 
@@ -568,7 +618,8 @@ runcmd:
 
             await self.qemu_commands.await_vm(
                 vm_id=next_available_vm_id,
-                is_sandbox=True,
+                requires_guest_agent=True,
+                name=name,
                 status_for_wait="stopped",
             )
 
@@ -587,7 +638,7 @@ runcmd:
                     "GET",
                     f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
                 )
-                return current_config["template"] == 1
+                return current_config.get("template") == 1
 
             await is_template()
 

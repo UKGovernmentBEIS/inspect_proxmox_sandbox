@@ -28,7 +28,6 @@ async def test_clone_is_tracked_even_if_it_never_becomes_ready():
                 vm_id_to_clone=100,
                 sdn_vnet_aliases={},
                 preserve_tags=False,
-                wait_until_ready=True,
             )
 
-    assert 4242 in qemu._tracked_vm_ids
+    assert 4242 in qemu._tracked_vms

@@ -3,7 +3,6 @@ from typing import Dict
 
 import pytest
 from inspect_ai.util import SandboxConnection, SandboxEnvironment
-from pytest import raises
 
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
@@ -316,31 +315,6 @@ async def test_ova() -> None:
         )
 
 
-async def test_at_least_one_sandbox() -> None:
-    sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
-        vms_config=(
-            VmConfig(
-                vm_source_config=VmSourceConfig(
-                    built_in="ubuntu24.04",
-                ),
-                name="non-sandbox-1",
-                is_sandbox=False,
-            ),
-            VmConfig(
-                vm_source_config=VmSourceConfig(
-                    built_in="ubuntu24.04",
-                ),
-                name="non-sandbox-2",
-                is_sandbox=False,
-            ),
-        )
-    )
-    with raises(ValueError) as e_info:
-        await setup_sandbox("ta1s", sandbox_env_config)
-    assert "No default sandbox found" in str(e_info.value)
-    await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
-
-
 async def test_connect(proxmox_sandbox_environment: ProxmoxSandboxEnvironment) -> None:
     connection: SandboxConnection = await proxmox_sandbox_environment.connection()
     # we can't really do much more than this assertion;
@@ -418,6 +392,15 @@ async def test_cli_cleanup(
 
     existing_vms = await qemu_commands.list_vms()
     existing_zones = await sdn_commands.list_sdn_zones()
+
+    # can happen if something else (e.g. an interrupted test run) left inspect VMs
+    # behind; abort rather than trying to work around it
+    existing_sweepable = [
+        vm for vm in existing_vms if QemuCommands.vm_is_inspect(vm=vm, template=False)
+    ]
+    assert not existing_sweepable, (
+        f"test_cli_cleanup: unexpected pre-existing VMs: {existing_sweepable}"
+    )
 
     await setup_sandbox("tcc", sandbox_env_config)
 
