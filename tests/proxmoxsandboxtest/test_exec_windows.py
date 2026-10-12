@@ -1,12 +1,58 @@
-"""Check Windows rendering without treating string checks as cmd execution."""
+"""Check Windows rendering without treating string checks as OS enforcement."""
 
+import base64
 from typing import Any
 
 import pytest
 
 from proxmoxsandbox._impl import exec_windows
 
-PREFIX = "C:\\Windows\\Temp\\proxmox_123_"
+PREFIX = "C:\\Windows\\Temp\\proxmox_123\\"
+CMD_EXE = r"C:\Windows\System32\cmd.exe"
+
+
+def test_prepare_uses_fixed_powershell_and_encoded_script() -> None:
+    argv = exec_windows.build_prepare(PREFIX[:-1])
+    assert argv[:-1] == [
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+    ]
+    assert all(argument.isascii() for argument in argv)
+    script = base64.b64decode(argv[-1], validate=True).decode("utf-16le")
+    assert f"$path = '{PREFIX[:-1]}'" in script
+
+
+def test_prepare_creates_acl_atomically_and_rejects_foreign_objects() -> None:
+    script = base64.b64decode(exec_windows.build_prepare(PREFIX[:-1])[-1]).decode(
+        "utf-16le"
+    )
+    assert "SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;OICI;FA;;;SY)')" in script
+    assert "[IO.Directory]::CreateDirectory($path, $security)" in script
+    assert script.index("SetSecurityDescriptorSddlForm") < script.index(
+        "CreateDirectory"
+    )
+    assert "ReparsePoint" in script
+    assert (
+        "GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-18'"
+        in script
+    )
+    assert "-not $actual.AreAccessRulesProtected -or $rules.Count -ne 1" in script
+    assert (
+        "$rule.IdentityReference.Value -ne 'S-1-5-18' -or $rule.IsInherited" in script
+    )
+    assert "[Security.AccessControl.AccessControlType]::Allow" in script
+    assert "[Security.AccessControl.FileSystemRights]::FullControl" in script
+    assert (
+        "[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'"
+        in script
+    )
+    assert "[Security.AccessControl.PropagationFlags]::None" in script
+    assert "SetAccessControl" not in script
+    assert "Set-Acl" not in script
+    assert "icacls" not in script
 
 
 def _script(**changes: Any) -> str:
@@ -28,7 +74,7 @@ def test_supervisor_is_separate_from_payload_and_publishes_after_child() -> None
     supervisor, payload = script.split(":payload\r\n")
 
     assert 'if "%~1"=="__proxmox_payload" goto payload' in supervisor
-    assert 'cmd.exe /d /e:on /v:off /s /c ""%~f0" __proxmox_payload"' in supervisor
+    assert f'{CMD_EXE} /d /e:on /v:off /s /c ""%~f0" __proxmox_payload"' in supervisor
     assert 'set "ERRORLEVEL="' in supervisor
     assert 'set "ERRORLEVEL=999"' not in supervisor
     assert 'set "ERRORLEVEL=999"' in payload
@@ -58,7 +104,7 @@ def test_result_write_checks_its_own_status_not_command_failure() -> None:
 def test_staged_input_is_redirected_into_child() -> None:
     input_path = f"{PREFIX}stdin"
     script = _script(stdin_file=input_path)
-    child = next(line for line in script.splitlines() if line.startswith("cmd.exe"))
+    child = next(line for line in script.splitlines() if line.startswith(CMD_EXE))
     assert child.endswith(f'<"{input_path}"')
     assert f'>"{PREFIX}script.stdout"' in child
     assert f'2>"{PREFIX}script.stderr"' in child
@@ -95,7 +141,7 @@ def test_user_is_not_silently_ignored() -> None:
 def test_claim_precedes_assembly_and_duplicate_branch_cannot_mutate_files() -> None:
     parts = [f"{PREFIX}script.bat.part0", f"{PREFIX}script.bat.part1"]
     argv = exec_windows.build_launch(PREFIX, parts)
-    assert argv[:5] == ["cmd.exe", "/d", "/e:on", "/v:off", "/c"]
+    assert argv[:5] == [CMD_EXE, "/d", "/e:on", "/v:off", "/c"]
     launch = argv[-1]
     assert launch.startswith(f"mkdir {PREFIX}claimed 2>nul & ")
     assert (
@@ -109,6 +155,27 @@ def test_claim_precedes_assembly_and_duplicate_branch_cannot_mutate_files() -> N
     assert '"' not in launch
     assert "del " not in launch
     assert "rmdir" not in launch
+
+
+def test_stdin_is_assembled_after_claim_and_before_running_script() -> None:
+    parts = [f"{PREFIX}script.bat.part0", f"{PREFIX}script.bat.part1"]
+    stdin_parts = [f"{PREFIX}stdin.part0", f"{PREFIX}stdin.part1"]
+    launch = exec_windows.build_launch(PREFIX, parts, stdin_parts)[-1]
+    assert launch.startswith(f"mkdir {PREFIX}claimed 2>nul & ")
+    assert launch.endswith(
+        f"else (copy /b {parts[0]}+{parts[1]} {PREFIX}script.bat >nul "
+        f"&& copy /b {stdin_parts[0]}+{stdin_parts[1]} {PREFIX}stdin >nul "
+        f"&& {PREFIX}script.bat)"
+    )
+
+
+def test_stdin_can_be_chunked_without_chunking_script() -> None:
+    stdin_parts = [f"{PREFIX}stdin.part0", f"{PREFIX}stdin.part1"]
+    launch = exec_windows.build_launch(PREFIX, stdin_parts=stdin_parts)[-1]
+    assert launch.endswith(
+        f"else (copy /b {stdin_parts[0]}+{stdin_parts[1]} {PREFIX}stdin >nul "
+        f"&& {PREFIX}script.bat)"
+    )
 
 
 def test_unchunked_launch_still_claims_first() -> None:

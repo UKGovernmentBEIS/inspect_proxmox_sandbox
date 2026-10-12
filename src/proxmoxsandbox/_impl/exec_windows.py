@@ -4,13 +4,71 @@ The claim and terminal record belong to one execution and survive output cleanup
 This wrapper does not enforce a guest-side timeout or impersonate another user.
 """
 
+import base64
 from collections.abc import Sequence
 
 SCRIPT_SUFFIX = ".bat"
 TMP_DIR = r"C:\Windows\Temp"
 
 _PAYLOAD_ARGUMENT = "__proxmox_payload"
-_CMD = ["cmd.exe", "/d", "/e:on", "/v:off", "/c"]
+_CMD_EXE = r"C:\Windows\System32\cmd.exe"
+_CMD = [_CMD_EXE, "/d", "/e:on", "/v:off", "/c"]
+_POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def build_prepare(workspace: str) -> list[str]:
+    """Create a SYSTEM-only workspace atomically, or validate a preparation retry.
+
+    CreateDirectory passes this descriptor to the creation syscall, so payload
+    files never exist under an inherited public ACL. It leaves existing objects
+    unchanged; reject foreign, linked or permissive directories instead of
+    repairing them. Every child inherits the SYSTEM-only access rule.
+    """
+    path = workspace.replace("'", "''")
+    script = rf"""$ErrorActionPreference = 'Stop'
+$path = '{path}'
+$ancestor = [IO.Directory]::GetParent($path)
+while ($null -ne $ancestor) {{
+    if (([IO.File]::GetAttributes($ancestor.FullName) -band
+        [IO.FileAttributes]::ReparsePoint) -ne 0) {{
+        throw 'Guest execution workspace has a reparse-point ancestor'
+    }}
+    $ancestor = $ancestor.Parent
+}}
+$security = New-Object Security.AccessControl.DirectorySecurity
+$security.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;OICI;FA;;;SY)')
+$directory = [IO.Directory]::CreateDirectory($path, $security)
+if (([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
+    throw 'Guest execution workspace is a reparse point'
+}}
+$actual = $directory.GetAccessControl(
+    [Security.AccessControl.AccessControlSections]'Access,Owner')
+$rules = @($actual.GetAccessRules(
+    $true, $true, [Security.Principal.SecurityIdentifier]))
+if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-18' -or
+    -not $actual.AreAccessRulesProtected -or $rules.Count -ne 1) {{
+    throw 'Guest execution workspace has an unexpected owner or DACL'
+}}
+$rule = $rules[0]
+if ($rule.IdentityReference.Value -ne 'S-1-5-18' -or $rule.IsInherited -or
+    $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+    $rule.FileSystemRights -ne
+        [Security.AccessControl.FileSystemRights]::FullControl -or
+    $rule.InheritanceFlags -ne
+        [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' -or
+    $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {{
+    throw 'Guest execution workspace is not SYSTEM-only'
+}}
+"""
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    return [
+        _POWERSHELL,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        encoded,
+    ]
 
 
 def build_script(
@@ -37,7 +95,7 @@ def build_script(
     # command twice. A payload's `exit` or batch-file transfer cannot bypass the
     # supervising cmd's publication of the real child exit status.
     child = (
-        f'cmd.exe /d /e:on /v:off /s /c ""%~f0" {_PAYLOAD_ARGUMENT}"'
+        f'{_CMD_EXE} /d /e:on /v:off /s /c ""%~f0" {_PAYLOAD_ARGUMENT}"'
         f' >"{tmp_start}script.stdout" 2>"{tmp_start}script.stderr"'
     )
     if stdin_file is not None:
@@ -85,16 +143,25 @@ def build_script(
     return "\r\n".join(lines) + "\r\n"
 
 
-def build_launch(tmp_start: str, parts: Sequence[str] = ()) -> list[str]:
+def build_launch(
+    tmp_start: str,
+    parts: Sequence[str] = (),
+    stdin_parts: Sequence[str] = (),
+) -> list[str]:
     """Claim before assembly or execution; duplicates leave all files intact."""
     claim = f"{tmp_start}claimed"
     script = f"{tmp_start}script{SCRIPT_SUFFIX}"
     # These paths are generated without whitespace or shell metacharacters.
     # QGA escapes embedded quotes for a C argv parser, not cmd's /c parser.
-    launch = script
+    commands = []
     if parts:
         sources = "+".join(parts)
-        launch = f"copy /b {sources} {script} >nul && {launch}"
+        commands.append(f"copy /b {sources} {script} >nul")
+    if stdin_parts:
+        sources = "+".join(stdin_parts)
+        commands.append(f"copy /b {sources} {tmp_start}stdin >nul")
+    commands.append(script)
+    launch = " && ".join(commands)
     # Check the directory only after the atomic creation attempt. An unrelated
     # mkdir failure must not be reported as a duplicate execution.
     command = (
