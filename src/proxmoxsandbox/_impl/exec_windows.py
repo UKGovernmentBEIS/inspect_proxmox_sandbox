@@ -16,6 +16,18 @@ _CMD = [_CMD_EXE, "/d", "/e:on", "/v:off", "/c"]
 _POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 
+def _powershell(script: str) -> list[str]:
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    return [
+        _POWERSHELL,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        encoded,
+    ]
+
+
 def build_prepare(workspace: str) -> list[str]:
     """Create a SYSTEM-only workspace atomically, or validate a preparation retry.
 
@@ -60,15 +72,7 @@ if ($rule.IdentityReference.Value -ne 'S-1-5-18' -or $rule.IsInherited -or
     throw 'Guest execution workspace is not SYSTEM-only'
 }}
 """
-    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-    return [
-        _POWERSHELL,
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-EncodedCommand",
-        encoded,
-    ]
+    return _powershell(script)
 
 
 def build_script(
@@ -154,12 +158,21 @@ def build_launch(
     # These paths are generated without whitespace or shell metacharacters.
     # QGA escapes embedded quotes for a C argv parser, not cmd's /c parser.
     commands = []
-    if parts:
-        sources = "+".join(parts)
-        commands.append(f"copy /b {sources} {script} >nul")
-    if stdin_parts:
-        sources = "+".join(stdin_parts)
-        commands.append(f"copy /b {sources} {tmp_start}stdin >nul")
+    if parts or stdin_parts:
+        # Numeric sequences avoid cmd's 8191-character limit. One output stream
+        # per file copies each binary chunk once, without shell text conversion.
+        assembly = [_ASSEMBLE_PARTS]
+        for destination, chunks in (
+            (script, parts),
+            (f"{tmp_start}stdin", stdin_parts),
+        ):
+            if chunks:
+                width = len(str(len(chunks) - 1))
+                prefix = chunks[0][:-width]
+                assembly.append(
+                    f"Join-Parts '{destination}' '{prefix}' {len(chunks)} {width}"
+                )
+        commands.append(" ".join(_powershell("\n".join(assembly))))
     commands.append(script)
     launch = " && ".join(commands)
     # Check the directory only after the atomic creation attempt. An unrelated
@@ -175,5 +188,49 @@ def build_launch(
 
 def build_cleanup(paths: Sequence[str]) -> list[str]:
     """Remove only the exact output/staging files chosen by the shared owner."""
-    command = "del /f /q " + " ".join(paths) + " 2>nul" if paths else "exit /b 0"
-    return [*_CMD, command]
+    if not any(".part" in path for path in paths):
+        command = "del /f /q " + " ".join(paths) + " 2>nul" if paths else "exit /b 0"
+        return [*_CMD, command]
+
+    # Compress only consecutive exact chunk names. A gap or an unrelated file
+    # starts a new range; cleanup never enumerates the directory or uses a glob.
+    lines = ["$ErrorActionPreference = 'Stop'"]
+    index = 0
+    while index < len(paths):
+        path = paths[index]
+        prefix, separator, number = path.rpartition(".part")
+        if not separator or not number.isdecimal():
+            lines.append(f"[IO.File]::Delete('{path}')")
+            index += 1
+            continue
+        prefix += separator
+        start, width = int(number), len(number)
+        end = index + 1
+        while (
+            end < len(paths)
+            and paths[end] == f"{prefix}{start + end - index:0{width}d}"
+        ):
+            end += 1
+        stop = start + end - index
+        lines.extend(
+            [
+                f"for ($i = {start}; $i -lt {stop}; $i++) {{",
+                f"    [IO.File]::Delete('{prefix}' + $i.ToString('D{width}'))",
+                "}",
+            ]
+        )
+        index = end
+    return _powershell("\n".join(lines))
+
+
+_ASSEMBLE_PARTS = """$ErrorActionPreference = 'Stop'
+function Join-Parts([string]$destination, [string]$prefix, [int]$count, [int]$width) {
+    $output = [IO.File]::Create($destination)
+    try {
+        for ($i = 0; $i -lt $count; $i++) {
+            $source = [IO.File]::OpenRead($prefix + $i.ToString('D' + $width))
+            try { $source.CopyTo($output) } finally { $source.Dispose() }
+        }
+    } finally { $output.Dispose() }
+}
+"""

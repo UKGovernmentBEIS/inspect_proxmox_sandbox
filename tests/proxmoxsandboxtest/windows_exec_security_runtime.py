@@ -49,8 +49,78 @@ def build_harness() -> str:
         "exe": argv[0],
         "arguments": subprocess.list2cmdline(argv[1:]),
     }
+
+    directory = root + r"\large"
+    prefix = directory + "\\"
+    hash_script = rf"""$ErrorActionPreference = 'Stop'
+[IO.File]::AppendAllText('{prefix}side', "ran`n")
+$stream = [Console]::OpenStandardInput()
+$sha = [Security.Cryptography.SHA256]::Create()
+try {{
+    [Console]::WriteLine([BitConverter]::ToString(
+        $sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant())
+}} finally {{ $stream.Dispose(); $sha.Dispose() }}
+"""
+    command = [
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        base64.b64encode(hash_script.encode("utf-16le")).decode("ascii"),
+    ]
+    script = renderer.build_script(
+        tmp_start=prefix,
+        command=command,
+        stdin=None,
+        cwd=None,
+        env={},
+        user=None,
+        timeout=30,
+        stdin_file=prefix + "stdin",
+    ).encode("ascii")
+    parts = [prefix + "script.bat.part0", prefix + "script.bat.part1"]
+    split = len(script) // 2
+    length, chunk_size = 4 * 1024 * 1024, 40 * 1024
+    count = (length + chunk_size - 1) // chunk_size
+    width = len(str(count - 1))
+    stdin_parts = [f"{prefix}stdin.part{i:0{width}d}" for i in range(count)]
+    cleanup_paths = [
+        prefix + "script.bat",
+        *parts,
+        prefix + "stdin",
+        *stdin_parts,
+        prefix + "script.stdout",
+        prefix + "script.stderr",
+        prefix + "script.returncode.tmp",
+    ]
+    large: dict[str, object] = {
+        "directory": directory,
+        "prefix": prefix,
+        "length": length,
+        "chunk_size": chunk_size,
+        "script_parts": {
+            path: base64.b64encode(data).decode("ascii")
+            for path, data in zip(parts, (script[:split], script[split:]))
+        },
+        "stdin_parts": stdin_parts,
+        "cleanup_paths": cleanup_paths,
+        "unrelated": f"{prefix}stdin.part{count:0{width}d}",
+    }
+    for name, argv in (
+        ("prepare", renderer.build_prepare(directory)),
+        ("launch", renderer.build_launch(prefix, parts, stdin_parts)),
+        ("cleanup", renderer.build_cleanup(cleanup_paths)),
+    ):
+        large[name] = {
+            "exe": argv[0],
+            "arguments": subprocess.list2cmdline(argv[1:]),
+            "command_length": len(subprocess.list2cmdline(argv)),
+        }
     payload = base64.b64encode(
-        json.dumps({"root": root, "empty": empty, "cases": fixtures}).encode()
+        json.dumps(
+            {"root": root, "empty": empty, "cases": fixtures, "large": large}
+        ).encode()
     ).decode("ascii")
     return _POWERSHELL.replace("__FIXTURES_BASE64__", payload)
 
@@ -322,6 +392,53 @@ public static class InspectRestrictedAccess {
         foreach ($check in $checks.GetEnumerator()) {
             Assert-True ($check.Value) ('Restricted token check failed: ' + $check.Key)
         }
+    }
+    Test-Case '4 MiB binary stdin preserves bytes and exact cleanup permits no replay' {
+        $case = $data.large
+        Assert-True ($case.launch.command_length -lt 8191 -and
+            $case.cleanup.command_length -lt 8191) 'Windows command line is too long'
+        Run-Prepare $case.prepare
+        $payload = New-Object byte[] ([int]$case.length)
+        [Random]::new(20261012).NextBytes($payload)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $expected = [BitConverter]::ToString($sha.ComputeHash($payload)).Replace(
+                '-', '').ToLowerInvariant()
+        } finally { $sha.Dispose() }
+        $offset = 0
+        foreach ($path in $case.stdin_parts) {
+            $length = [Math]::Min([int]$case.chunk_size, $payload.Length - $offset)
+            $part = New-Object byte[] $length
+            [Array]::Copy($payload, $offset, $part, 0, $length)
+            [IO.File]::WriteAllBytes([string]$path, $part)
+            $offset += $length
+        }
+        foreach ($part in $case.script_parts.PSObject.Properties) {
+            [IO.File]::WriteAllBytes($part.Name,
+                [Convert]::FromBase64String($part.Value))
+        }
+        Run-Prepare $case.launch
+        $prefix = [string]$case.prefix
+        Assert-True ([IO.File]::ReadAllText($prefix + 'script.returncode').Trim() -eq
+            '0') 'Binary stdin command failed'
+        Assert-True ([IO.File]::ReadAllText($prefix + 'script.stdout').Trim() -eq
+            $expected) 'Binary stdin digest changed'
+        Assert-True ([IO.File]::ReadAllText($prefix + 'script.stderr').Length -eq
+            0) 'Binary stdin command produced errors'
+        [IO.File]::WriteAllText($case.unrelated, 'retained')
+        Run-Prepare $case.cleanup
+        foreach ($path in $case.cleanup_paths) {
+            Assert-True (-not [IO.File]::Exists([string]$path)) (
+                'Cleanup left owned data')
+        }
+        Assert-True ([IO.Directory]::Exists($prefix + 'claimed')) 'Claim was deleted'
+        Assert-True ([IO.File]::ReadAllText($prefix + 'script.returncode').Trim() -eq
+            '0') 'Terminal record was deleted'
+        Assert-True ([IO.File]::ReadAllText($case.unrelated) -eq
+            'retained') 'Cleanup deleted an unlisted chunk filename'
+        Run-Prepare $case.launch
+        Assert-True ([IO.File]::ReadAllLines($prefix + 'side').Count -eq
+            1) 'Delayed launch replayed the command'
     }
 } catch {
     $message = [string]$_.Exception.Message

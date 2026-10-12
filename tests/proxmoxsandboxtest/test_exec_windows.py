@@ -1,6 +1,8 @@
 """Check Windows rendering without treating string checks as OS enforcement."""
 
 import base64
+import re
+import subprocess
 from typing import Any
 
 import pytest
@@ -9,6 +11,13 @@ from proxmoxsandbox._impl import exec_windows
 
 PREFIX = "C:\\Windows\\Temp\\proxmox_123\\"
 CMD_EXE = r"C:\Windows\System32\cmd.exe"
+
+
+def _powershell_script(argv: list[str]) -> str:
+    command = " ".join(argv)
+    match = re.search(r"-EncodedCommand ([A-Za-z0-9+/=]+)", command)
+    assert match is not None
+    return base64.b64decode(match[1], validate=True).decode("utf-16le")
 
 
 def test_prepare_uses_fixed_powershell_and_encoded_script() -> None:
@@ -148,10 +157,13 @@ def test_claim_precedes_assembly_and_duplicate_branch_cannot_mutate_files() -> N
         f"if errorlevel 1 (if exist {PREFIX}claimed\\ "
         "(exit /b 0) else (echo Cannot claim guest execution 1>&2 & exit /b 125))"
     ) in launch
-    assert launch.endswith(
-        f"else (copy /b {parts[0]}+{parts[1]} {PREFIX}script.bat >nul "
-        f"&& {PREFIX}script.bat)"
-    )
+    assert launch.index("else (") < launch.index("powershell.exe")
+    assert launch.endswith(f"&& {PREFIX}script.bat)")
+    assembly = _powershell_script(argv)
+    assert f"Join-Parts '{PREFIX}script.bat' '{PREFIX}script.bat.part' 2 1" in assembly
+    assert "for ($i = 0; $i -lt $count; $i++)" in assembly
+    assert "$source.CopyTo($output)" in assembly
+    assert assembly.count("[IO.File]::Create($destination)") == 1
     assert '"' not in launch
     assert "del " not in launch
     assert "rmdir" not in launch
@@ -160,22 +172,22 @@ def test_claim_precedes_assembly_and_duplicate_branch_cannot_mutate_files() -> N
 def test_stdin_is_assembled_after_claim_and_before_running_script() -> None:
     parts = [f"{PREFIX}script.bat.part0", f"{PREFIX}script.bat.part1"]
     stdin_parts = [f"{PREFIX}stdin.part0", f"{PREFIX}stdin.part1"]
-    launch = exec_windows.build_launch(PREFIX, parts, stdin_parts)[-1]
+    argv = exec_windows.build_launch(PREFIX, parts, stdin_parts)
+    launch = argv[-1]
     assert launch.startswith(f"mkdir {PREFIX}claimed 2>nul & ")
-    assert launch.endswith(
-        f"else (copy /b {parts[0]}+{parts[1]} {PREFIX}script.bat >nul "
-        f"&& copy /b {stdin_parts[0]}+{stdin_parts[1]} {PREFIX}stdin >nul "
-        f"&& {PREFIX}script.bat)"
-    )
+    assembly = _powershell_script(argv)
+    assert f"Join-Parts '{PREFIX}script.bat' '{PREFIX}script.bat.part' 2 1" in assembly
+    assert f"Join-Parts '{PREFIX}stdin' '{PREFIX}stdin.part' 2 1" in assembly
+    assert launch.endswith(f"&& {PREFIX}script.bat)")
 
 
 def test_stdin_can_be_chunked_without_chunking_script() -> None:
     stdin_parts = [f"{PREFIX}stdin.part0", f"{PREFIX}stdin.part1"]
-    launch = exec_windows.build_launch(PREFIX, stdin_parts=stdin_parts)[-1]
-    assert launch.endswith(
-        f"else (copy /b {stdin_parts[0]}+{stdin_parts[1]} {PREFIX}stdin >nul "
-        f"&& {PREFIX}script.bat)"
-    )
+    argv = exec_windows.build_launch(PREFIX, stdin_parts=stdin_parts)
+    assembly = _powershell_script(argv)
+    assert f"Join-Parts '{PREFIX}stdin' '{PREFIX}stdin.part' 2 1" in assembly
+    assert f"Join-Parts '{PREFIX}script.bat'" not in assembly
+    assert argv[-1].endswith(f"&& {PREFIX}script.bat)")
 
 
 def test_unchunked_launch_still_claims_first() -> None:
@@ -197,3 +209,44 @@ def test_cleanup_has_only_exact_files() -> None:
 
 def test_empty_cleanup_is_a_noop() -> None:
     assert exec_windows.build_cleanup([])[-1] == "exit /b 0"
+
+
+@pytest.mark.parametrize("count", [2, 10, 11, 103, 1000, 10001])
+def test_chunk_assembly_and_cleanup_argv_stay_bounded(count: int) -> None:
+    prefix = rf"C:\Windows\Temp\proxmox_exec_{'a' * 32}" + "\\"
+    width = len(str(count - 1))
+    parts = [f"{prefix}script.bat.part{i:0{width}d}" for i in range(count)]
+    stdin_parts = [f"{prefix}stdin.part{i:0{width}d}" for i in range(count)]
+    launch = exec_windows.build_launch(prefix, parts, stdin_parts)
+    cleanup = exec_windows.build_cleanup(
+        [f"{prefix}script.bat", *parts, f"{prefix}stdin", *stdin_parts]
+    )
+
+    # Include executable and argv quoting overhead, not only the shell fragment.
+    assert len(subprocess.list2cmdline(launch)) < 8191
+    assert len(subprocess.list2cmdline(cleanup)) < 8191
+    assembly = _powershell_script(launch)
+    assert (
+        f"Join-Parts '{prefix}stdin' '{prefix}stdin.part' {count} {width}" in assembly
+    )
+    cleanup_script = _powershell_script(cleanup)
+    assert f"for ($i = 0; $i -lt {count}; $i++)" in cleanup_script
+    assert f"$i.ToString('D{width}')" in cleanup_script
+    assert "*" not in cleanup_script
+    assert "claimed" not in cleanup_script
+    assert "script.returncode" not in cleanup_script
+
+
+def test_chunk_cleanup_does_not_fill_gaps_or_delete_unlisted_paths() -> None:
+    paths = [
+        f"{PREFIX}stdin.part000",
+        f"{PREFIX}stdin.part001",
+        f"{PREFIX}stdin.part003",
+        f"{PREFIX}script.stdout",
+    ]
+    script = _powershell_script(exec_windows.build_cleanup(paths))
+    assert "for ($i = 0; $i -lt 2; $i++)" in script
+    assert "for ($i = 3; $i -lt 4; $i++)" in script
+    assert f"[IO.File]::Delete('{PREFIX}script.stdout')" in script
+    assert "*" not in script
+    assert "GetFiles" not in script
