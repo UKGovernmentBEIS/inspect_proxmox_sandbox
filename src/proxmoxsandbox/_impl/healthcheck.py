@@ -14,7 +14,10 @@ from typing import Awaitable, Callable, Literal
 import httpx
 from inspect_ai.util import ExecResult, OutputLimitExceededError
 
-from proxmoxsandbox._impl.agent_commands import is_transient_qga_error
+from proxmoxsandbox._impl.agent_commands import (
+    GuestExecIncompleteError,
+    is_transient_qga_error,
+)
 from proxmoxsandbox.schema import HealthCheck
 
 logger = getLogger(__name__)
@@ -124,6 +127,10 @@ class HealthCheckRunner:
         """Run the check once and classify what happened."""
         try:
             result = await self.execute(self.spec)
+        except GuestExecIncompleteError:
+            # A new probe could overlap a still-running command. Preserve its
+            # execution identity and abort startup instead of retrying.
+            raise
         except httpx.TransportError as e:
             return Probe("unreachable", type(e).__name__)
         except httpx.HTTPStatusError as e:
