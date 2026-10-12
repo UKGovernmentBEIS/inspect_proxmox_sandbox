@@ -210,6 +210,22 @@ def test_late_upload_recovery_leaves_time_for_command(os_type):
 
 
 @pytest.mark.parametrize("os_type", ["l26", "win11"])
+@pytest.mark.parametrize(
+    "stall", [False, True], ids=["late-response", "never-responds"]
+)
+def test_preparation_deadline_cannot_spend_command_runtime(os_type, stall):
+    guest = Guest(upload_delay=181, stall=stall)
+    with virtual_clock() as loop:
+        start = loop.time()
+        with pytest.raises(HealthCheckFailed):
+            loop.run_until_complete(guest.runner(loop, os_type=os_type).run())
+        assert loop.time() - start == 180
+
+    assert len(guest.uploads) == 1
+    assert guest.launches == []
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
 def test_cancellation_stops_transport_without_launch_or_retry(os_type):
     guest = Guest(stall=True)
 

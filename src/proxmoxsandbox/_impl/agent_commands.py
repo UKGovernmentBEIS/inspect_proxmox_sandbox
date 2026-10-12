@@ -32,11 +32,12 @@ from proxmoxsandbox._impl.qga_responses import (
 #     by another process", etc.) and Proxmox's non-standard 596/597
 #     "Broken pipe" returned when streaming large file-reads back.
 #
-# Uploads and reads retry these failures. Arbitrary command launches use
-# exec_command_once: losing a PID response does not make a launch safe to
-# repeat. The exec-status read is single-shot (the agent discards a finished
-# process's output once read), so get_agent_exec_status falls back to the
-# on-disk results if a retry finds the PID gone.
+# Uploads and reads retry these failures. Command launches can retry when the
+# guest wrapper's persistent claim prevents another execution; unguarded
+# commands must use exec_command_once. A finished exec-status record is
+# consumed on read, and an agent restart can also discard process records.
+# A gone PID therefore sends the caller to its retained result record, not
+# to another command launch.
 # Exception: a 500 for a missing file, an unreadable file (e.g. "Is a
 # directory"), or a gone PID is surfaced immediately (it will not change on
 # retry); callers turn those into empty content / a disk fallback / an error.
@@ -105,11 +106,10 @@ class GuestExecIncompleteError(RuntimeError):
 def _is_pid_gone(exc: httpx.HTTPStatusError) -> bool:
     """Whether a QGA error says the PID is unknown.
 
-    QGA only forgets a PID once the process has finished AND its exec-status
-    was read (the agent discards a finished process's output after one read),
-    so this reliably means "it completed". The agent renders the message as
-    e.g. "Agent error: PID ld does not exist" (the id is a stray %ld), so we
-    match on the stable "does not exist" rather than the pid.
+    A finished status read consumes the record, but an agent restart can also
+    forget a still-running child. The retained terminal record must decide
+    completion. The agent renders the message as e.g. "Agent error: PID ld
+    does not exist" (the id is a stray %ld), so match the stable text.
     """
     return "does not exist" in str(exc).casefold()
 
@@ -204,13 +204,9 @@ class AgentCommands:
             ) from exc
 
     async def get_agent_exec_status(self, vm_id: int, pid: int) -> ExecStatus:
-        # The status read is single-shot (the agent discards a finished
-        # process's output after one successful read), so a retry whose first
-        # attempt's response was lost could find the PID already gone. That is
-        # safe here: the wrapper script writes stdout/stderr/returncode to disk
-        # before exit, so a gone PID just means "finished" - report exited and
-        # let exec() read the results from disk. This makes the call idempotent
-        # and freely retryable.
+        # A lost finished-status response or an agent restart can leave the PID
+        # untracked. The exited hint stops QGA polling; callers must still read
+        # the retained terminal record to confirm that the command finished.
         if type(pid) is not int or pid <= 0:
             # Belt and braces: exec_command only hands out validated pids.
             raise ValueError(f"refusing to query exec-status for pid {pid!r}")
@@ -223,8 +219,8 @@ class AgentCommands:
         except httpx.HTTPStatusError as e:
             if _is_pid_gone(e):
                 self.logger.warning(
-                    f"exec-status vm={vm_id} pid={pid}: PID gone, assuming the "
-                    f"process finished and reading its results from disk"
+                    f"exec-status vm={vm_id} pid={pid}: PID no longer tracked; "
+                    f"recovering from the retained result record"
                 )
                 return ExecStatus(exited=1)
             raise
@@ -255,10 +251,10 @@ class AgentCommands:
             )
 
     async def exec_command(self, vm_id: int, command: List[str]) -> int:
-        """Execute an idempotent command with transport retries; return its pid.
+        """Retry an idempotent or persistently guarded command; return its pid.
 
         A lost response may cause multiple launches, including after the first
-        command has completed. Use exec_command_once for arbitrary commands.
+        command has completed. Use exec_command_once without such a guarantee.
         """
         return await self._retry_on_qga_error(
             f"exec_command vm={vm_id}",
