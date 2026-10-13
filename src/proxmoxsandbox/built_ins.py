@@ -2,10 +2,10 @@
 
 The provider creates a built-in template the first time an eval asks for it,
 which downloads an upstream image and installs packages inside the guest. This
-does the same for any or all built-ins without running an eval.
+does the same for every built-in without running an eval.
 """
 
-from typing import Iterable, get_args
+from typing import get_args
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands
@@ -16,21 +16,12 @@ BUILT_IN_NAMES: tuple[str, ...] = get_args(
 )
 
 
-async def ensure_built_in_templates(
-    instance: ProxmoxInstanceConfig,
-    names: Iterable[str] = BUILT_IN_NAMES,
-    remove_source_images: bool = False,
-) -> dict[str, int]:
-    """Create any of the named built-in templates missing from ``instance``.
+async def ensure_built_in_templates(instance: ProxmoxInstanceConfig) -> dict[str, int]:
+    """Create any built-in templates missing from ``instance``.
 
     Templates that already exist are left alone. The host needs internet access
-    for any that don't.
-
-    Args:
-        instance: The Proxmox host to create templates on.
-        names: Which built-ins to create; all of them by default.
-        remove_source_images: Delete the downloaded upstream images afterwards.
-            Templates keep their own copy of the disk, so this only saves space.
+    for any that don't. Deletes the downloaded upstream images afterwards:
+    templates keep their own copy of the disk.
 
     Returns:
         Every built-in template on the host, as name to VM ID.
@@ -42,8 +33,7 @@ async def ensure_built_in_templates(
     )
     built_in_vm = infra_commands.built_in_vm
     # One at a time: each picks the next free VM ID when it starts.
-    for name in names:
+    for name in BUILT_IN_NAMES:
         await built_in_vm.ensure_exists(name)
-    if remove_source_images:
-        await built_in_vm.remove_source_images()
+    await built_in_vm.remove_source_images()
     return await built_in_vm.known_builtins()

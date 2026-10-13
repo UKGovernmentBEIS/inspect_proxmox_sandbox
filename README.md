@@ -113,7 +113,7 @@ host can still reach the internet:
 ```python
 from proxmoxsandbox.built_ins import ensure_built_in_templates
 
-await ensure_built_in_templates(instance_config, remove_source_images=True)
+await ensure_built_in_templates(instance_config)
 ```
 
 The lockdown is gated on a marker file that provisioning doesn't create, so

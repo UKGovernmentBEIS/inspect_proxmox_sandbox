@@ -9,8 +9,8 @@ pytestmark = pytest.mark.req_proxmox
 async def test_ensure_built_in_templates_is_idempotent(
     instance_config: ProxmoxInstanceConfig,
 ) -> None:
-    first = await ensure_built_in_templates(instance_config, names=["debian13"])
-    assert "debian13" in first
+    first = await ensure_built_in_templates(instance_config)
+    assert set(first) == {"ubuntu24.04", "debian13", "kali2025.4"}
 
-    second = await ensure_built_in_templates(instance_config, names=["debian13"])
-    assert second["debian13"] == first["debian13"]
+    second = await ensure_built_in_templates(instance_config)
+    assert second == first
