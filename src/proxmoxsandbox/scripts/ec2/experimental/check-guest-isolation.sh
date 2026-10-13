@@ -21,6 +21,8 @@
 # Both are site-specific and never hardcoded here; check-host-isolation.sh prints the line
 # to paste.
 set -uo pipefail
+# Error text from the probes is matched against English, so pin the messages.
+export LC_ALL=C
 
 host_addrs=()
 unreachable=()
