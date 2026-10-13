@@ -158,6 +158,7 @@ for ip in 1.1.1.1 8.8.8.8; do
     for port in 53 853 443; do
         want blocked "TCP $ip:$port" "$(tcp_state "$ip" "$port")"
     done
+    want blocked "UDP $ip:53" "$(udp_state "$ip" 53 "$dns_query")"
 done
 # time.cloudflare.com
 want blocked "NTP 162.159.200.1:123/udp" "$(udp_state 162.159.200.1 123 "$ntp_query")"
