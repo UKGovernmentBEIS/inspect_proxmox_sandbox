@@ -22,11 +22,29 @@
 set -uo pipefail
 
 usage() { echo "usage: $0 [--unreachable IP[:PORT]] ... [--no-sweep]" >&2; exit 2; }
+# Literals only: the DNS firewall NXDOMAINs every name, so a name would pass without a packet
+# being sent.
+split_target() { # IP[:PORT] -> host, port
+    case "$1" in
+        # Brackets are how an IPv6 literal gets a port; bash then wants it without them.
+        \[*\]:*) host=${1#[}; host=${host%%]:*}; port=${1##*:} ;;
+        *:*:*) host=$1; port=443 ;;
+        *:*) host=${1%:*}; port=${1##*:} ;;
+        *) host=$1; port=443 ;;
+    esac
+    [[ $host =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || ($host == *:* && $host =~ ^[0-9a-fA-F:.]+$) ]] &&
+        [[ $port =~ ^[0-9]+$ ]]
+}
 unreachable=()
 sweep=1
 while [ $# -gt 0 ]; do
     case "$1" in
-        --unreachable) [ $# -ge 2 ] || usage; unreachable+=("$2"); shift 2 ;;
+        --unreachable)
+            [ $# -ge 2 ] || usage
+            split_target "$2" || { echo "--unreachable takes IP[:PORT] with a literal IP, not $2" >&2; exit 2; }
+            unreachable+=("$2")
+            shift 2
+            ;;
         --no-sweep) sweep=0; shift ;;
         *) usage ;;
     esac
@@ -313,22 +331,23 @@ check "DNS firewall NXDOMAINs everything else: deb.debian.org does not resolve" 
 check "no route off the VPC: https://1.1.1.1 does not connect" no_connect https://1.1.1.1/
 
 # Only a completed connect fails. A RST or ICMP error may come from any firewall on the path,
-# so like a timeout it is not evidence the target was reached.
+# so like a timeout it is not evidence the target was reached. Those are exit 1 and timeout(1)'s
+# 124; anything else is a probe that did not run, which must not read as a pass.
 tcp_dead() { # host port
-    timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null || return 0
-    echo "connected"
-    return 1
+    local rc
+    timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null
+    rc=$?
+    case $rc in
+        0) echo "connected"; return 1 ;;
+        1 | 124) return 0 ;;
+        *) echo "probe did not run (exit $rc)"; return 1 ;;
+    esac
 }
 if [ ${#unreachable[@]} -eq 0 ]; then
     skip "peered VPC / transit gateway / on-prem probes" "no --unreachable addresses given"
 else
     for target in "${unreachable[@]}"; do
-        case "$target" in
-            \[*\]:*) host=${target#[}; host=${host%%]:*}; port=${target##*:} ;;
-            *:*:*) host=$target; port=443 ;;
-            *:*) host=${target%:*}; port=${target##*:} ;;
-            *) host=$target; port=443 ;;
-        esac
+        split_target "$target"
         check "off-VPC address unreachable: $host:$port" tcp_dead "$host" "$port"
     done
 fi
@@ -338,19 +357,58 @@ fi
 # Connect-only, one SYN per address: the endpoints are AWS-operated, and AWS's pentest policy
 # (https://aws.amazon.com/security/penetration-testing) covers scanning our instances, not its
 # services, so this must stay a reachability check.
+ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $((a << 24 | b << 16 | c << 8 | d)); }
+prefix_mask() { echo $(((0xffffffff << (32 - $1)) & 0xffffffff)); }
 cidr_addrs() { # a.b.c.d/n
-    local a b c d bits=${1#*/} base i x
-    IFS=. read -r a b c d <<<"${1%/*}"
-    base=$(((a << 24 | b << 16 | c << 8 | d) & ~((1 << (32 - bits)) - 1) & 0xffffffff))
+    local bits=${1#*/} base i x
+    base=$(($(ip2int "${1%/*}") & $(prefix_mask "$bits")))
     for ((i = 0; i < 1 << (32 - bits); i++)); do
         x=$((base + i))
         echo "$((x >> 24 & 255)).$((x >> 16 & 255)).$((x >> 8 & 255)).$((x & 255))"
     done
 }
+prefixes_overlap() { # a.b.c.d/n e.f.g.h/m
+    local n=${1#*/} m=${2#*/} mask
+    mask=$(prefix_mask $((n < m ? n : m)))
+    [ $(($(ip2int "${1%/*}") & mask)) -eq $(($(ip2int "${2%/*}") & mask)) ]
+}
+# A local route inside the VPC's range sends the sweep to that segment instead: a guest's
+# listener there reads as a leak, and the VPC addresses behind it go unswept.
+local_routes_in() { # cidr... -> local routes overlapping any of them
+    local route cidr
+    for route in $(ip -4 route show | awk -v nic="$nic" '
+        { dev = ""; for (i = 2; i < NF; i++) if ($i == "dev") dev = $(i + 1) }
+        $1 != "default" && dev != nic { print $1 }'); do
+        [[ $route == */* ]] || route=$route/32
+        for cidr; do
+            prefixes_overlap "$route" "$cidr" && { echo "$route"; break; }
+        done
+    done
+}
 only_endpoints_on_443() { # cidr...
-    local cidr answered addr bad="" known=0
-    answered=$(for cidr; do cidr_addrs "$cidr"; done | grep -vxF -f <(echo "$held_addrs") |
-        xargs -P 256 -I{} timeout 1 bash -c 'exec 3<>/dev/tcp/{}/443 && echo {}' 2>/dev/null)
+    local cidr overlap addrs results broken answered addr bad="" known=0
+    overlap=$(local_routes_in "$@")
+    if [ -n "$overlap" ]; then
+        echo "local routes overlap the VPC, so the sweep would reach them instead: $(oneline "$overlap")"
+        return 1
+    fi
+    addrs=$(for cidr; do cidr_addrs "$cidr"; done | grep -vxF -f <(echo "$held_addrs"))
+    # One "rc addr" line per address rather than only the ones that answer, so a sweep that
+    # stopped early (a killed child ends xargs) is caught by the count.
+    # shellcheck disable=SC2016  # expanded by the inner bash
+    results=$(xargs -P 256 -n 1 bash -c 'timeout 1 bash -c "exec 3<>/dev/tcp/$1/443" 2>/dev/null; echo "$? $1"' \
+        _ <<<"$addrs" 2>/dev/null)
+    if [ "$(grep -c . <<<"$results")" -ne "$(grep -c . <<<"$addrs")" ]; then
+        echo "sweep stopped early: $(grep -c . <<<"$results") of $(grep -c . <<<"$addrs") addresses probed"
+        return 1
+    fi
+    # 1 is a refused or unreachable connect and 124 timeout(1)'s kill; anything else did not run.
+    broken=$(awk '$1 != 0 && $1 != 1 && $1 != 124' <<<"$results")
+    if [ -n "$broken" ]; then
+        echo "$(grep -c . <<<"$broken") probes did not run, e.g. exit $(head -1 <<<"$broken")"
+        return 1
+    fi
+    answered=$(awk '$1 == 0 {print $2}' <<<"$results")
     for addr in $answered; do
         if grep -qxF "$addr" <<<"$endpoint_addrs"; then
             known=$((known + 1))
