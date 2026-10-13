@@ -74,29 +74,14 @@ tcp_state() {
     err=$(timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1)
     state $? "$err"
 }
-# UDP; the TCP side of port 53 is a tcp_state probe. Any reply is reachable, REFUSED included:
-# it means a resolver got the query, which is how a host whose firewall had failed once
-# looked, with dnsmasq declining in its place. The query is a hand-built A for deb.debian.org.
+# Any reply is reachable, REFUSED included. The query is a hand-built A for deb.debian.org.
+# Judged on exit status only, since stray stderr mustn't hide a reply; head exits 1 on an ICMP error.
 dns_state() { # server
-    local out rc hdr
-    out=$(timeout 3 bash -c "exec 3<>/dev/udp/$1/53 &&
+    local err
+    err=$(timeout 3 bash -c "exec 3<>/dev/udp/$1/53 &&
         printf '\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03deb\x06debian\x03org\x00\x00\x01\x00\x01' >&3 &&
-        head -c 4 <&3 | od -An -tx1" 2>&1)
-    rc=$?
-    if ! [[ $out =~ ^[[:space:]]*([0-9a-f]{2}[[:space:]]*){4}$ ]]; then
-        # An ICMP error surfaces as a read error in head, which the pipeline's exit hides.
-        [ "$rc" = 0 ] && rc=1
-        state "$rc" "$out"
-        return
-    fi
-    read -ra hdr <<<"$out"
-    case $((0x${hdr[3]} & 15)) in
-        0) echo "reachable(NOERROR)" ;;
-        2) echo "reachable(SERVFAIL)" ;;
-        3) echo "reachable(NXDOMAIN)" ;;
-        5) echo "reachable(REFUSED)" ;;
-        *) echo "reachable(rcode $((0x${hdr[3]} & 15)))" ;;
-    esac
+        head -c 1 <&3 >/dev/null" 2>&1)
+    state $? "$err"
 }
 
 gw=$(ip route show default | awk '{print $3; exit}')
