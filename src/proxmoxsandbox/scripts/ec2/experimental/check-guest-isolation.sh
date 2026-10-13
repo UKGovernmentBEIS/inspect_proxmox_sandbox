@@ -76,15 +76,20 @@ tcp_state() {
     err=$(timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1)
     state $? "$err"
 }
-# Any reply is reachable, REFUSED included. The query is a hand-built A for deb.debian.org.
+# Any reply is reachable, a DNS REFUSED included. Silence only means blocked if the service
+# would have answered, so the payload has to be one it always replies to.
 # Judged on exit status only, since stray stderr mustn't hide a reply; head exits 1 on an ICMP error.
-dns_state() { # server
+udp_state() { # host port payload (printf escapes)
     local err
-    err=$(timeout 3 bash -c "exec 3<>/dev/udp/$1/53 &&
-        printf '\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03deb\x06debian\x03org\x00\x00\x01\x00\x01' >&3 &&
-        head -c 1 <&3 >/dev/null" 2>&1)
+    # shellcheck disable=SC2016  # expanded by the inner bash
+    err=$(timeout 3 bash -c 'exec 3<>"/dev/udp/$1/$2" && printf "$3" >&3 && head -c 1 <&3 >/dev/null' \
+        _ "$1" "$2" "$3" 2>&1)
     state $? "$err"
 }
+# An A query for deb.debian.org
+dns_query='\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03deb\x06debian\x03org\x00\x00\x01\x00\x01'
+# An SNTP client request: LI 0, version 3, mode 3, then 47 zero bytes
+ntp_query="\\x1b$(printf '\\x00%.0s' {1..47})"
 
 gw=$(ip route show default | awk '{print $3; exit}')
 addr=$(ip -4 addr show scope global | awk '/inet /{print $2; exit}')
@@ -107,12 +112,15 @@ fi
 
 echo
 echo "# the host itself"
+# LLMNR is probed over TCP only: systemd-resolved ignores unicast UDP queries, even for its own
+# name, so silence on 5355/udp would pass with a responder listening.
 for host in "${hosts[@]}"; do
-    for spec in 8006:pveproxy 22:ssh 85:pvedaemon 111:rpcbind 25:smtp 3128:spiceproxy 4318:otlp-collector 5900:vnc 5901:vnc 53:dns; do
+    for spec in 8006:pveproxy 22:ssh 85:pvedaemon 111:rpcbind 25:smtp 3128:spiceproxy 4318:otlp-collector 5900:vnc 5901:vnc 53:dns 5355:llmnr; do
         port=${spec%%:*}
         want blocked "host $host:$port (${spec#*:})" "$(tcp_state "$host" "$port")"
     done
-    want blocked "host $host:53/udp (dns)" "$(dns_state "$host")"
+    want blocked "host $host:53/udp (dns)" "$(udp_state "$host" 53 "$dns_query")"
+    want blocked "host $host:123/udp (ntp)" "$(udp_state "$host" 123 "$ntp_query")"
 done
 
 echo
@@ -126,8 +134,11 @@ for resolver_addr in 169.254.169.253 fd00:ec2::253; do
     label="VPC resolver $resolver_addr"
     [[ $resolver_addr == *:* ]] && label="VPC resolver [$resolver_addr]"
     want blocked "$label:53" "$(tcp_state "$resolver_addr" 53)"
-    want blocked "$label:53/udp" "$(dns_state "$resolver_addr")"
+    want blocked "$label:53/udp" "$(udp_state "$resolver_addr" 53 "$dns_query")"
 done
+# Time Sync addresses: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configure-ec2-ntp.html
+want blocked "Time Sync 169.254.169.123:123/udp" "$(udp_state 169.254.169.123 123 "$ntp_query")"
+want blocked "Time Sync [fd00:ec2::123]:123/udp" "$(udp_state fd00:ec2::123 123 "$ntp_query")"
 want blocked "link-local router 169.254.1.1:80" "$(tcp_state 169.254.1.1 80)"
 
 echo
@@ -148,6 +159,8 @@ for ip in 1.1.1.1 8.8.8.8; do
         want blocked "TCP $ip:$port" "$(tcp_state "$ip" "$port")"
     done
 done
+# time.cloudflare.com
+want blocked "NTP 162.159.200.1:123/udp" "$(udp_state 162.159.200.1 123 "$ntp_query")"
 for name in deb.debian.org download.proxmox.com pypi.org; do
     want blocked "package registry $name:443" "$(tcp_state "$name" 443)"
 done
