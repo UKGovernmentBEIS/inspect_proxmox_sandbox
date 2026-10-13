@@ -275,6 +275,10 @@ runcmd:
 
     # for test code only
     async def clear_builtins(self) -> None:
+        existing_vms = await self.known_builtins()
+        for built_in, vm_id in existing_vms.items():
+            await self.qemu_commands.destroy_vm(vm_id=vm_id, name=f"inspect-{built_in}")
+
         existing_content = await self.read_all_content()
 
         storage_names_to_delete = [
@@ -294,10 +298,6 @@ runcmd:
                         )
                         if upid is not None:
                             deletion_upids.append(upid)
-
-        existing_vms = await self.known_builtins()
-        for built_in, vm_id in existing_vms.items():
-            await self.qemu_commands.destroy_vm(vm_id=vm_id, name=f"inspect-{built_in}")
 
         for upid in deletion_upids:
             await self.async_proxmox.wait_for_task(upid=upid)
