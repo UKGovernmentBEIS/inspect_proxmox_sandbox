@@ -629,8 +629,8 @@ systemctl enable inspect-proxmox-egress-lockdown.timer
 
 # pvestatd -> localhost CloudWatch agent -> CloudWatch OTLP, SigV4-signed with the instance
 # role (403s harmlessly without cloudwatch:PutMetricData). The build only stages files; the
-# agent is configured at each instance's first boot and started by systemd after that, so
-# the endpoint is never tested here.
+# agent is configured and started on each instance's first boot, so the endpoint is never
+# tested here.
 # cumulativetodelta is required: PVE emits cumulative sums without StartTimeUnixNano.
 # The instance Name comes from IMDS via OTEL_RESOURCE_ATTRIBUTES and resourcedetection's env
 # detector (the launcher must enable InstanceMetadataTags). Do NOT use the ec2 detector's
@@ -686,11 +686,12 @@ echo '{"agent":{}}' > /opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
 # the endpoint, which isn't running at build time. Persists in pmxcfs (baked in).
 printf 'opentelemetry: cloudwatch-otel\n\tserver 127.0.0.1\n\tport 4318\n\totel-protocol http\n\totel-path /v1/metrics\n\totel-compression gzip\n' >> /etc/pve/status.cfg
 
-# ${env:AWS_REGION} and Name are per-launch, so this runs once per instance from bootcmd
-# (drop-in below). It only writes config: the enabled agent service starts later in boot
-# and reads it. Starting a service from inside cloud-init-network would deadlock, since
-# that unit orders before sysinit.target.
-cat > /usr/local/bin/cloudwatch-otel-apply.sh << 'OTELAPPLY'
+# ${env:AWS_REGION} and Name are per-launch, so cloud-init runs this once per instance
+# (scripts-per-instance, in its final stage). -s enables and starts the agent, which then
+# starts itself on later boots. The build instance's own per-instance stage ran before
+# this file existed, so the build instance never emits metrics.
+mkdir -p /var/lib/cloud/scripts/per-instance
+cat > /var/lib/cloud/scripts/per-instance/cloudwatch-otel-apply << 'OTELAPPLY'
 #!/bin/bash
 set -euo pipefail
 REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
@@ -703,9 +704,9 @@ fi
 export AWS_REGION="${REGION}"
 ctl=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
 "$ctl" -a fetch-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
-"$ctl" -a append-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/otel-metrics.yaml
+"$ctl" -a append-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/otel-metrics.yaml -s
 OTELAPPLY
-chmod +x /usr/local/bin/cloudwatch-otel-apply.sh
+chmod +x /var/lib/cloud/scripts/per-instance/cloudwatch-otel-apply
 
 # The agent service reads AWS_REGION (written above) so otelcol resolves ${env:AWS_REGION}.
 mkdir -p /etc/systemd/system/amazon-cloudwatch-agent.service.d
@@ -714,11 +715,10 @@ cat > /etc/systemd/system/amazon-cloudwatch-agent.service.d/otel-region.conf << 
 EnvironmentFile=/etc/default/amazon-cloudwatch-agent-otel
 OTELDROPIN
 systemctl daemon-reload
-systemctl enable amazon-cloudwatch-agent.service
 
 # Sorts after everything the base image ships in cloud.cfg.d. A launcher's cloud-config
-# still outranks it, so keys set there (hostname and manage_etc_hosts: the AISI platform
-# sets both) are neutralised rather than overridden: preserve_hostname makes
+# still outranks it, so keys set there (hostname and manage_etc_hosts: our launcher sets
+# both) are neutralised rather than overridden: preserve_hostname makes
 # set_hostname/update_hostname no-ops, and update_etc_hosts is dropped from the module
 # list because it runs after bootcmd in the same stage and rewrites /etc/hosts wholesale,
 # removing the node entry. The list comes from the installed cloud-init, not hardcoded.
@@ -733,7 +733,6 @@ cloud_init_modules: $INIT_MODULES
 bootcmd:
   - cloud-init-per instance inspect-proxmox-hosts /usr/local/bin/proxmox-ami-fixup-hosts.sh
   - cloud-init-per instance inspect-proxmox-password /usr/local/bin/proxmox-ami-fixup-password.sh
-  - cloud-init-per instance cloudwatch-otel-apply /usr/local/bin/cloudwatch-otel-apply.sh
 CLOUD_CFG
 cat /etc/cloud/cloud.cfg.d/99-inspect-proxmox.cfg
 

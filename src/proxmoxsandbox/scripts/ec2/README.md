@@ -93,9 +93,10 @@ aws ec2 run-instances --region "$REGION" \
 
 Boots in ~1 min, with SSM coming online ~1 min after that. On the first boot of
 each instance, cloud-init (from the AMI's `/etc/cloud/cloud.cfg.d/99-inspect-proxmox.cfg`)
-writes the node's `/etc/hosts` entry for the new private IP, generates a fresh root
-password and the CloudWatch agent config, all before Proxmox starts; a boot-time unit
-regenerates the SSL certificates. The hostname stays `proxmox` (cloud-init is told to preserve it).
+writes the node's `/etc/hosts` entry for the new private IP and generates a fresh root
+password before Proxmox starts, and configures the CloudWatch agent at the end of boot;
+a boot-time unit regenerates the SSL certificates. The hostname stays `proxmox`
+(cloud-init is told to preserve it).
 Read the password via SSM (the Proxmox web UI login is `root` against the
 `Linux PAM` realm with this password):
 
@@ -217,10 +218,11 @@ reaches one is off the host. Nothing in the AMI knows those addresses; pass them
 - IPAM patch so static-DHCP-by-MAC works
   (see <https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/>).
 - `/run/dnsmasq/resolv.conf` shim for SDN dnsmasq DNS forwarding.
-- Per-instance `/etc/hosts` entry, root password and CloudWatch agent config via cloud-init
-  `bootcmd` (`/etc/cloud/cloud.cfg.d/99-inspect-proxmox.cfg`), with `preserve_hostname` so a
-  launch from the AMI keeps the `proxmox` node name. Fixup services for the SSL certs, NAT
-  and host firewall rules run on every boot.
+- Per-instance `/etc/hosts` entry and root password via cloud-init `bootcmd`
+  (`/etc/cloud/cloud.cfg.d/99-inspect-proxmox.cfg`), with `preserve_hostname` so a launch
+  from the AMI keeps the `proxmox` node name; per-instance CloudWatch agent config via
+  cloud-init `scripts-per-instance`. Fixup services for the SSL certs, NAT and host
+  firewall rules run on every boot.
 - A boot-time firewall rule blocking sandbox forwarding to EC2 instance metadata.
 - CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
 - A `.aisi<N>` contract stamp on the version `pveversion` prints and the API serves, so a
