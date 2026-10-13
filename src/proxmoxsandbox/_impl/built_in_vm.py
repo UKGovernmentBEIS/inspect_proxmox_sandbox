@@ -283,6 +283,7 @@ runcmd:
             KALI_DISK_RENAMED,
         ]
 
+        deletion_upids: list[str] = []
         for content in existing_content:
             if content["volid"]:
                 for storage_name in storage_names_to_delete:
@@ -292,11 +293,14 @@ runcmd:
                             f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
                         )
                         if upid is not None:
-                            await self.async_proxmox.wait_for_task(upid=upid)
+                            deletion_upids.append(upid)
 
         existing_vms = await self.known_builtins()
         for built_in, vm_id in existing_vms.items():
             await self.qemu_commands.destroy_vm(vm_id=vm_id, name=f"inspect-{built_in}")
+
+        for upid in deletion_upids:
+            await self.async_proxmox.wait_for_task(upid=upid)
 
     async def known_builtins(self) -> Dict[str, int]:
         existing_vms = await self.qemu_commands.list_vms()
