@@ -455,12 +455,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     pool_id=pool_id,
                     os_type=vm_config.os_type,
                 )
-                sandboxes[vm_config.name] = vm_sandbox_environment
                 # The first sandbox VM is also Inspect's "default". Config
                 # validation guarantees there is one and that no later VM took
                 # the name.
-                if vm_config.is_sandbox and "default" not in sandboxes:
-                    sandboxes["default"] = vm_sandbox_environment
+                if vm_config.is_sandbox:
+                    sandboxes[vm_config.name] = vm_sandbox_environment
+                    if "default" not in sandboxes:
+                        sandboxes["default"] = vm_sandbox_environment
 
             # borrowed from k8s provider
             def reorder_default_first(

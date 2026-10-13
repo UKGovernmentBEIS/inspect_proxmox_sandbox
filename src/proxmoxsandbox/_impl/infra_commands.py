@@ -121,7 +121,7 @@ class InfraCommands(abc.ABC):
         """Build the full object graph bottom-up."""
         task_wrapper = TaskWrapper(async_proxmox)
         storage_commands = LocalStorageCommands(async_proxmox, node, task_wrapper)
-        sdn_commands = SdnCommands(async_proxmox, task_wrapper)
+        sdn_commands = SdnCommands(async_proxmox)
         qemu_commands = QemuCommands(
             async_proxmox, node, image_storage, task_wrapper, storage_commands
         )
