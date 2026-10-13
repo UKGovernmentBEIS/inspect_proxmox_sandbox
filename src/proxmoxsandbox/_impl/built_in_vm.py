@@ -20,7 +20,6 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import (
     DhcpRange,
     SdnConfig,
@@ -72,7 +71,6 @@ class BuiltInVM(abc.ABC):
     async_proxmox: AsyncProxmoxAPI
     qemu_commands: QemuCommands
     sdn_commands: SdnCommands
-    task_wrapper: TaskWrapper
     storage_commands: LocalStorageCommands
     node: str
 
@@ -81,13 +79,11 @@ class BuiltInVM(abc.ABC):
         async_proxmox: AsyncProxmoxAPI,
         node: str,
         image_storage: str,
-        task_wrapper: TaskWrapper,
         qemu_commands: QemuCommands,
         sdn_commands: SdnCommands,
         storage_commands: LocalStorageCommands,
     ):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = task_wrapper
         self.qemu_commands = qemu_commands
         self.sdn_commands = sdn_commands
         self.storage_commands = storage_commands
@@ -279,31 +275,28 @@ runcmd:
 
     # for test code only
     async def clear_builtins(self) -> None:
-        async def inner_clear_builtins() -> None:
-            existing_content = await self.read_all_content()
+        existing_content = await self.read_all_content()
 
-            storage_names_to_delete = [
-                Path(urlparse(UBUNTU_URL).path).name,
-                Path(urlparse(DEBIAN_13_URL).path).name,
-                KALI_DISK_RENAMED,
-            ]
+        storage_names_to_delete = [
+            Path(urlparse(UBUNTU_URL).path).name,
+            Path(urlparse(DEBIAN_13_URL).path).name,
+            KALI_DISK_RENAMED,
+        ]
 
-            for content in existing_content:
-                if content["volid"]:
-                    for storage_name in storage_names_to_delete:
-                        if content["volid"].endswith(storage_name):
-                            await self.async_proxmox.request(
-                                "DELETE",
-                                f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
-                            )
+        for content in existing_content:
+            if content["volid"]:
+                for storage_name in storage_names_to_delete:
+                    if content["volid"].endswith(storage_name):
+                        upid = await self.async_proxmox.request(
+                            "DELETE",
+                            f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
+                        )
+                        if upid is not None:
+                            await self.async_proxmox.wait_for_task(upid=upid)
 
-            existing_vms = await self.known_builtins()
-            for built_in, vm_id in existing_vms.items():
-                await self.qemu_commands.destroy_vm(
-                    vm_id=vm_id, name=f"inspect-{built_in}"
-                )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(inner_clear_builtins)
+        existing_vms = await self.known_builtins()
+        for built_in, vm_id in existing_vms.items():
+            await self.qemu_commands.destroy_vm(vm_id=vm_id, name=f"inspect-{built_in}")
 
     async def known_builtins(self) -> Dict[str, int]:
         existing_vms = await self.qemu_commands.list_vms()
@@ -551,14 +544,12 @@ runcmd:
 
             if disk_gib is not None:
                 # cloud-init's growpart/resizefs pick this up on first boot
-                async def resize_disk() -> None:
-                    await self.async_proxmox.request(
-                        "PUT",
-                        f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
-                        json={"disk": "scsi0", "size": f"{disk_gib}G"},
-                    )
-
-                await self.task_wrapper.do_action_and_wait_for_tasks(resize_disk)
+                upid = await self.async_proxmox.request(
+                    "PUT",
+                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
+                    json={"disk": "scsi0", "size": f"{disk_gib}G"},
+                )
+                await self.async_proxmox.wait_for_task(upid=upid)
 
             await self.create_and_upload_cloudinit_iso(
                 vm_id=next_available_vm_id,
