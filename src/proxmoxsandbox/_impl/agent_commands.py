@@ -1,7 +1,10 @@
 import asyncio
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from logging import getLogger
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
 import httpx
 from inspect_ai.util import (
@@ -29,13 +32,11 @@ from proxmoxsandbox._impl.qga_responses import (
 #     by another process", etc.) and Proxmox's non-standard 596/597
 #     "Broken pipe" returned when streaming large file-reads back.
 #
-# Every QGA call is retried on these - including exec-start: a retry can only
-# double-launch the command if the agent received it but the pid response was
-# lost (a narrow window, since exec-start returns immediately), and the wrapper
-# script's flock guard makes a double launch run the command once anyway. The
-# exec-status read is single-shot (the agent discards a finished process's
-# output once read), so get_agent_exec_status falls back to the on-disk results
-# if a retry finds the PID gone.
+# Linux retains exec_command launch retries; its flock guard only excludes
+# overlapping launches. Windows uses exec_command_once. The exec-status
+# read is single-shot (the agent discards a finished process's output once
+# read), so get_agent_exec_status falls back to the on-disk results if a retry
+# finds the PID gone.
 # Exception: a 500 for a missing file, an unreadable file (e.g. "Is a
 # directory"), or a gone PID is surfaced immediately (it will not change on
 # retry); callers turn those into empty content / a disk fallback / an error.
@@ -44,6 +45,23 @@ _QGA_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt, capped below
 _QGA_RETRY_MAX_DELAY = 20.0  # seconds
 # Limit requests and retry sleeps together, including a request that never returns.
 _QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
+
+
+class GuestAgentCommunicationTimeoutError(TimeoutError):
+    """Guest communication expired without establishing the command's result."""
+
+
+class GuestExecIncompleteError(RuntimeError):
+    """An attempted guest command has not been confirmed terminal."""
+
+    def __init__(self, vm_id: int, pid: int | None, script_path: str):
+        self.vm_id = vm_id
+        self.pid = pid
+        self.script_path = script_path
+        super().__init__(
+            f"Guest command completion is unknown on VM {vm_id}, pid {pid}, "
+            f"script {script_path}; inspect this execution before retrying"
+        )
 
 
 def _is_pid_gone(exc: httpx.HTTPStatusError) -> bool:
@@ -80,6 +98,49 @@ def is_transient_qga_error(exc: Exception) -> bool:
     return False
 
 
+class HealthcheckTransportExhaustedError(RuntimeError):
+    """A healthcheck exhausted its shared guest-agent retry budget."""
+
+    def __init__(self, failures: int):
+        self.failures = failures
+        super().__init__(
+            f"Guest-agent transport budget exhausted after {failures} failed requests"
+        )
+
+
+@dataclass
+class _HealthcheckTransportBudget:
+    interval: float
+    failures: int = 0
+
+    def record_failure(self) -> None:
+        self.failures += 1
+        if self.failures >= _QGA_MAX_RETRIES:
+            raise HealthcheckTransportExhaustedError(self.failures)
+
+
+_healthcheck_budget: ContextVar[_HealthcheckTransportBudget | None] = ContextVar(
+    "healthcheck_transport_budget", default=None
+)
+
+
+@contextmanager
+def healthcheck_transport_budget(
+    interval: float,
+) -> Iterator[_HealthcheckTransportBudget]:
+    """Share one allowance across uploads and unreachable healthcheck probes."""
+    existing = _healthcheck_budget.get()
+    if existing is not None:
+        yield existing
+        return
+    budget = _HealthcheckTransportBudget(interval)
+    token = _healthcheck_budget.set(budget)
+    try:
+        yield budget
+    finally:
+        _healthcheck_budget.reset(token)
+
+
 class AgentCommands:
     logger = getLogger(__name__)
 
@@ -99,21 +160,48 @@ class AgentCommands:
         self.node = node
         self._qga_max_retries = qga_max_retries
 
-    async def _retry_on_qga_error(self, label: str, coro_fn):
+    @property
+    def exec_attempt_limit(self) -> int:
+        """Maximum requests per retrying command launch."""
+        return self._qga_max_retries
+
+    async def _retry_on_qga_error(
+        self,
+        label: str,
+        coro_fn,
+        *,
+        upload_budget: _HealthcheckTransportBudget | None = None,
+    ):
         """Retry a coroutine function on transient QGA / transport errors."""
-        max_retries = self._qga_max_retries
+        max_retries = (
+            _QGA_MAX_RETRIES if upload_budget is not None else self._qga_max_retries
+        )
 
         async def retry():
             for attempt in range(1, max_retries + 1):
+                if (
+                    upload_budget is not None
+                    and upload_budget.failures >= _QGA_MAX_RETRIES
+                ):
+                    raise HealthcheckTransportExhaustedError(upload_budget.failures)
                 try:
                     return await coro_fn()
                 except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                    if attempt == max_retries or not is_transient_qga_error(e):
+                    if not is_transient_qga_error(e):
                         raise
-                    delay = min(
-                        _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
-                        _QGA_RETRY_MAX_DELAY,
-                    )
+                    if upload_budget is not None:
+                        try:
+                            upload_budget.record_failure()
+                        except HealthcheckTransportExhaustedError as exhausted:
+                            raise exhausted from e
+                        delay = upload_budget.interval
+                    else:
+                        if attempt == max_retries:
+                            raise
+                        delay = min(
+                            _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
+                            _QGA_RETRY_MAX_DELAY,
+                        )
                     self.logger.warning(
                         "%s failed (attempt %s/%s), retrying in %.1fs: %s",
                         label,
@@ -180,10 +268,24 @@ class AgentCommands:
             return await self._retry_on_qga_error(
                 f"write_file vm={vm_id} {filepath}",
                 lambda: self.async_proxmox.request("POST", path, json=data),
+                # Upload recovery shares the runner's allowance. Other calls
+                # retain the configured attempt limit, including command launch.
+                upload_budget=_healthcheck_budget.get(),
             )
 
     async def exec_command(self, vm_id: int, command: List[str]) -> int:
-        """Execute a command in the VM using QEMU agent; returns its pid.
+        """Execute an idempotent command with transport retries; return its pid.
+
+        A lost response may cause multiple launches. The command must tolerate
+        this, including a retry arriving after an earlier launch has finished.
+        """
+        return await self._retry_on_qga_error(
+            f"exec_command vm={vm_id}",
+            lambda: self.exec_command_once(vm_id, command),
+        )
+
+    async def exec_command_once(self, vm_id: int, command: List[str]) -> int:
+        """Attempt one command launch using QEMU agent; return its pid.
 
         Every element of `command` MUST be ASCII. A single non-ASCII byte in
         the QMP guest-exec arguments breaks Proxmox's agent bridge: the call
@@ -193,15 +295,9 @@ class AgentCommands:
         with trace_action(
             self.logger, self.TRACE_NAME, f"exec_command {vm_id=} {command=}"
         ):
-            # Retried like everything else. A retry only double-launches if the
-            # agent received the request but the pid response was lost; the
-            # wrapper script's flock guard makes that run the command once.
             path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec"
             data: ProxmoxJsonDataType = {"command": command}
-            raw = await self._retry_on_qga_error(
-                f"exec_command vm={vm_id}",
-                lambda: self.async_proxmox.request("POST", path, json=data),
-            )
+            raw = await self.async_proxmox.request("POST", path, json=data)
             return parse_guest(ExecReturn, vm_id, "exec", raw).pid
 
     async def read_file_capped(

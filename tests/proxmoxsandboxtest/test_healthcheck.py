@@ -11,8 +11,8 @@ import httpx
 import pytest
 from inspect_ai.util import ExecResult, OutputLimitExceededError
 
+from proxmoxsandbox._impl.agent_commands import _QGA_MAX_RETRIES
 from proxmoxsandbox._impl.healthcheck import (
-    _TRANSPORT_ERROR_LIMIT,
     HealthCheckFailed,
     HealthCheckRunner,
 )
@@ -214,21 +214,21 @@ async def test_non_transient_agent_errors_count_as_failures(error):
 
 @pytest.mark.parametrize("error", [_transport_error(), _http_500()])
 async def test_transport_errors_are_bounded(error):
-    """A dead agent costs _TRANSPORT_ERROR_LIMIT probes and `interval` sleeps only."""
+    """A dead agent spends the shared request limit and interval sleeps."""
     clock = FakeClock()
     execute, calls = _scripted(error)
     spec = HealthCheck(test=("x",), interval=1, retries=1)
     with pytest.raises(HealthCheckFailed, match="guest agent"):
         await _runner(spec, execute, clock).run()
-    assert len(calls) == _TRANSPORT_ERROR_LIMIT
-    assert clock.sleeps == [1] * (_TRANSPORT_ERROR_LIMIT - 1)
+    assert len(calls) == _QGA_MAX_RETRIES
+    assert clock.sleeps == [1] * (_QGA_MAX_RETRIES - 1)
 
 
 async def test_success_resets_transport_error_count():
     clock = FakeClock()
-    outcomes = [_transport_error()] * (_TRANSPORT_ERROR_LIMIT - 1) + [
+    outcomes = [_transport_error()] * (_QGA_MAX_RETRIES - 1) + [
         _fail(),
-        *[_transport_error()] * (_TRANSPORT_ERROR_LIMIT - 1),
+        *[_transport_error()] * (_QGA_MAX_RETRIES - 1),
         _ok(),
     ]
     execute, calls = _scripted(*outcomes)

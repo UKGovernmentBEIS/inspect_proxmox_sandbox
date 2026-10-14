@@ -213,15 +213,17 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     Attempts run through the same command wrapper as sandbox().exec(). A failed
     attempt is a non-zero exit, a guest-side timeout, a `test` that is not
     executable, or output over the exec size limit; each consumes one of
-    `retries`. Attempts that cannot reach the guest agent at all do not count
-    toward `retries`, but 25 in a row fail the VM, so a guest whose agent dies
-    is reported after roughly 25 * (interval + a few seconds). Once passed, the
-    healthcheck is not re-run for the rest of the sample.
+    `retries`. Transient guest-agent failures do not count toward `retries`.
+    Upload recovery and unreachable probes share one 25-failure budget, with
+    `interval` between retries; a confirmed service result resets it. Expired
+    communication or unknown command completion aborts startup without another
+    probe. Once passed, the healthcheck is not re-run for the rest of the sample.
 
     Attributes:
         test: Command to run inside the guest.
         interval: Seconds between attempts.
-        timeout: Per-attempt limit in whole seconds, enforced inside the guest.
+        timeout: Per-attempt limit in whole seconds. Linux enforces it in the
+            guest; Windows limits the completion wait without killing the process.
         retries: Consecutive failures tolerated before the sample fails.
         start_period: Grace window in seconds after the first attempt during which
             failures do not count towards retries.
@@ -231,7 +233,7 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     interval: float = Field(default=5, gt=0)
     # int, unlike the other durations: it is handed to exec(), whose signature
     # Inspect's SandboxEnvironment fixes as `timeout: int | None`, and which
-    # enforces it in-guest as `timeout -k 5s {timeout}s`.
+    # enforces it in Linux guests as `timeout -k 5s {timeout}s`.
     timeout: int = Field(default=30, gt=0)
     retries: int = Field(default=60, gt=0)
     start_period: float = Field(default=0, ge=0)

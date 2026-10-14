@@ -5,6 +5,7 @@ from functools import partial
 import httpx
 import pytest
 
+from proxmoxsandbox._impl.agent_commands import GuestExecIncompleteError
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 
 from .guest_agent_fixture import GuestReplies, Scenario, make_sandbox
@@ -43,18 +44,27 @@ async def test_large_http_errors_keep_diagnostics_but_not_all_text(
     error_api, operation, reason, body
 ):
     sandbox = make_sandbox(error_api(reason, body))
-    with pytest.raises(httpx.HTTPStatusError) as raised:
+    expected_error = (
+        httpx.HTTPStatusError if operation == "read_file" else GuestExecIncompleteError
+    )
+    with pytest.raises(expected_error) as raised:
         if operation == "read_file":
             await sandbox.read_file("/sample")
         else:
             await sandbox.exec(["echo", "hello"])
 
-    message = str(raised.value)
+    failure = raised.value
+    if isinstance(failure, GuestExecIncompleteError):
+        assert failure.vm_id == 100
+        assert len(str(failure)) < 20_000
+        failure = failure.__cause__
+    assert isinstance(failure, httpx.HTTPStatusError)
+    message = str(failure)
     assert len(message) < 20_000
     assert reason[:20] in message
     if body:
         assert body[:20] in message
-    assert raised.value.response.status_code == 400
+    assert failure.response.status_code == 400
 
 
 async def test_long_reason_does_not_hide_a_missing_file_error_in_the_body(error_api):
