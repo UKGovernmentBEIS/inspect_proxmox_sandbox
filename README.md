@@ -497,7 +497,7 @@ headless too — its template display setting is overridden to `none`.
 > shows an empty serial terminal even though the guest agent is working — that is
 > expected, and not a reason to re-expose the device.
 
-The `os_type` field determines how commands are executed inside the VM. Windows types (any value starting with `w`) use batch scripts instead of shell scripts. The QEMU guest agent channel on Windows is less reliable than on Linux, so transient errors are automatically retried.
+The `os_type` field determines how commands are executed inside the VM. Windows types (any value starting with `w`) use batch scripts instead of shell scripts. Both use the upload, launch and result-collection policy described below.
 
 ## Observing the VMs
 
@@ -567,9 +567,25 @@ Two things worth knowing:
 
 ## Guest-agent replies and command waiting
 
-`exec()` shares a waiting allowance across uploads, retries and result collection: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup gets a separate two-minute allowance per step, and the guest command may keep running after the provider raises `TimeoutError`.
+`exec()` gives each command an execution ID on both Linux and Windows. A guest-side claim prevents repeated launch requests from running it again, including after it finishes. Uploads, launches and result reads can therefore recover from transient transport failures without starting a new command. The claim and terminal result remain until the VM is removed; per-command cleanup removes only scripts, input and output.
 
-Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
+Completion comes from the command's terminal result, not a retry's PID. If it cannot be confirmed, `GuestExecIncompleteError` ends the sample with the VM, PID if known and script path. If completion is confirmed but output cannot be retrieved, `GuestExecResultError` retains that identity and exit code. Neither error permits automatic replay. Recovery assumes the guest records remain intact; it does not cover snapshot rollback, deleted records or power-loss durability.
+
+Linux enforces command timeouts inside the guest. Windows currently only limits the completion wait, so expiry raises `GuestExecIncompleteError`: the guest command may still be running. Windows guest-side timeout enforcement is not implemented.
+
+Uploads, retries and result collection share a waiting allowance: the command timeout plus 188 seconds for grace and communication. Preparation and launch recovery are capped at 180 seconds within that allowance. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Sample resource cleanup gets a separate two-minute allowance per step.
+
+Each healthcheck execution has one budget of 25 failed transport requests across upload, launch, status and result reads, with retries spaced by its `interval`. Exhaustion fails startup instead of starting another transport budget. Confirmed unhealthy results still use the healthcheck's service retry policy.
+
+### Execution permissions and trust
+
+QGA must run as root on Linux or LocalSystem on Windows. Before uploading any execution data, the provider creates and verifies a private directory: service-owned `0700` on Linux, or a protected SYSTEM-only inheritable DACL on Windows. Existing objects with unexpected permissions, owners or links are rejected, not repaired. Windows preparation uses the built-in Windows PowerShell and .NET Framework. The OS temporary directory and its ancestors must retain their normal protected ownership and deletion permissions.
+
+Scripts, input, output and recovery records stay inside that directory. Large execution inputs use private QGA chunks, not the general `write_file` or ISO transfer paths. A Linux command with `user=` receives its intended input through an already-open descriptor; it does not gain access to the directory. No privileges or capabilities are granted. These controls do not hide secrets the caller explicitly puts in a payload's process arguments, or restrict files the payload itself creates.
+
+Root, SYSTEM and accounts with equivalent privileges can still alter every guest record and response. Execution IDs prevent accidental replay; they do not authenticate a hostile guest's output or prove that its command stopped. Guest output stays data: the provider does not evaluate it as host code, open it as a host path or use it to choose a network destination. Callers must not treat guest output as trusted instructions or expose privileged host tools on that basis.
+
+Guest HTTP responses are size-limited before JSON parsing, then checked for the expected types, bounded process IDs, return codes and file content. HTTP diagnostics escape terminal control characters; returned command output remains unchanged text. Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent a guest from denying service.
 
 ## Feature Roadmap
 

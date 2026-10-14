@@ -19,8 +19,10 @@ from rich import box, print
 from rich.prompt import Confirm
 from rich.table import Table
 
+from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
+from proxmoxsandbox._impl.guest_exec import GuestExecutor
 from proxmoxsandbox._impl.healthcheck import HealthCheckExecutor, HealthCheckRunner
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, vm_label
 from proxmoxsandbox._impl.sdn_commands import (
@@ -247,35 +249,13 @@ class InfraCommands(abc.ABC):
     def _healthcheck_executor(
         self, vm_id: int, vm_config: VmConfig
     ) -> HealthCheckExecutor:
-        """Run healthcheck commands through the sandbox's exec wrapper.
-
-        This reuses the Linux/Windows command scripts (guest-side timeout,
-        result files) rather than raw agent/exec, so a healthcheck behaves
-        exactly like sandbox().exec() would for the same command. QGA retry is
-        HealthCheckRunner's job, hence qga_max_retries=1.
-        """
-        # Imported here: the environment module imports this one.
-        # https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/issues/132
-        from proxmoxsandbox._impl.agent_commands import AgentCommands
-        from proxmoxsandbox._proxmox_sandbox_environment import (
-            ProxmoxSandboxEnvironment,
-        )
-
-        sandbox = ProxmoxSandboxEnvironment(
-            infra_commands=self,
-            agent_commands=AgentCommands(
-                self.async_proxmox, self.node, qga_max_retries=1
-            ),
-            ipam_mappings=(),
-            vm_id=vm_id,
-            name=vm_config.name,
-            all_vms={vm_id: vm_config},
-            sdn_zone_id=None,
-            os_type=vm_config.os_type,
+        """Use the same recoverable command contract as ordinary sandbox execution."""
+        executor = GuestExecutor(
+            AgentCommands(self.async_proxmox, self.node), vm_id, vm_config.os_type
         )
 
         async def execute(spec: HealthCheck):
-            return await sandbox.exec(list(spec.test), timeout=spec.timeout)
+            return await executor.exec(list(spec.test), timeout=spec.timeout)
 
         return execute
 
