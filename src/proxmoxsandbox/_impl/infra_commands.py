@@ -460,3 +460,6 @@ class InfraCommands(abc.ABC):
         await self.sdn_commands.tear_down_sdn_zones_and_vnets(
             zones_to_delete, noticed_ipam_mappings
         )
+        self.qemu_commands.deregister_vms([vm["vmid"] for vm in noticed_vms])
+        for zone in zones_to_delete:
+            self.sdn_commands.deregister_sdn_resources(zone, noticed_ipam_mappings)

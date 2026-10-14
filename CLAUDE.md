@@ -35,7 +35,11 @@ task_cleanup:    Sweep orphaned resources across all instances
 
 Queues provide automatic blocking when instances are exhausted. Only instances
 that were successfully cleaned up are returned to the pool — dirty instances
-are withheld to prevent cascading failures.
+are withheld to prevent cascading failures. The exception is a failed
+`sample_init`: it tears nothing down (only `task_cleanup` knows whether the
+user asked for cleanup, and `--no-sandbox-cleanup` should hold a half-built
+range up), releases the instance, and relies on the next `sample_init`'s
+pre-clean to sweep the leftovers.
 
 ### Inspect AI Lifecycle Integration
 Inspect calls these methods in order:
