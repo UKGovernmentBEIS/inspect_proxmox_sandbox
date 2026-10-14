@@ -783,7 +783,8 @@ if systemctl is-failed --quiet inspect-proxmox-egress-lockdown.service; then
     echo "egress lockdown failed; not marking the host ready" >&2
     exit 1
 fi
-timeout 300 bash -c 'until curl -ksf https://127.0.0.1:8006/api2/json/version >/dev/null; do sleep 2; done'
+# access/domains answers without a ticket; /version does not (401).
+timeout 300 bash -c 'until curl -ksf https://127.0.0.1:8006/api2/json/access/domains >/dev/null; do sleep 2; done'
 [ -s /root/root-password ]
 mkdir -p /run/inspect-proxmox
 touch /run/inspect-proxmox/ready
