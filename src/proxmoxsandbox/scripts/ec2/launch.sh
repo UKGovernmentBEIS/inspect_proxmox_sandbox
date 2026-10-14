@@ -90,14 +90,13 @@ echo "  Launched: $INSTANCE_ID"
 
 # --- Wait for the host to report ready ---
 # The SSM agent appears partway through stage 1 and drops out across the two
-# reboots, so a failed send-command is just "not yet". The host writes
-# /run/inspect-proxmox/ready once a boot has the fixups done and the API up;
-# see README.md.
+# reboots, so a failed send-command is just "not yet". inspect-proxmox-ready
+# is active once a boot has the fixups done and the API up; see README.md.
 READY_SCRIPT='
 for unit in proxmox-install-stage2 inspect-proxmox-egress-lockdown inspect-proxmox-ready; do
     if systemctl is-failed --quiet $unit.service; then echo "FAILED $unit"; exit 0; fi
 done
-if [ -e /run/inspect-proxmox/ready ]; then echo "READY $(cat /root/root-password)"; exit 0; fi
+if systemctl is-active --quiet inspect-proxmox-ready.service; then echo "READY $(cat /root/root-password)"; exit 0; fi
 echo "WAITING $(tail -n1 /root/install-proxmox.log 2>/dev/null)"
 '
 echo "Waiting for the host to report ready (checking every 30s; the install takes ~15 min)..."

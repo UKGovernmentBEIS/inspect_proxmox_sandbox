@@ -772,33 +772,20 @@ OTELAPPLYUNIT
 systemctl daemon-reload
 systemctl enable cloudwatch-otel-apply.service
 
-# Per-boot ready marker: written once the fixups have run and the API answers, so
-# a caller polling over SSM never reads a password the fixup is about to replace
-# or hits an API that is about to restart. /run is tmpfs, so it never outlives
-# the boot that wrote it. Contract aisi4.
-cat > /usr/local/bin/inspect-proxmox-ready.sh << 'READY'
-#!/bin/bash
-set -euo pipefail
-if systemctl is-failed --quiet inspect-proxmox-egress-lockdown.service; then
-    echo "egress lockdown failed; not marking the host ready" >&2
-    exit 1
-fi
-# access/domains answers without a ticket; /version does not (401).
-timeout 300 bash -c 'until curl -ksf https://127.0.0.1:8006/api2/json/access/domains >/dev/null; do sleep 2; done'
-[ -s /root/root-password ]
-mkdir -p /run/inspect-proxmox
-touch /run/inspect-proxmox/ready
-READY
-chmod +x /usr/local/bin/inspect-proxmox-ready.sh
+# Per-boot readiness, as a unit: active once the fixups have run and pveproxy is
+# up (it binds before forking, so After= means listening). Requires= keeps it
+# from starting if a fixup failed, and takes it down when the egress lockdown's
+# halt stops pveproxy. Poll with `systemctl is-active`. Contract aisi4.
 cat > /etc/systemd/system/inspect-proxmox-ready.service << 'READY_UNIT'
 [Unit]
-Description=Mark the host ready once the per-boot fixups are done and the API answers
+Description=Host ready: per-boot fixups done and the API up
+Requires=pveproxy.service proxmox-ami-fixup-password.service proxmox-ami-fixup-certs.service proxmox-ami-fixup-firewall.service
 After=pveproxy.service proxmox-ami-fixup-password.service proxmox-ami-fixup-certs.service proxmox-ami-fixup-firewall.service inspect-proxmox-egress-lockdown.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/inspect-proxmox-ready.sh
 RemainAfterExit=yes
+ExecStart=/bin/true
 
 [Install]
 WantedBy=multi-user.target

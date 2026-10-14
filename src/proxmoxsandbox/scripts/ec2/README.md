@@ -94,12 +94,13 @@ aws ec2 run-instances --region "$REGION" \
 Boots in ~1 min, with SSM coming online ~1 min after that. Boot-time fixup
 services in the AMI regenerate the hostname and SSL certificates for the new
 private IP, and regenerate the root password on every fresh launch (detected
-by EC2 instance-id change). Once those have run and the API answers, the host
-writes `/run/inspect-proxmox/ready` (hosts from contract `aisi4` on). `/run` is
-tmpfs, so the marker is per boot: when it exists, the password in
-`/root/root-password` is this boot's and the API is up. Poll for it rather than
-reading the password straight away (the Proxmox web UI login is `root` against
-the `Linux PAM` realm with this password):
+by EC2 instance-id change). Once those have run and `pveproxy` is up,
+`inspect-proxmox-ready.service` becomes active (hosts from contract `aisi4`
+on). It is a `RemainAfterExit` oneshot, so it is active only in a boot where
+that has happened: when it is, the password in `/root/root-password` is this
+boot's and the API answers. Poll for it rather than reading the password
+straight away (the Proxmox web UI login is `root` against the `Linux PAM`
+realm with this password):
 
 ```bash
 INSTANCE_ID=i-xxx
@@ -107,7 +108,7 @@ INSTANCE_ID=i-xxx
 CMD_ID=$(aws ssm send-command --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
     --document-name AWS-RunShellScript \
-    --parameters 'commands=["[ -e /run/inspect-proxmox/ready ] && cat /root/root-password"]' \
+    --parameters 'commands=["systemctl is-active --quiet inspect-proxmox-ready.service && cat /root/root-password"]' \
     --query 'Command.CommandId' --output text)
 aws ssm wait command-executed --region "$REGION" \
     --command-id "$CMD_ID" --instance-id "$INSTANCE_ID"
@@ -117,8 +118,8 @@ aws ssm get-command-invocation --region "$REGION" \
 ```
 
 Empty output means not ready yet; retry. On a host with the egress lockdown
-armed, the marker also waits for the lockdown's verdict, and is never written
-if the lockdown failed (the API is halted in that case anyway).
+armed, the unit also waits for the lockdown's verdict, and a failed lockdown
+stops `pveproxy`, which takes the unit down with it.
 
 To open the Proxmox web UI, use `experimental/connect.sh` to forward port 8006
 over SSM (no inbound SG rules required); see `experimental/README.md`.
@@ -226,8 +227,8 @@ reaches one is off the host. Nothing in the AMI knows those addresses; pass them
 - AMI fixup services for hostname + SSL cert + root password regeneration on every boot.
 - A boot-time firewall rule blocking sandbox forwarding to EC2 instance metadata.
 - CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
-- A per-boot ready marker, `/run/inspect-proxmox/ready` — see "Everyday: launch from
-  the AMI" above.
+- A per-boot readiness unit, `inspect-proxmox-ready.service` — see "Everyday: launch
+  from the AMI" above.
 - A `.aisi<N>` contract stamp on the version `pveversion` prints and the API serves, so a
   caller can tell what a host provides before asserting it. Bumped when a host-side file
   something off-host asserts changes. A `pve-manager` upgrade replaces the stamped file, so an
