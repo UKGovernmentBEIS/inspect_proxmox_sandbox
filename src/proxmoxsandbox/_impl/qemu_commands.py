@@ -255,13 +255,11 @@ class QemuCommands(abc.ABC):
         self,
         vm_id: int,
     ) -> None:
-        async def do_start() -> None:
-            await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{vm_id}/status/start",
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(do_start)
+        upid = await self.async_proxmox.request(
+            "POST",
+            f"/nodes/{self.node}/qemu/{vm_id}/status/start",
+        )
+        await self.async_proxmox.wait_for_task(upid=upid)
 
     def _convert_sdn_vnet_aliases(
         self, sdn_vnet_aliases: VnetAliases
@@ -458,13 +456,11 @@ class QemuCommands(abc.ABC):
                     self.TRACE_NAME,
                     f"create VM from OVA {new_vm_template_id=}",
                 ):
+                    upid = await self.async_proxmox.request(
+                        "POST", f"/nodes/{self.node}/qemu", json=json_for_create
+                    )
 
-                    async def create() -> None:
-                        await self.async_proxmox.request(
-                            "POST", f"/nodes/{self.node}/qemu", json=json_for_create
-                        )
-
-                    await self.task_wrapper.do_action_and_wait_for_tasks(create)
+                    await self.async_proxmox.wait_for_task(upid=upid)
 
                 await self.configure_network_and_tags(
                     vm_config=vm_config,
@@ -473,15 +469,11 @@ class QemuCommands(abc.ABC):
                     extra_tags=[ova_tag],
                 )
 
-                async def convert_to_template() -> None:
-                    await self.async_proxmox.request(
-                        "POST",
-                        f"/nodes/{self.node}/qemu/{new_vm_template_id}/template",
-                    )
-
-                await self.task_wrapper.do_action_and_wait_for_tasks(
-                    convert_to_template
+                upid = await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{new_vm_template_id}/template",
                 )
+                await self.async_proxmox.wait_for_task(upid=upid)
 
                 await self.remove_existing_nics(new_vm_template_id)
                 self.logger.info(f"New template created: vmid={new_vm_template_id}")
@@ -608,15 +600,14 @@ class QemuCommands(abc.ABC):
                     json=network_update_json,
                 )
 
-        async def update_tags() -> None:
-            await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{vm_id}/config",
-                json={"tags": ",".join(set(extra_tags + ["inspect"]))},
-            )
-
         await self.task_wrapper.do_action_and_wait_for_tasks(update_network)
-        await self.task_wrapper.do_action_and_wait_for_tasks(update_tags)
+
+        upid = await self.async_proxmox.request(
+            "POST",
+            f"/nodes/{self.node}/qemu/{vm_id}/config",
+            json={"tags": ",".join(set(extra_tags + ["inspect"]))},
+        )
+        await self.async_proxmox.wait_for_task(upid=upid)
 
     async def clone_vm_and_start(
         self,
@@ -628,17 +619,16 @@ class QemuCommands(abc.ABC):
         """Clone, configure and start a VM; it is tracked for cleanup once cloned."""
         new_vm_id = await self.find_next_available_vm_id()
 
-        async def create_clone() -> None:
-            await self.async_proxmox.request(
+        with trace_action(
+            self.logger, self.TRACE_NAME, f"clone VM {vm_id_to_clone} -> {new_vm_id}"
+        ):
+            upid = await self.async_proxmox.request(
                 "POST",
                 f"/nodes/{self.node}/qemu/{vm_id_to_clone}/clone",
                 json={"newid": new_vm_id, "full": 0, "name": vm_config.name},
             )
+            await self.async_proxmox.wait_for_task(upid=upid)
 
-        with trace_action(
-            self.logger, self.TRACE_NAME, f"clone VM {vm_id_to_clone} -> {new_vm_id}"
-        ):
-            await self.task_wrapper.do_action_and_wait_for_tasks(create_clone)
         # Registered before configure/start so a failure there still gets it
         # destroyed by task_cleanup.
         self.register_vm(vm_id=new_vm_id, vm_config=vm_config)
@@ -653,17 +643,15 @@ class QemuCommands(abc.ABC):
             vm_config, sdn_vnet_aliases, new_vm_id, extra_tags=extra_tags
         )
 
-        async def other_updates() -> None:
-            other_update_json: ProxmoxJsonDataType = {}
-            self.other_config_json(vm_config, other_update_json)
+        other_update_json: ProxmoxJsonDataType = {}
+        self.other_config_json(vm_config, other_update_json)
 
-            await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{new_vm_id}/config",
-                json=other_update_json,
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(other_updates)
+        upid = await self.async_proxmox.request(
+            "POST",
+            f"/nodes/{self.node}/qemu/{new_vm_id}/config",
+            json=other_update_json,
+        )
+        await self.async_proxmox.wait_for_task(upid=upid)
 
         await self.start(vm_id=new_vm_id)
         return new_vm_id

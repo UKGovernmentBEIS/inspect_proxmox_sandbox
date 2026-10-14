@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -114,6 +115,43 @@ async def test_upload_no_size_check(
         test_iso_reuploaded = await find_uploaded_iso(storage_commands, test_iso_name)
 
         assert test_iso_uploaded["ctime"] != test_iso_reuploaded["ctime"]
+    finally:
+        temp_iso.unlink()
+
+
+async def test_upload_returns_task_upid(
+    storage_commands: LocalStorageCommands, async_proxmox_api: AsyncProxmoxAPI
+) -> None:
+    test_iso_name = "test_upload_returns_task_upid.iso"
+
+    await delete_existing_iso(storage_commands, async_proxmox_api, test_iso_name)
+
+    try:
+        temp_iso = await create_temp_iso("ghi")
+
+        upid = await async_proxmox_api.upload_file(
+            node=storage_commands.node,
+            storage=LOCAL_STORAGE,
+            file=temp_iso,
+            content_type="iso",
+            filename=test_iso_name,
+        )
+
+        assert isinstance(upid, str)
+        assert upid.startswith(f"UPID:{storage_commands.node}:")
+
+        for _ in range(60):
+            task_status = await async_proxmox_api.request(
+                method="GET",
+                path=f"/nodes/{storage_commands.node}/tasks/{upid}/status",
+            )
+            if task_status["status"] == "stopped":
+                break
+            await asyncio.sleep(1)
+        assert task_status["status"] == "stopped"
+        assert task_status["exitstatus"] == "OK"
+
+        await find_uploaded_iso(storage_commands, test_iso_name)
     finally:
         temp_iso.unlink()
 
