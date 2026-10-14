@@ -116,11 +116,6 @@ from proxmoxsandbox.built_ins import ensure_built_in_templates
 await ensure_built_in_templates(instance_config)
 ```
 
-The same runs as `python -m proxmoxsandbox.built_ins` against the host named by
-the `PROXMOX_*` environment variables. On EC2, `BAKE_BUILT_INS` in
-`scripts/ec2/README.md` has the provisioner do this on the host itself, so the
-templates are in the AMI.
-
 The lockdown is gated on a marker file that provisioning doesn't create, so
 hosts are unrestricted by default. To restrict a running host:
 

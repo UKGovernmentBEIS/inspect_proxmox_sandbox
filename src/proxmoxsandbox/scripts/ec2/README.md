@@ -43,27 +43,12 @@ export INSTANCE_TYPE=m8i.2xlarge              # must support nested virtualizati
 export INSTANCE_NAME=proxmox                  # Name tag for the instance
 # export INSTANCE_PROFILE=...                 # required unless DHMC is enabled in this account/region
 # export LAUNCH_EXTRA_TAGS='{Key=team,Value=infra}'   # AWS CLI shorthand; single-quote to prevent brace expansion
-# export BAKE_BUILT_INS=inspect-proxmox-sandbox  # also create the built-in VM templates (see below)
 
 # Launches m8i.2xlarge, runs the full Proxmox install via user-data, and polls
 # the host over SSM until it reports ready (~15 min). Prints the instance ID
 # and root password when done.
 ./launch.sh
 ```
-
-`BAKE_BUILT_INS` takes a pip requirement for this package. When set, the host
-installs it after the final reboot and runs `python -m proxmoxsandbox.built_ins`
-against itself, so the AMI already holds the `ubuntu24.04`, `debian13` and
-`kali2025.4` templates and an eval's first use of a built-in doesn't pay for the
-download and package install. Pin the requirement to the commit whose
-`userdata.sh` you are launching, e.g.
-`'inspect-proxmox-sandbox @ git+https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git@<commit>'`.
-It adds about 40 minutes, most of it Kali installing `kali-linux-everything`,
-and about 60 GB to the root volume. The bake runs as a one-shot unit that
-removes itself and its download directory, and the host is not marked ready
-until it has succeeded; a failed bake shows up as
-`inspect-proxmox-bake-built-ins` failed in the launch output and
-`/root/install-proxmox.log`.
 
 Once the build instance reports complete, snapshot it:
 
@@ -243,8 +228,6 @@ reaches one is off the host. Nothing in the AMI knows those addresses; pass them
 - CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
 - A per-boot ready marker, `/run/inspect-proxmox/ready` — see "Everyday: launch from
   the AMI" above.
-- An opt-in one-shot that creates the built-in VM templates on the host — see
-  `BAKE_BUILT_INS` above.
 - A `.aisi<N>` contract stamp on the version `pveversion` prints and the API serves, so a
   caller can tell what a host provides before asserting it. Bumped when a host-side file
   something off-host asserts changes. A `pve-manager` upgrade replaces the stamped file, so an

@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Measured after base64, which inflates the gzip by a third, so this leaves the raw
 # form well under 16384 and trips a growing script before RunInstances does.
-BUDGET = 16000
+BUDGET = 15000
 
 SCRIPT = (
     Path(__file__).parents[2]

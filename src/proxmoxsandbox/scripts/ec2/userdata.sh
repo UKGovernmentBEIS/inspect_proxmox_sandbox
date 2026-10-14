@@ -86,13 +86,6 @@ for i in $(seq 1 36); do
 done
 echo "  amazon-guardduty-agent state: ${state:-not present}; proceeding"
 
-# Opt-in: a pip requirement for this package. Stage 2 then schedules a one-shot
-# that installs it on the host and creates every built-in template after the
-# final reboot. Stage 2 runs under systemd, so the request has to be on disk.
-if [ -n "${INSPECT_PROXMOX_BAKE_BUILT_INS:-}" ]; then
-    echo "$INSPECT_PROXMOX_BAKE_BUILT_INS" > /root/.inspect-proxmox-bake-built-ins
-fi
-
 cat > /etc/systemd/system/proxmox-install-stage2.service << 'UNIT'
 [Unit]
 Description=Proxmox VE install stage 2 (post-kernel-reboot)
@@ -779,47 +772,6 @@ OTELAPPLYUNIT
 systemctl daemon-reload
 systemctl enable cloudwatch-otel-apply.service
 
-# Opt-in built-in template bake (see stage 1). Runs once, after the final reboot,
-# with the API up and the password set; removes itself and its work directory,
-# so a snapshot of a successful bake carries the templates and nothing else.
-if [ -s /root/.inspect-proxmox-bake-built-ins ]; then
-cat > /root/inspect-proxmox-bake-built-ins.sh << 'BAKE'
-#!/bin/bash
-set -euo pipefail
-WORK=/var/tmp/inspect-proxmox-bake
-trap 'rm -rf "$WORK" /root/.inspect-proxmox-bake-built-ins' EXIT
-mkdir -p "$WORK"
-export HOME=/root XDG_CACHE_HOME="$WORK/cache" UV_CACHE_DIR="$WORK/uv-cache" \
-    UV_PYTHON_INSTALL_DIR="$WORK/uv-python" UV_INSTALL_DIR="$WORK/uv" UV_NO_MODIFY_PATH=1
-curl -LsSf https://astral.sh/uv/install.sh | sh
-timeout 300 bash -c 'until curl -ksf https://127.0.0.1:8006/api2/json/version >/dev/null; do sleep 2; done'
-echo "Creating built-in templates from $(cat /root/.inspect-proxmox-bake-built-ins)"
-PROXMOX_HOST=127.0.0.1 PROXMOX_VERIFY_TLS=0 PROXMOX_IMAGE_STORAGE=local \
-PROXMOX_PASSWORD="$(cat /root/root-password)" \
-    "$WORK/uv/uvx" --from "$(cat /root/.inspect-proxmox-bake-built-ins)" python -m proxmoxsandbox.built_ins
-BAKE
-chmod +x /root/inspect-proxmox-bake-built-ins.sh
-cat > /etc/systemd/system/inspect-proxmox-bake-built-ins.service << 'BAKE_UNIT'
-[Unit]
-Description=Create the inspect_proxmox_sandbox built-in VM templates (one-shot, opt-in)
-After=network-online.target pveproxy.service proxmox-ami-fixup-password.service proxmox-ami-fixup-certs.service proxmox-ami-fixup-firewall.service proxmox-ami-fixup-nat.service inspect-proxmox-block-cloud-metadata.service
-Wants=network-online.target
-ConditionPathExists=/root/inspect-proxmox-bake-built-ins.sh
-
-[Service]
-Type=oneshot
-ExecStart=/root/inspect-proxmox-bake-built-ins.sh
-ExecStartPost=/bin/rm -f /root/inspect-proxmox-bake-built-ins.sh /etc/systemd/system/inspect-proxmox-bake-built-ins.service
-RemainAfterExit=yes
-StandardOutput=append:/root/install-proxmox.log
-StandardError=append:/root/install-proxmox.log
-
-[Install]
-WantedBy=multi-user.target
-BAKE_UNIT
-systemctl enable inspect-proxmox-bake-built-ins.service
-fi
-
 # Per-boot ready marker: written once the fixups have run and the API answers, so
 # a caller polling over SSM never reads a password the fixup is about to replace
 # or hits an API that is about to restart. /run is tmpfs, so it never outlives
@@ -840,9 +792,7 @@ chmod +x /usr/local/bin/inspect-proxmox-ready.sh
 cat > /etc/systemd/system/inspect-proxmox-ready.service << 'READY_UNIT'
 [Unit]
 Description=Mark the host ready once the per-boot fixups are done and the API answers
-After=pveproxy.service proxmox-ami-fixup-password.service proxmox-ami-fixup-certs.service proxmox-ami-fixup-firewall.service inspect-proxmox-egress-lockdown.service inspect-proxmox-bake-built-ins.service
-# A successful bake removes its script; a failed one leaves the host unready.
-ConditionPathExists=!/root/inspect-proxmox-bake-built-ins.sh
+After=pveproxy.service proxmox-ami-fixup-password.service proxmox-ami-fixup-certs.service proxmox-ami-fixup-firewall.service inspect-proxmox-egress-lockdown.service
 
 [Service]
 Type=oneshot

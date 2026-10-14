@@ -16,12 +16,6 @@
 #   LAUNCH_EXTRA_TAGS  - Comma-separated AWS CLI shorthand tags, e.g.
 #                        '{Key=team,Value=infra},{Key=env,Value=dev}'
 #                        (single-quote in shell to prevent brace expansion)
-#   BAKE_BUILT_INS     - A pip requirement for this package, e.g.
-#                        'inspect-proxmox-sandbox' or
-#                        'inspect-proxmox-sandbox @ git+https://...@<commit>'.
-#                        If set, the host installs it and creates every built-in
-#                        VM template after the install, so they are in the AMI.
-#                        Adds ~40 min (kali2025.4 installs kali-linux-everything).
 set -euo pipefail
 
 REGION="${REGION:-eu-west-2}"
@@ -54,13 +48,7 @@ echo "  AMI: $AMI"
 # under EC2's 16 KiB limit as userdata.sh grows.
 USERDATA_GZ="$(mktemp)"
 trap 'rm -f "$USERDATA_GZ"' EXIT
-# The bake request travels as an environment variable, exported just under the
-# shebang so userdata.sh sees it however cloud-init runs the script.
-{
-    head -1 "$SCRIPT_DIR/userdata.sh"
-    [ -z "${BAKE_BUILT_INS:-}" ] || printf 'export INSPECT_PROXMOX_BAKE_BUILT_INS=%q\n' "$BAKE_BUILT_INS"
-    tail -n +2 "$SCRIPT_DIR/userdata.sh"
-} | gzip -c > "$USERDATA_GZ"
+gzip -c "$SCRIPT_DIR/userdata.sh" > "$USERDATA_GZ"
 
 INSTANCE_TAG_SPEC="ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}${LAUNCH_EXTRA_TAGS:+,$LAUNCH_EXTRA_TAGS}]"
 TAG_SPECS=("$INSTANCE_TAG_SPEC")
@@ -103,16 +91,16 @@ echo "  Launched: $INSTANCE_ID"
 # --- Wait for the host to report ready ---
 # The SSM agent appears partway through stage 1 and drops out across the two
 # reboots, so a failed send-command is just "not yet". The host writes
-# /run/inspect-proxmox/ready once a boot has the fixups done and the API up,
-# and (if requested) the built-in templates created; see README.md.
+# /run/inspect-proxmox/ready once a boot has the fixups done and the API up;
+# see README.md.
 READY_SCRIPT='
-for unit in proxmox-install-stage2 inspect-proxmox-bake-built-ins inspect-proxmox-egress-lockdown; do
+for unit in proxmox-install-stage2 inspect-proxmox-egress-lockdown; do
     if systemctl is-failed --quiet $unit.service; then echo "FAILED $unit"; exit 0; fi
 done
 if [ -e /run/inspect-proxmox/ready ]; then echo "READY $(cat /root/root-password)"; exit 0; fi
 echo "WAITING $(tail -n1 /root/install-proxmox.log 2>/dev/null)"
 '
-echo "Waiting for the host to report ready (checking every 30s; the install takes ~15 min, a bake ~40 more)..."
+echo "Waiting for the host to report ready (checking every 30s; the install takes ~15 min)..."
 PASSWORD=""
 while true; do
     cmd_id=$(aws ssm send-command \
