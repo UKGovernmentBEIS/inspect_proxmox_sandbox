@@ -3,13 +3,22 @@
 The provider creates a built-in template the first time an eval asks for it,
 which downloads an upstream image and installs packages inside the guest. This
 does the same for every built-in without running an eval.
+
+Also runnable as ``python -m proxmoxsandbox.built_ins`` against the host named
+by the ``PROXMOX_*`` environment variables, which is how the EC2 provisioner
+bakes the templates on the host itself (see ``scripts/ec2/README.md``).
 """
 
+import asyncio
 from typing import get_args
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands
-from proxmoxsandbox.schema import ProxmoxInstanceConfig, VmSourceConfig
+from proxmoxsandbox.schema import (
+    ProxmoxInstanceConfig,
+    VmSourceConfig,
+    _load_single_instance_from_env,
+)
 
 BUILT_IN_NAMES: tuple[str, ...] = get_args(
     get_args(VmSourceConfig.model_fields["built_in"].annotation)[0]
@@ -37,3 +46,14 @@ async def ensure_built_in_templates(instance: ProxmoxInstanceConfig) -> dict[str
         await built_in_vm.ensure_exists(name)
     await built_in_vm.remove_source_images()
     return await built_in_vm.known_builtins()
+
+
+def main() -> None:
+    """Create every built-in on the host named by the ``PROXMOX_*`` variables."""
+    templates = asyncio.run(ensure_built_in_templates(_load_single_instance_from_env()))
+    for name, vm_id in templates.items():
+        print(f"{name}: VM {vm_id}")
+
+
+if __name__ == "__main__":
+    main()

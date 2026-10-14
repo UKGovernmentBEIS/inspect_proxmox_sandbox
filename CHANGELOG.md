@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- EC2 hosts write `/run/inspect-proxmox/ready` once a boot has the fixups done and the API answering, so a caller can poll one path over SSM instead of inferring readiness from the install log; `launch.sh` does so. Hosts from `userdata.sh` carry contract `aisi4`.
+- `launch.sh` takes `BAKE_BUILT_INS=<pip requirement>` to create every built-in VM template on the host after the install, so they are in the AMI; `python -m proxmoxsandbox.built_ins` does the same on any host from the `PROXMOX_*` environment variables.
 - VMs with `is_sandbox=False` are no longer given to Inspect as sandboxes, fixing a bug where Inspect since 0.3.274 tries to `exec()` on every sandbox, causing ~7-minute timeouts for each VM without a guest agent during sample init.
 - `kali2025.4` built-in now installs `kali-linux-everything`; delete any existing `builtin-kali2025.4` template to pick this up
 - Bundled provisioners restrict guest access to host services before connection tracking, retaining management ingress and DHCP/DNS. New hosts carry contract `aisi3`.

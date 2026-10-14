@@ -43,12 +43,27 @@ export INSTANCE_TYPE=m8i.2xlarge              # must support nested virtualizati
 export INSTANCE_NAME=proxmox                  # Name tag for the instance
 # export INSTANCE_PROFILE=...                 # required unless DHMC is enabled in this account/region
 # export LAUNCH_EXTRA_TAGS='{Key=team,Value=infra}'   # AWS CLI shorthand; single-quote to prevent brace expansion
+# export BAKE_BUILT_INS=inspect-proxmox-sandbox  # also create the built-in VM templates (see below)
 
-# Launches m8i.2xlarge, runs the full Proxmox install via user-data, and tails
-# the install log on the host until it reports complete (~5-15 min). Prints
-# the instance ID and root password when done.
+# Launches m8i.2xlarge, runs the full Proxmox install via user-data, and polls
+# the host over SSM until it reports ready (~15 min). Prints the instance ID
+# and root password when done.
 ./launch.sh
 ```
+
+`BAKE_BUILT_INS` takes a pip requirement for this package. When set, the host
+installs it after the final reboot and runs `python -m proxmoxsandbox.built_ins`
+against itself, so the AMI already holds the `ubuntu24.04`, `debian13` and
+`kali2025.4` templates and an eval's first use of a built-in doesn't pay for the
+download and package install. Pin the requirement to the commit whose
+`userdata.sh` you are launching, e.g.
+`'inspect-proxmox-sandbox @ git+https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git@<commit>'`.
+It adds about 40 minutes, most of it Kali installing `kali-linux-everything`,
+and about 60 GB to the root volume. The bake runs as a one-shot unit that
+removes itself and its download directory, and the host is not marked ready
+until it has succeeded; a failed bake shows up as
+`inspect-proxmox-bake-built-ins` failed in the launch output and
+`/root/install-proxmox.log`.
 
 Once the build instance reports complete, snapshot it:
 
@@ -94,8 +109,12 @@ aws ec2 run-instances --region "$REGION" \
 Boots in ~1 min, with SSM coming online ~1 min after that. Boot-time fixup
 services in the AMI regenerate the hostname and SSL certificates for the new
 private IP, and regenerate the root password on every fresh launch (detected
-by EC2 instance-id change). Read the password via SSM (the Proxmox web UI
-login is `root` against the `Linux PAM` realm with this password):
+by EC2 instance-id change). Once those have run and the API answers, the host
+writes `/run/inspect-proxmox/ready` (hosts from contract `aisi4` on). `/run` is
+tmpfs, so the marker is per boot: when it exists, the password in
+`/root/root-password` is this boot's and the API is up. Poll for it rather than
+reading the password straight away (the Proxmox web UI login is `root` against
+the `Linux PAM` realm with this password):
 
 ```bash
 INSTANCE_ID=i-xxx
@@ -103,7 +122,7 @@ INSTANCE_ID=i-xxx
 CMD_ID=$(aws ssm send-command --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
     --document-name AWS-RunShellScript \
-    --parameters 'commands=["cat /root/root-password"]' \
+    --parameters 'commands=["[ -e /run/inspect-proxmox/ready ] && cat /root/root-password"]' \
     --query 'Command.CommandId' --output text)
 aws ssm wait command-executed --region "$REGION" \
     --command-id "$CMD_ID" --instance-id "$INSTANCE_ID"
@@ -111,6 +130,10 @@ aws ssm get-command-invocation --region "$REGION" \
     --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
     --query 'StandardOutputContent' --output text
 ```
+
+Empty output means not ready yet; retry. On a host with the egress lockdown
+armed, the marker also waits for the lockdown's verdict, and is never written
+if the lockdown failed (the API is halted in that case anyway).
 
 To open the Proxmox web UI, use `experimental/connect.sh` to forward port 8006
 over SSM (no inbound SG rules required); see `experimental/README.md`.
@@ -218,6 +241,10 @@ reaches one is off the host. Nothing in the AMI knows those addresses; pass them
 - AMI fixup services for hostname + SSL cert + root password regeneration on every boot.
 - A boot-time firewall rule blocking sandbox forwarding to EC2 instance metadata.
 - CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
+- A per-boot ready marker, `/run/inspect-proxmox/ready` — see "Everyday: launch from
+  the AMI" above.
+- An opt-in one-shot that creates the built-in VM templates on the host — see
+  `BAKE_BUILT_INS` above.
 - A `.aisi<N>` contract stamp on the version `pveversion` prints and the API serves, so a
   caller can tell what a host provides before asserting it. Bumped when a host-side file
   something off-host asserts changes. A `pve-manager` upgrade replaces the stamped file, so an
