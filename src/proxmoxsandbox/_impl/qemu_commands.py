@@ -589,6 +589,8 @@ class QemuCommands(abc.ABC):
                     netx = f"{nic_prefix},bridge={bridge_name}"
                     if nic.mac:
                         netx += f",macaddr={str(nic.mac).upper()}"
+                    if nic.vlan_tag is not None:
+                        netx += f",tag={nic.vlan_tag}"
                     if vm_config.firewall:
                         netx += ",firewall=1"
                     network_update_json[f"net{i}"] = netx
