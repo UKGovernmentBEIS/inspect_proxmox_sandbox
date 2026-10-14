@@ -277,6 +277,9 @@ class VmConfig(BaseModel, frozen=True):
             https://pve.proxmox.com/wiki/Manual:_qm.conf for more details
         vga: The emulated display device. Defaults to "none" (no display); set
             to "std" for guests that need a graphical console. See "Note on vga".
+        tablet: if True, adds a USB tablet so the noVNC mouse pointer tracks
+            accurately (useful for Windows with vga="std"). Defaults to False,
+            overriding Proxmox's default of on.
         cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
             defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
             panic on nested virtualization with "host"; use "qemu64" for those.
@@ -319,6 +322,7 @@ class VmConfig(BaseModel, frozen=True):
     firewall: bool = False
     os_type: Optional[OsType] = "l26"
     vga: Literal["none", "std"] = "none"
+    tablet: bool = False
     cpu: Optional[str] = None
     depends_on: Tuple[str, ...] = ()
     healthcheck: Optional[HealthCheck] = None

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
+import tenacity
 from inspect_ai.util import (
     trace_action,
 )
@@ -311,7 +312,7 @@ class AsyncProxmoxAPI:
         file: Path,
         content_type: Literal["iso", "vztmpl", "import"],
         filename: Optional[str] = None,
-    ) -> dict:
+    ) -> str:
         """Upload a file to Proxmox storage.
 
         The body is streamed from disk with a Content-Length, which pveproxy
@@ -325,7 +326,7 @@ class AsyncProxmoxAPI:
             filename: Optional custom filename to use (defaults to file.name)
 
         Returns:
-            The API response data
+            The UPID of the server-side task that finalises the upload
         """
         with trace_action(self.logger, self.TRACE_NAME, "upload_file"):
             if not file.exists():
@@ -353,4 +354,24 @@ class AsyncProxmoxAPI:
             if response.is_error:
                 raise _http_status_error(response)
 
-            return response.json().get("data", {})
+            return response.json()["data"]
+
+    async def wait_for_task(
+        self,
+        *,
+        upid: str,
+    ) -> None:
+        if not upid.startswith("UPID:"):
+            raise ValueError(f"Unexpected UPID format: {upid}")
+        node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
+
+        @tenacity.retry(
+            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            stop=tenacity.stop_after_delay(1200),
+            retry=tenacity.retry_if_result(lambda x: x is False),
+        )
+        async def _wait_for_task() -> bool:
+            response = await self.request("GET", f"/nodes/{node}/tasks/{upid}/status")
+            return response.get("exitstatus") is not None
+
+        await _wait_for_task()

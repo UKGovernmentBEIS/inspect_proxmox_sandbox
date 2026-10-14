@@ -8,6 +8,8 @@ from tempfile import TemporaryDirectory
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 
+UPID = "UPID:node:0000ABCD:00012345:6700F00D:imgcopy::user@pam:"
+
 
 async def _serve_ok(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     headers = await reader.readuntil(b"\r\n\r\n")
@@ -21,7 +23,7 @@ async def _serve_ok(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) 
         await writer.drain()
     body = await reader.readexactly(length)
     assert b"sample upload" in body
-    payload = json.dumps({"data": {"volid": "local:iso/payload.iso"}}).encode()
+    payload = json.dumps({"data": UPID}).encode()
     writer.write(
         b"HTTP/1.1 200 OK\r\n"
         b"Content-Type: application/json\r\n"
@@ -32,7 +34,7 @@ async def _serve_ok(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) 
     await writer.wait_closed()
 
 
-async def _upload() -> dict:
+async def _upload() -> str:
     async with await asyncio.start_server(_serve_ok, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         api = AsyncProxmoxAPI("unused.test", "user", "password")
@@ -44,5 +46,5 @@ async def _upload() -> dict:
             return await api.upload_file("node", "local", payload, "iso")
 
 
-def test_successful_upload_returns_parsed_data():
-    assert asyncio.run(_upload()) == {"volid": "local:iso/payload.iso"}
+def test_successful_upload_returns_task_upid():
+    assert asyncio.run(_upload()) == UPID

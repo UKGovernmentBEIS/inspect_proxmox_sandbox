@@ -81,11 +81,9 @@ async def test_default_named_default_has_no_duplicate_key(
     assert list(sandboxes) == ["default", "web"]
 
 
-async def test_default_is_first_sandbox_vm_not_first_vm(
-    config_file_env, mock_proxmox_api
-):
+async def test_non_sandbox_is_not_included(config_file_env, mock_proxmox_api):
     sandboxes = await _sample_init(
         _vm("router", is_sandbox=False), _vm("web"), _vm("db")
     )
-    assert list(sandboxes) == ["default", "router", "web", "db"]
+    assert list(sandboxes) == ["default", "web", "db"]
     assert sandboxes["default"] is sandboxes["web"]
