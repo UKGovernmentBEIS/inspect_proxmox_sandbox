@@ -1,16 +1,12 @@
 import asyncio
-import base64
 import errno
-import os
 import re
-import shlex
 import time
 from logging import INFO, NOTSET, getLogger
 from pathlib import Path, PureWindowsPath
-from typing import Any, Dict, Generator, List, Tuple, Type, Union
+from typing import Any, Dict, List, Tuple, Type, Union
 
 import httpx
-import tenacity
 from inspect_ai.util import (
     ExecResult,
     OutputLimitExceededError,
@@ -20,22 +16,29 @@ from inspect_ai.util import (
     SandboxEnvironmentLimits,
     concurrency,
     sandboxenv,
-    trace_action,
 )
 from pydantic import BaseModel
 from typing_extensions import override
 
-from proxmoxsandbox._impl.agent_commands import AgentCommands
+from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
+)
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.deadline import (
     CLEANUP_WAIT_SECONDS,
-    remaining_budget,
     within_budget,
+)
+from proxmoxsandbox._impl.guest_exec import (
+    _PVE_FILE_READ_MAX,
+    _PVE_FILE_READ_MAX_STR,
+    _WRITE_CHUNK_SIZE,
+    GuestExecutor,
+    _split_chunks,
 )
 from proxmoxsandbox._impl.infra_commands import InfraCommands, ProxmoxTarget
 from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
-from proxmoxsandbox._impl.qga_responses import ExecStatus, GuestAgentTamperError
+from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, is_ephemeral_zone
 from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
@@ -45,73 +48,6 @@ from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
     VmConfig,
 )
-
-# Above this many raw stdin bytes, exec() writes stdin to a file and redirects
-# from it instead of inlining base64 into the shell script — see exec() below.
-# Empirically ~34 KiB raw stdin saturates the script-write API limit (see exec
-# for derivation); 30 KiB leaves a little headroom for env/cwd/etc. overhead.
-_INLINE_STDIN_LIMIT = 30 * 1024
-
-# Chunk raw writes so the base64-encoded content stays under PVE's 61440-char
-# file-write `content` cap (see the exec-stdin note in exec()): 40 KiB raw is
-# ~54 KiB base64, comfortably under.
-_WRITE_CHUNK_SIZE = 40 * 1024
-
-_IN_GUEST_KILL_GRACE = 5
-
-# PVE rejects an agent/file-read with `count` above this ("value must have a
-# maximum value of 16777216"), so every read count must be clamped to it —
-# including ones derived from Inspect limits, which callers can raise above it.
-# sandbox_service() raises MAX_EXEC_OUTPUT_SIZE to 150 MiB for every request
-# read (override_max_exec_output_size), which used to 400 on each poll.
-_PVE_FILE_READ_MAX = 16 * 1024**2
-_PVE_FILE_READ_MAX_STR = "16 MiB"
-
-
-def _split_chunks(
-    data: bytes, size: int = _WRITE_CHUNK_SIZE
-) -> Tuple[List[bytes], int]:
-    chunks = [data[i : i + size] for i in range(0, len(data), size)]
-    return chunks, len(str(len(chunks) - 1))
-
-
-# Poll past the in-guest `timeout -k {_IN_GUEST_KILL_GRACE}s` SIGKILL (at timeout+5s)
-# so we observe the real exit instead of catching the command mid-shutdown.
-_EXEC_POLL_GRACE_SECONDS = _IN_GUEST_KILL_GRACE + 3
-
-# Keep untimed commands bounded on the host; adding a guest-side timeout
-# would require flags absent from BusyBox and could kill legitimate long work.
-_EXEC_UNTIMED_WAIT_SECONDS = 4 * 60 * 60
-
-# Shared communication allowance accommodates intermittent Windows QGA failures.
-_EXEC_AGENT_BUDGET_SECONDS = 180
-
-# Poll backoff is capped so a finished command is noticed within this, and so
-# the deadlines above are honoured to within it.
-_EXEC_POLL_MAX_INTERVAL_SECONDS = 30
-
-
-def _exec_untimed_wait() -> int:
-    seconds = int(
-        os.environ.get("PROXMOX_EXEC_UNTIMED_WAIT_SECONDS", _EXEC_UNTIMED_WAIT_SECONDS)
-    )
-    if seconds <= 0:
-        raise ValueError("PROXMOX_EXEC_UNTIMED_WAIT_SECONDS must be positive")
-    return seconds
-
-
-def _status_returncode(status: ExecStatus, *, windows: bool = False) -> int:
-    if status.exitcode is not None:
-        return status.exitcode
-    if status.signal:
-        if windows:
-            return status.signal if status.signal < 2**31 else status.signal - 2**32
-        return 128 + status.signal
-    return 1
-
-
-class ReturnCodeNotWritten(Exception):
-    """The exec wrapper exited without writing its returncode file."""
 
 
 @sandboxenv(name="proxmox")
@@ -176,141 +112,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self._iso_fast_path_disabled = False
         self._iso_write_lock = asyncio.Lock()
 
-    # originally from k8s sandbox
-    def _pipe_user_input(self, stdin: str | bytes) -> str:
-        # Encode the user-provided input as base64 for 2 reasons:
-        # 1. To avoid issues with special characters (e.g. new lines) in the input.
-        # 2. To support binary input (e.g. null byte).
-        stdin_b64 = base64.b64encode(
-            stdin if isinstance(stdin, bytes) else stdin.encode("utf-8")
-        ).decode("ascii")
-        # The below comment may or may not be relevant to this sandbox provider.
-        # Pipe user input. Simply writing it to the shell's stdin after a command e.g.
-        # `cat` results in `cat` blocking indefinitely as there is no way to close the
-        # stdin stream in v4.channel.k8s.io.
-        return f"echo '{stdin_b64}' | base64 -d | "
-
-    # originally from k8s sandbox
-    def _prefix_timeout(self, timeout: int | None) -> str:
-        if timeout is None:
-            return ""
-        # Enforce timeout using `timeout`. Cannot enforce this on the client side
-        # (requires terminating the remote process).
-        # `-k 5s` sends SIGKILL after grace period in case user command doesn't respect
-        # SIGTERM.
-        return f"timeout -k {_IN_GUEST_KILL_GRACE}s {timeout}s "
-
     def _is_windows(self) -> bool:
-        """Check if this VM is running Windows based on os_type."""
-        if self.os_type is None:
-            return False
-        # Windows os_types: w2k, w2k3, w2k8, win10, win11, win7, win8, wvista, wxp
-        return self.os_type.startswith("w")
-
-    def _build_batch_script(
-        self,
-        tmp_start: str,
-        command: List[str],
-        stdin: str | bytes | None,
-        cwd: str | None,
-        env: dict[str, str],
-        user: str | None,
-        timeout: int | None,
-    ) -> str:
-        """Build a batch script for Windows VMs."""
-        lines = ["@echo off"]
-
-        # Remove old output files
-        lines.append(f'del /f /q "{tmp_start}script.stdout" 2>nul')
-        lines.append(f'del /f /q "{tmp_start}script.stderr" 2>nul')
-        lines.append(f'del /f /q "{tmp_start}script.returncode" 2>nul')
-
-        # Set environment variables
-        for key, value in env.items():
-            # Escape special batch characters
-            escaped_value = value.replace("%", "%%").replace("^", "^^")
-            lines.append(f'set "{key}={escaped_value}"')
-
-        # Change directory if specified
-        if cwd is not None:
-            lines.append(f'cd /d "{cwd}"')
-
-        # Build the command - escape for batch
-        escaped_args = []
-        for arg in command:
-            # Escape special characters for cmd.exe
-            escaped_arg = (
-                arg.replace("^", "^^")
-                .replace("&", "^&")
-                .replace("|", "^|")
-                .replace("<", "^<")
-                .replace(">", "^>")
-            )
-            if " " in arg or '"' in arg:
-                escaped_arg = f'"{escaped_arg}"'
-            escaped_args.append(escaped_arg)
-        cmd_str = " ".join(escaped_args)
-
-        # Execute command with output redirection
-        # Note: stdin piping in batch is limited, skip for now
-        lines.append(
-            f'{cmd_str} > "{tmp_start}script.stdout" 2> "{tmp_start}script.stderr"'
-        )
-        lines.append(f'echo %ERRORLEVEL% > "{tmp_start}script.returncode"')
-
-        return "\r\n".join(lines)
-
-    # originally from k8s sandbox
-    # TODO extract this to its own module and unit test it locally
-    def _build_shell_script(
-        self,
-        tmp_start: str,
-        command: List[str],
-        stdin: str | bytes | None,
-        cwd: str | None,
-        env: dict[str, str],
-        user: str | None,
-        timeout: int | None,
-        stdin_file: str | None = None,
-    ) -> str:
-        def generate() -> Generator[str, None, None]:
-            if user is not None:
-                yield f"su -l {shlex.quote(user)} << 'EOF{tmp_start}EOF'\n"
-            # The rest of the script gets quoted in a heredoc if we had to use su
-            if cwd is not None:
-                yield f"cd {shlex.quote(cwd)} || exit $?\n"
-            for key, value in env.items():
-                yield f"export {shlex.quote(key)}={shlex.quote(value)}\n"
-            # Make the launch idempotent. agent/exec is retried on transient
-            # errors, so the same script can be launched more than once for this
-            # tmp_start. flock keyed on the temp path lets exactly one launch run
-            # the command and write the outputs; any duplicate blocks until that
-            # one finishes, so whichever pid we end up polling reads a consistent
-            # result and the command runs once. fd 9 (single digit) works in
-            # dash, which is /bin/sh on the default image.
-            stdin_prefix = self._pipe_user_input(stdin) if stdin is not None else ""
-            cmd_line = f"{self._prefix_timeout(timeout)}{shlex.join(command)}"
-            if stdin_file is not None:
-                cmd_line += f" <{shlex.quote(stdin_file)}"
-            yield f"exec 9>{tmp_start}script.lock\n"
-            yield "if flock -n 9; then\n"
-            yield (
-                f"  rm -f {tmp_start}script.stdout {tmp_start}script.stderr"
-                f" {tmp_start}script.returncode\n"
-            )
-            yield (
-                f"  {stdin_prefix}{cmd_line}"
-                f" >{tmp_start}script.stdout 2>{tmp_start}script.stderr\n"
-                f'  echo -n "$?" > {tmp_start}script.returncode\n'
-                "  sync\n"
-            )
-            yield "else\n"
-            yield "  flock 9\n"  # duplicate launch: wait for the real one
-            yield "fi\n"
-            if user is not None:
-                yield f"EOF{tmp_start}EOF\n"
-
-        return "".join(generate())
+        """Check whether this VM uses Windows paths and command rendering."""
+        return self.os_type is not None and self.os_type.startswith("w")
 
     @staticmethod
     async def ensure_vms(
@@ -674,273 +478,12 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     ) -> ExecResult[str]:
         if self.vm_id is None:
             raise ValueError("VM ID is not set")
-
-        is_windows = self._is_windows()
-
-        # Hardcoded path because the QEMU guest agent doesn't expand
-        # environment variables like %TEMP%. C:\Windows\Temp always exists.
-        if is_windows:
-            tmp_start = f"C:\\Windows\\Temp\\{__name__}{time.time_ns()}_"
-            self.logger.info(
-                f"[WINDOWS_EXEC] Using Windows paths for VM {self.vm_id}, "
-                f"os_type={self.os_type}, tmp_start={tmp_start}"
-            )
-        else:
-            tmp_start = f"/tmp/{__name__}{time.time_ns()}_"
-
-        poll_timeout = timeout if timeout is not None else remaining_budget()
-        if poll_timeout is None:
-            poll_timeout = _exec_untimed_wait()
-
-        @tenacity.retry(
-            wait=tenacity.wait_exponential(
-                min=0.1, max=_EXEC_POLL_MAX_INTERVAL_SECONDS, exp_base=1.3
-            ),
-            stop=tenacity.stop_after_delay(poll_timeout + _EXEC_POLL_GRACE_SECONDS),
-            retry=tenacity.retry_if_result(lambda x: x is None),
+        executor = GuestExecutor(
+            self.agent_commands,
+            self.vm_id,
+            self.os_type,
         )
-        async def wait_for_exec(
-            vm_id: int, exec_response_pid: int
-        ) -> ExecStatus | None:
-            # Note: get_agent_exec_status can only be called once
-            # per PID after the process is complete.
-            # Do not, for example, try to debug the value of the get_agent_exec_status
-            # call. It will break the running code in this loop.
-            exec_status = await self.agent_commands.get_agent_exec_status(
-                vm_id=vm_id, pid=exec_response_pid
-            )
-            return exec_status if exec_status.exited == 1 else None
-
-        stdin_upload: tuple[str, bytes] | None = None
-        if is_windows:
-            script = self._build_batch_script(
-                tmp_start=tmp_start,
-                command=cmd,
-                stdin=input,
-                cwd=cwd,
-                env=env or {},
-                user=user,
-                timeout=timeout,
-            )
-            script_path = f"{tmp_start}script.bat"
-        else:
-            # Inlined stdin is base64-encoded into the script, which itself
-            # gets base64-encoded into the agent/file-write `content` field.
-            # That field is hard-capped at 61440 chars by PVE validation, so
-            # stdin > ~34 KiB raw fails (empirically: 32 KiB OK, 45 KiB → HTTP
-            # 400 "value may only be 61440 characters long"). At much larger
-            # sizes (>~380 KiB raw stdin) the request also exceeds the
-            # pveproxy POST cap (512 KiB on PVE 8.4+) and the connection is
-            # closed without an HTTP response, surfacing as httpx ReadError('')
-            # — that's the failure mode the 1 MiB self_check.test_exec_input_large
-            # hits. For larger inputs, write stdin to a separate file (chunked
-            # via self.write_file) and have the script redirect from it.
-            # See https://forum.proxmox.com/threads/166200 and
-            # https://forum.proxmox.com/threads/105556
-            stdin_for_script: str | bytes | None = input
-            stdin_file: str | None = None
-            if input is not None:
-                input_bytes = (
-                    input if isinstance(input, bytes) else input.encode("utf-8")
-                )
-                if len(input_bytes) > _INLINE_STDIN_LIMIT:
-                    stdin_file = f"{tmp_start}stdin"
-                    stdin_upload = (stdin_file, input_bytes)
-                    stdin_for_script = None
-
-            script = self._build_shell_script(
-                tmp_start=tmp_start,
-                command=cmd,
-                stdin=stdin_for_script,
-                cwd=cwd,
-                env=env or {},
-                user=user,
-                timeout=timeout,
-                stdin_file=stdin_file,
-            )
-            script_path = f"{tmp_start}script.sh"
-
-        # Uploads and result collection share the command's waiting allowance;
-        # nested retries must not restart it.
-        waiting_allowance = (
-            poll_timeout + _EXEC_POLL_GRACE_SECONDS + _EXEC_AGENT_BUDGET_SECONDS
-        )
-        launched_pid: int | None = None
-
-        async def launch_and_collect() -> ExecResult[str]:
-            nonlocal launched_pid
-            if stdin_upload is not None:
-                await self.write_file(*stdin_upload)
-            launch = await self._upload_exec_script(
-                script_path, script, is_windows=is_windows
-            )
-            exec_response_pid = await self.agent_commands.exec_command(
-                vm_id=self.vm_id, command=launch
-            )
-            launched_pid = exec_response_pid
-            self.logger.debug(
-                f"VM {self.vm_id} exec pid={exec_response_pid}: {cmd[:100]}"
-            )
-
-            with trace_action(
-                self.logger,
-                self.TRACE_NAME,
-                f"exec_command {self.vm_id=} {exec_response_pid=}",
-            ):
-                exec_status = await wait_for_exec(self.vm_id, exec_response_pid)
-            if exec_status is None:  # tenacity only returns a non-None result
-                raise RuntimeError("exec-status poll returned without a status")
-
-            if exec_status.err_data is not None:
-                # QGA stderr comes from the wrapper; command stderr is in its file.
-                exec_response = ExecResult(
-                    success=False,
-                    returncode=_status_returncode(exec_status, windows=is_windows),
-                    stdout=exec_status.out_data or "",
-                    stderr=exec_status.err_data,
-                )
-            else:
-                # TODO: consider reading all files at once?
-                stdout = await self._read_exec_output(f"{tmp_start}script.stdout")
-                stderr = await self._read_exec_output(f"{tmp_start}script.stderr")
-                try:
-                    returncode = await self._read_return_code(tmp_start)
-                    exec_response = ExecResult(
-                        success=returncode == 0,
-                        returncode=returncode,
-                        stdout=stdout,
-                        stderr=stderr,
-                    )
-                except ReturnCodeNotWritten:
-                    # exec exited but the wrapper never wrote its returncode file:
-                    # it was killed before completion.
-                    signal_num = exec_status.signal
-                    returncode = (
-                        _status_returncode(exec_status, windows=is_windows)
-                        if signal_num
-                        else 137
-                    )
-                    if signal_num:
-                        termination = "exception" if is_windows else "signal"
-                        killed_note = (
-                            f"proxmox sandbox: command-runner wrapper terminated by "
-                            f"{termination} {signal_num} before completion; "
-                            f"reporting code {returncode}."
-                        )
-                    else:
-                        killed_note = (
-                            "proxmox sandbox: command-runner wrapper terminated "
-                            "before writing an exit code (likely killed by the "
-                            "command itself)."
-                        )
-                    exec_response = ExecResult(
-                        success=False,
-                        returncode=returncode,
-                        stdout=stdout,
-                        stderr=f"{stderr}\n{killed_note}" if stderr else killed_note,
-                    )
-
-            # cleanup - we don't need to wait for the result of this
-            if is_windows:
-                await self.agent_commands.exec_command(
-                    vm_id=self.vm_id,
-                    command=["cmd.exe", "/c", f'del /f /q "{tmp_start}*" 2>nul'],
-                )
-            else:
-                await self.agent_commands.exec_command(
-                    vm_id=self.vm_id,
-                    command=["sh", "-c", f"rm -f {tmp_start}*"],
-                )
-            return exec_response
-
-        try:
-            exec_response = await within_budget(launch_and_collect(), waiting_allowance)
-        except tenacity.RetryError as ex:
-            untimed_note = (
-                " (the wait for an exec without a timeout; see "
-                "PROXMOX_EXEC_UNTIMED_WAIT_SECONDS)"
-                if timeout is None
-                else ""
-            )
-            raise TimeoutError(
-                f"Command did not complete within {poll_timeout}s{untimed_note} "
-                f"(+{_EXEC_POLL_GRACE_SECONDS}s guest-agent grace) on VM "
-                f"{self.vm_id}, pid {launched_pid}. The QEMU guest "
-                f"agent did not report the process as finished. "
-                f"Command: {shlex.join(cmd)[:200]}"
-            ) from ex
-        except TimeoutError as ex:
-            raise TimeoutError(
-                f"The QEMU guest agent on VM {self.vm_id} did not deliver the result "
-                f"of pid {launched_pid} within {waiting_allowance}s ({poll_timeout}s "
-                f"timeout + {_EXEC_POLL_GRACE_SECONDS}s grace + "
-                f"{_EXEC_AGENT_BUDGET_SECONDS}s agent budget): the agent is stalled "
-                f"or tampered. Command: {shlex.join(cmd)[:200]}"
-            ) from ex
-
-        if exec_response.returncode == 124:
-            raise TimeoutError("Command timed out")
-
-        if len(exec_response.stderr.splitlines()) == 1:
-            # if err-data is longer than one line, then part of the script ran,
-            # and it didn't fail on the first line, which is characteristic of
-            # failing to execute a non-executable file
-            if (
-                exec_response.returncode == 126
-                and "permission denied" in exec_response.stderr.casefold()
-            ):
-                raise PermissionError("Permission denied executing command")
-
-        return exec_response
-
-    _RETURNCODE_RE = re.compile(r"-?\d{1,10}")
-
-    @tenacity.retry(
-        wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-        stop=tenacity.stop_after_delay(2),
-        retry=tenacity.retry_if_exception_type(ReturnCodeNotWritten),
-        reraise=True,
-    )
-    async def _read_return_code(self, tmp_start) -> int:
-        raw, _truncated = await self.agent_commands.read_file_capped_or_blank(
-            vm_id=self.vm_id,
-            filepath=f"{tmp_start}script.returncode",
-            count=min(
-                SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
-                _PVE_FILE_READ_MAX,
-            ),
-        )
-        text = raw.decode("utf-8", errors="replace").strip()
-        if not text:
-            raise ReturnCodeNotWritten()
-        if self._RETURNCODE_RE.fullmatch(text) is None:
-            # The guest owns this file, so this is a forged result rather than
-            # tamper evidence; just fail with the VM named instead of a bare int().
-            raise ValueError(
-                f"VM {self.vm_id}: returncode file did not contain an exit code: "
-                f"{text[:64]!r}"
-            )
-        return int(text)
-
-    async def _read_exec_output(self, filepath: str) -> str:
-        # decode=0 gives raw bytes; decode UTF-8 errors="replace" (output is
-        # arbitrary bytes). Oversized output is flagged via `truncated`.
-        limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
-        cap = min(limit, _PVE_FILE_READ_MAX)
-        raw, truncated = await self.agent_commands.read_file_capped_or_blank(
-            vm_id=self.vm_id,
-            filepath=filepath,
-            count=cap,
-        )
-        text = raw.decode("utf-8", errors="replace")
-        if truncated:
-            raise OutputLimitExceededError(
-                SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR
-                if limit <= _PVE_FILE_READ_MAX
-                else _PVE_FILE_READ_MAX_STR,
-                text,
-            )
-        return text
+        return await executor.exec(cmd, input, cwd, env, user, timeout)
 
     # Platform-specific "file not found" messages from the QEMU guest agent.
     _FILE_NOT_FOUND_ERRORS = [
@@ -973,54 +516,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     raise ex
             else:
                 raise ex
-
-    async def _upload_exec_script(
-        self, script_path: str, script: str, is_windows: bool
-    ) -> List[str]:
-        """Upload the exec wrapper script; return the command that runs it.
-
-        Tries write_file's ISO fast path first (>=128 KiB, Linux) and otherwise
-        falls back to chunked QGA. Bootstrap-safe: reaches only _try_iso_write
-        (→ IsoWriter, which never calls self.exec), _write_file_only, and
-        _split_chunks — never self.exec / self.write_file, which re-enter exec
-        and would recurse.
-        """
-        data = script.encode("utf-8")
-        launch = ["cmd.exe", "/c", script_path] if is_windows else ["sh", script_path]
-
-        # Reuse write_file's ISO fast path. On success the whole script is already
-        # in the guest; just launch it. _try_iso_write is bootstrap-safe (no
-        # self.exec), so this does not re-enter exec().
-        if await self._try_iso_write(script_path, data):
-            return launch
-
-        if len(data) <= _WRITE_CHUNK_SIZE:
-            await self._write_file_only(script_path, data)
-            return launch
-
-        chunks, width = _split_chunks(data)
-        for i, chunk in enumerate(chunks):
-            await self._write_file_only(f"{script_path}.part{i:0{width}d}", chunk)
-
-        if is_windows:
-            parts = "+".join(
-                f'"{script_path}.part{i:0{width}d}"' for i in range(len(chunks))
-            )
-            return [
-                "cmd.exe",
-                "/c",
-                f'copy /b {parts} "{script_path}" >nul && "{script_path}"',
-            ]
-        # Reassembly stays inline in the launched command rather than reusing
-        # write_file's combine: that combine runs via self.exec (+ an
-        # unconditional parent mkdir), which re-enters exec() -> here and recurses.
-        # zero-padded names sort correctly under the glob, so cat reassembles in
-        # order; the combine runs in the SAME launched command we already poll.
-        return [
-            "sh",
-            "-c",
-            f"cat {script_path}.part* > {script_path} && exec sh {script_path}",
-        ]
 
     # Above this size, write_file uses the ISO fast path; below it, chunked
     # QGA. Not a true crossover: benchmarking (live ubuntu24.04) found ISO

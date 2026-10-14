@@ -17,8 +17,9 @@ from unittest.mock import patch
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from proxmoxsandbox._impl.agent_commands import AgentCommands
+from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.guest_exec import GuestExecResultError
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
@@ -29,6 +30,8 @@ class Fault(BaseModel):
     """An external request that stalls or returns after time has elapsed."""
 
     stage: Literal[
+        "prepare",
+        "prepare_status",
         "upload",
         "launch",
         "status",
@@ -75,7 +78,15 @@ class Scenario(BaseModel):
 class Observation(BaseModel):
     """Visible result, or the failure reported by the provider."""
 
-    kind: Literal["file", "exec", "rejected", "timeout", "error"]
+    kind: Literal[
+        "file",
+        "exec",
+        "rejected",
+        "timeout",
+        "incomplete",
+        "result_unavailable",
+        "error",
+    ]
     content: str | None = None
     truncated: bool | None = None
     returncode: int | None = None
@@ -85,9 +96,32 @@ class Observation(BaseModel):
     error_type: str | None = None
     error_length: int | None = None
     vm_id: int | None = None
+    pid: int | None = None
+    script_path: str | None = None
     cancelled: bool = False
     launched: bool = False
     status_reads: int = 0
+
+
+def execution_stage(command: list[str]) -> Literal["prepare", "launch", "cleanup"]:
+    """Separate private-directory setup from the command under test."""
+    body = command[-1]
+    if "-EncodedCommand" in command:
+        body = base64.b64decode(body).decode("utf-16le")
+    if command[0].rsplit("/", 1)[-1] == "rm" or body.startswith("del /f /q "):
+        return "cleanup"
+    if "claimed" in body:
+        return "launch"
+    if "CreateDirectory" in body or ("stat -c" in body and "mkdir -m 700" in body):
+        return "prepare"
+    if (
+        "Remove-Item" in body
+        or "[IO.File]::Delete(" in body
+        or (command[:2] == ["sh", "-c"] and "rm -f -- " in body)
+    ):
+        return "cleanup"
+    # Generic write_file's ISO copy still invokes a raw guest command.
+    return "launch"
 
 
 class GuestReplies:
@@ -143,18 +177,22 @@ class GuestReplies:
             data = {}
         elif route == "exec":
             command = json.loads(request.content)["command"]
-            cleanup = any("rm -f " in word or "del /f /q " in word for word in command)
-            await self.apply_fault("cleanup" if cleanup else "launch")
-            data = scenario.exec_reply
+            stage = execution_stage(command)
+            await self.apply_fault(stage)
+            data = {"pid": 321} if stage == "prepare" else scenario.exec_reply
         elif route == "exec-status":
-            await self.apply_fault("status")
             if set(request.url.params) != {"pid"}:
                 raise AssertionError("guest changed authenticated request parameters")
-            data = (
-                self.status_replies.pop(0)
-                if self.status_replies
-                else scenario.status_reply
-            )
+            if request.url.params["pid"] == "321":
+                await self.apply_fault("prepare_status")
+                data = {"exited": 1, "exitcode": 0}
+            else:
+                await self.apply_fault("status")
+                data = (
+                    self.status_replies.pop(0)
+                    if self.status_replies
+                    else scenario.status_reply
+                )
         elif route == "file-read":
             if scenario.http_error is not None:
                 return httpx.Response(400, text=scenario.http_error)
@@ -257,9 +295,30 @@ async def exercise(scenario: Scenario) -> Observation:
                 stdout=result.stdout,
                 stderr=result.stderr,
                 status_reads=replies.seen.get("status", 0),
+                cancelled=replies.cancelled,
+                launched=replies.seen.get("launch", 0) > 0,
             )
         except GuestAgentTamperError as exc:
             return Observation(kind="rejected", vm_id=exc.vm_id)
+        except GuestExecResultError as exc:
+            return Observation(
+                kind="result_unavailable",
+                vm_id=exc.vm_id,
+                pid=exc.pid,
+                script_path=exc.script_path,
+                returncode=exc.returncode,
+                cancelled=replies.cancelled,
+                launched=replies.seen.get("launch", 0) > 0,
+            )
+        except GuestExecIncompleteError as exc:
+            return Observation(
+                kind="incomplete",
+                vm_id=exc.vm_id,
+                pid=exc.pid,
+                script_path=exc.script_path,
+                cancelled=replies.cancelled,
+                launched=replies.seen.get("launch", 0) > 0,
+            )
         except TimeoutError:
             return Observation(
                 kind="timeout",

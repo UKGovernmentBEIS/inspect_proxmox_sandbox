@@ -22,11 +22,35 @@ from .guest_agent_fixture import (
 
 
 @pytest.mark.parametrize(
-    "stage", ["upload", "launch", "status", "stdout", "stderr", "returncode", "cleanup"]
+    "stage",
+    [
+        "prepare",
+        "prepare_status",
+        "upload",
+        "launch",
+        "status",
+        "stdout",
+        "stderr",
+        "returncode",
+        "cleanup",
+    ],
 )
 def test_command_stops_waiting_for_a_stalled_guest_at_every_stage(stage):
     observed = isolated(Scenario(operation="exec", fault=Fault(stage=stage)))
-    assert observed.kind == "timeout"
+    if stage in ("launch", "status", "returncode"):
+        assert observed.kind == "incomplete"
+        assert observed.vm_id == 100
+        assert observed.pid == (None if stage == "launch" else 42)
+        assert observed.script_path.endswith("script.sh")
+    elif stage in ("stdout", "stderr"):
+        assert observed.kind == "result_unavailable"
+        assert observed.returncode == 0
+        assert observed.pid == 42
+    elif stage == "cleanup":
+        assert observed.kind == "exec"
+        assert observed.returncode == 0
+    else:
+        assert observed.kind == "timeout"
     assert observed.cancelled is True
 
 
@@ -36,11 +60,12 @@ def test_file_read_does_not_outlive_its_waiting_allowance(mode):
     assert observed.kind == "timeout"
 
 
-def test_a_command_result_arriving_after_the_budget_is_not_reported_as_success():
+def test_confirmed_command_result_survives_late_cleanup():
     observed = isolated(
         Scenario(operation="exec", fault=Fault(stage="cleanup", mode="late_success"))
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "exec"
+    assert observed.returncode == 0
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "not-a-number"])
@@ -61,15 +86,12 @@ async def test_explicit_timeout_does_not_depend_on_the_untimed_setting(input):
     assert observed.returncode == 0
 
 
-def test_large_input_upload_and_its_cleanup_cannot_restart_the_command_budget():
+def test_large_input_upload_cannot_restart_the_command_budget():
     observed = isolated(
         Scenario(
             operation="exec",
             input="x" * 100_000,
-            faults=[
-                Fault(stage="upload", skip_requests=2),
-                Fault(stage="launch", skip_requests=2),
-            ],
+            fault=Fault(stage="upload", skip_requests=2),
         )
     )
     assert observed.kind == "timeout"
@@ -109,17 +131,18 @@ def test_untimed_command_stops_waiting_even_when_upload_keeps_progressing(monkey
     assert observed.launched is False
 
 
-@pytest.mark.parametrize("stage", ["iso_detach", "iso_delete"])
-def test_iso_cleanup_cannot_hold_the_command_open_indefinitely(stage):
+@pytest.mark.parametrize("stage", ["iso_attach", "iso_detach", "iso_delete"])
+def test_large_exec_scripts_do_not_use_iso_staging(stage):
     observed = isolated(
         Scenario(
             operation="exec",
             command=["echo", "x" * 200_000],
             iso_uploads=True,
-            faults=[Fault(stage="status"), Fault(stage=stage)],
+            fault=Fault(stage=stage),
         )
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "exec"
+    assert observed.stdout == "hello\n"
 
 
 async def test_cancelled_iso_transfer_is_not_reused_by_the_next_write():
@@ -184,9 +207,11 @@ async def test_slow_temporary_file_cleanup_is_allowed_to_finish():
                 data = json.loads(request.content)
                 self.scripts[data["file"]] = base64.b64decode(data["content"])
             elif route == "exec":
+                command = json.loads(request.content)["command"]
                 self.cleaning = any(
-                    b"rm -rf " in self.scripts.get(arg, b"")
-                    for arg in json.loads(request.content)["command"]
+                    path in arg and b"rm -rf " in script
+                    for path, script in self.scripts.items()
+                    for arg in command
                 )
             elif route == "exec-status" and self.cleaning:
                 self.cleanup_polls += 1

@@ -54,7 +54,7 @@ async def test_invalid_process_number_is_rejected_before_another_request(value):
 
 @pytest.mark.parametrize("with_stderr", [False, True])
 @pytest.mark.parametrize("exception", [-1073741819, 0xC0000005])
-async def test_windows_crash_is_reported_as_a_process_failure(
+async def test_windows_wrapper_crash_does_not_establish_command_completion(
     with_stderr: bool, exception: int
 ):
     status: dict[str, JsonValue] = {"exited": 1, "signal": exception}
@@ -63,12 +63,12 @@ async def test_windows_crash_is_reported_as_a_process_failure(
     observed = await exercise(
         Scenario(operation="exec", os_type="win11", status_reply=status, return_code="")
     )
-    assert observed.kind == "exec"
-    assert observed.returncode == -1073741819
-    assert observed.success is False
+    assert observed.kind == "incomplete"
+    assert observed.vm_id == 100
+    assert observed.pid == 42
 
 
-async def test_killed_linux_runner_can_report_stderr_without_an_exit_code():
+async def test_killed_linux_wrapper_does_not_fabricate_command_exit_137():
     observed = await exercise(
         Scenario(
             operation="exec",
@@ -76,10 +76,9 @@ async def test_killed_linux_runner_can_report_stderr_without_an_exit_code():
             return_code="",
         )
     )
-    assert observed.kind == "exec"
-    assert observed.returncode == 137
-    assert observed.stderr == "runner failed"
-    assert observed.success is False
+    assert observed.kind == "incomplete"
+    assert observed.vm_id == 100
+    assert observed.pid == 42
 
 
 def test_corrupt_file_encodings_are_rejected_at_different_positions():

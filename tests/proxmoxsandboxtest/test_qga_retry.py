@@ -1,11 +1,12 @@
 """Unit tests for QGA transient-error retry logic (no Proxmox infra required).
 
-Every QGA call is retried on the same transient set (httpx transport errors +
-5xx, including Proxmox 596/597 "Broken pipe"). Permanent errors (4xx, missing
-file, gone PID) are not. exec-start is made safe to retry by the wrapper
-script's flock guard (see test_exec_idempotency); the exec-status single-shot
-read is made safe by get_agent_exec_status' PID-gone disk fallback.
+Safe QGA operations retry httpx transport errors and 5xx, including Proxmox
+596/597 "Broken pipe". Permanent errors (4xx, missing file, gone PID) are not
+retried. Arbitrary launches are single-shot; exec-status retries use the
+PID-gone disk fallback when a completed status response was lost.
 """
+
+import asyncio
 
 import httpx
 import pytest
@@ -13,7 +14,9 @@ import pytest
 from proxmoxsandbox._impl.agent_commands import (
     _QGA_MAX_RETRIES,
     AgentCommands,
+    HealthcheckTransportExhaustedError,
     _is_pid_gone,
+    healthcheck_transport_budget,
     is_transient_qga_error,
 )
 from proxmoxsandbox._impl.qga_responses import ExecStatus
@@ -160,6 +163,96 @@ async def test_retry_budget_is_configurable():
     with pytest.raises(httpx.HTTPStatusError):
         await single_shot._retry_on_qga_error("read", always_down)
     assert calls["n"] == 1
+
+
+async def test_healthcheck_recovery_budget_spans_operations(
+    agent_commands, monkeypatch
+):
+    sleeps = []
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("proxmoxsandbox._impl.agent_commands.asyncio.sleep", sleep)
+    calls = 0
+
+    async def flaky():
+        nonlocal calls
+        calls += 1
+        if calls == 21:
+            return "uploaded"
+        raise _http_error(500)
+
+    with healthcheck_transport_budget(interval=5):
+        assert await agent_commands._retry_on_qga_error("upload", flaky) == "uploaded"
+        with pytest.raises(HealthcheckTransportExhaustedError) as exc_info:
+            await agent_commands._retry_on_qga_error("read", flaky)
+        assert exc_info.value.failures == 25
+        assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+        with pytest.raises(HealthcheckTransportExhaustedError):
+            await agent_commands._retry_on_qga_error("read", flaky)
+
+    assert calls == 26  # 25 failures and one successful upload, never a fresh budget.
+    assert sleeps == [5] * 24
+
+
+async def test_nested_healthcheck_scope_does_not_reset_recovery(agent_commands):
+    calls = 0
+
+    async def flaky():
+        nonlocal calls
+        calls += 1
+        if calls == 21:
+            return "uploaded"
+        raise httpx.ReadTimeout("lost response")
+
+    with healthcheck_transport_budget(interval=1):
+        await agent_commands._retry_on_qga_error("upload", flaky)
+        with healthcheck_transport_budget(interval=999):
+            with pytest.raises(HealthcheckTransportExhaustedError):
+                await agent_commands._retry_on_qga_error("read", flaky)
+    assert calls == 26
+
+
+async def test_healthcheck_scope_preserves_explicit_operation_cap():
+    api = _FakeApi([_http_error(500)])
+    agent = AgentCommands(api, "pve", qga_max_retries=1)  # type: ignore[arg-type]
+    with healthcheck_transport_budget(interval=1):
+        with pytest.raises(HealthcheckTransportExhaustedError) as exc_info:
+            await agent.write_file(100, b"script", "/tmp/script")
+    assert exc_info.value.failures == 1
+    assert api.calls == 1
+
+
+async def test_normal_operations_retain_independent_retry_budgets(agent_commands):
+    for _ in range(2):
+        calls = 0
+
+        async def flaky():
+            nonlocal calls
+            calls += 1
+            if calls < 25:
+                raise httpx.ReadTimeout("lost response")
+            return "ok"
+
+        assert await agent_commands._retry_on_qga_error("read", flaky) == "ok"
+        assert calls == 25
+
+
+async def test_cancelled_scope_does_not_leak_into_later_operations(agent_commands):
+    async def cancel():
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        with healthcheck_transport_budget(interval=1):
+            await agent_commands._retry_on_qga_error("read", cancel)
+
+    async def fail():
+        raise httpx.ReadTimeout("lost response")
+
+    # An unscoped operation retains its original exception, not healthcheck exhaustion.
+    with pytest.raises(httpx.ReadTimeout):
+        await agent_commands._retry_on_qga_error("read", fail)
 
 
 async def test_too_large_write_not_retried(agent_commands):
