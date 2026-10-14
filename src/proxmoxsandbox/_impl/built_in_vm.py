@@ -277,25 +277,35 @@ runcmd:
 
         await attach_to_vm()
 
+    async def remove_source_images(self) -> None:
+        """Delete the downloaded upstream images from import storage.
+
+        Templates hold their own copy of the disk (import-from copies it), so
+        this only means a later ensure_exists for a missing built-in downloads
+        again.
+        """
+        storage_names_to_delete = [
+            Path(urlparse(UBUNTU_URL).path).name,
+            Path(urlparse(DEBIAN_13_URL).path).name,
+            KALI_DISK_RENAMED,
+        ]
+
+        for content in await self.read_all_content():
+            if content["volid"]:
+                for storage_name in storage_names_to_delete:
+                    if content["volid"].endswith(storage_name):
+                        upid = await self.async_proxmox.request(
+                            "DELETE",
+                            f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
+                        )
+                        # The API documents the UPID as optional.
+                        if upid:
+                            await self.async_proxmox.wait_for_task(upid=upid)
+
     # for test code only
     async def clear_builtins(self) -> None:
         async def inner_clear_builtins() -> None:
-            existing_content = await self.read_all_content()
-
-            storage_names_to_delete = [
-                Path(urlparse(UBUNTU_URL).path).name,
-                Path(urlparse(DEBIAN_13_URL).path).name,
-                KALI_DISK_RENAMED,
-            ]
-
-            for content in existing_content:
-                if content["volid"]:
-                    for storage_name in storage_names_to_delete:
-                        if content["volid"].endswith(storage_name):
-                            await self.async_proxmox.request(
-                                "DELETE",
-                                f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
-                            )
+            await self.remove_source_images()
 
             existing_vms = await self.known_builtins()
             for built_in, vm_id in existing_vms.items():

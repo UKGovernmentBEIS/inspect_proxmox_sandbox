@@ -107,7 +107,14 @@ another guest remains reachable. Unaffected: guest↔guest traffic across vnets
 Guests must not need egress to boot: the built-in VM template bake (first use
 of a `built_in` image on a host) installs packages from inside the guest, so
 it must happen before the lockdown is applied. Sandbox VMs cloned from an
-already-baked template boot fine.
+already-baked template boot fine. To create the templates up front, while the
+host can still reach the internet:
+
+```python
+from proxmoxsandbox.built_ins import ensure_built_in_templates
+
+await ensure_built_in_templates(instance_config)
+```
 
 The lockdown is gated on a marker file that provisioning doesn't create, so
 hosts are unrestricted by default. To restrict a running host:
