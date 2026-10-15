@@ -42,7 +42,6 @@ def _make_infra_mock(**overrides):
     infra.sdn_commands = MagicMock()
     infra.sdn_commands.read_all_vnets = AsyncMock(return_value=[])
     infra.qemu_commands = MagicMock()
-    infra.task_wrapper = MagicMock()
     infra.built_in_vm = AsyncMock()
     infra.built_in_vm.ensure_exists = AsyncMock()
     infra.async_proxmox = AsyncMock()

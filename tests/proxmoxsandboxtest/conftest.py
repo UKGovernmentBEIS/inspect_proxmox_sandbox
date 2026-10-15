@@ -18,7 +18,6 @@ from proxmoxsandbox._impl.qemu_commands import (
 )
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
 from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
@@ -110,8 +109,7 @@ async def storage_commands(
     async_proxmox_api: AsyncProxmoxAPI,
     instance_config: ProxmoxInstanceConfig,
 ) -> LocalStorageCommands:
-    task_wrapper = TaskWrapper(async_proxmox_api)
-    return LocalStorageCommands(async_proxmox_api, instance_config.node, task_wrapper)
+    return LocalStorageCommands(async_proxmox_api, instance_config.node)
 
 
 @pytest.fixture
