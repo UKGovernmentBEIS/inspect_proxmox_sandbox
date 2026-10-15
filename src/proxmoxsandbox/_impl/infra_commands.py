@@ -3,7 +3,6 @@ import asyncio
 import os
 import sys
 from logging import getLogger
-from random import randint
 from typing import (
     ClassVar,
     Collection,
@@ -330,16 +329,7 @@ class InfraCommands(abc.ABC):
         return ipam_mappings
 
     async def find_proxmox_ids_start(self, task_name_start: str) -> str:
-        existing_zone_ids = set(
-            [zone["zone"] for zone in await self.sdn_commands.list_sdn_zones()]
-        )
-        zone_free = False
-        while not zone_free:
-            # IDs are 8 characters max unfortunately; we save two at the end to
-            # distinguish vnet/SDN objects
-            proxmox_ids_start = f"{task_name_start}{randint(0, 999):03d}"
-            zone_free = f"{proxmox_ids_start}z" not in existing_zone_ids
-        return proxmox_ids_start
+        return await self.sdn_commands.find_proxmox_ids_start(prefix=task_name_start)
 
     async def find_all_zones(self, vnet_ids: Collection[str]) -> Set[str]:
         return set(
@@ -368,9 +358,10 @@ class InfraCommands(abc.ABC):
         # Only zones matching the provider's ephemeral-zone naming convention
         # are eligible for sweep — `create_sdn` enforces this convention at
         # creation (sdn_commands.create_sdn). Pre-existing user zones
-        # (referenced via sdn_config=None) and the intentionally-permanent
-        # static `inspvm*` SDN do not match, and must not be deleted even
-        # when an `inspect`-tagged VM is plugged into one of their VNETs.
+        # (referenced via sdn_config=None) and the legacy static `inspvmz`
+        # SDN that older versions built templates in do not match, and must
+        # not be deleted even when an `inspect`-tagged VM is plugged into one
+        # of their VNETs.
         # Zones that VMs we created are plugged into. Filtered to provider
         # zones only, so attaching a sandbox VM to a user-pre-existing VNET
         # does not drag the user's zone into the deletion set.
@@ -384,13 +375,9 @@ class InfraCommands(abc.ABC):
             if is_ephemeral_zone(zone["zone"]):
                 zones_to_delete.add(zone["zone"])
 
-        noticed_ipam_mappings = [
-            mapping.to_ipam_mapping()
-            for mapping in await self.sdn_commands.read_all_ipam_mappings()
-            if mapping.zone in zones_to_delete
-            and mapping.gateway is None
-            and mapping.mac is not None
-        ]
+        noticed_ipam_mappings = await self.sdn_commands.read_zone_ipam_mappings(
+            zone_ids=zones_to_delete
+        )
 
         if not noticed_vms and not zones_to_delete:
             self.logger.info(

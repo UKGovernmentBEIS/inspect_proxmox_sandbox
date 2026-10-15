@@ -231,7 +231,7 @@ async def test_sample_init_precheck_ignores_pre_existing_vnets(
 
     sdn_mock = MagicMock()
     # Pre-existing user vnets in user-named zones; none matches ZONE_REGEX.
-    # Includes the static built-in SDN (intentionally permanent) and a
+    # Includes the legacy static built-in SDN from older versions and a
     # near-miss user zone whose 7-char *prefix* would match an unanchored
     # pattern but which is not a provider zone.
     sdn_mock.read_all_vnets = AsyncMock(
@@ -260,7 +260,7 @@ async def test_sample_init_precheck_ignores_pre_existing_vnets(
 
             assert not infra.cleanup_no_id.called, (
                 "Pre-check must NOT call cleanup_no_id when only pre-existing "
-                "user VNETs (or the static inspvm* SDN) are present."
+                "user VNETs (or the legacy static inspvmz SDN) are present."
             )
 
         finally:

@@ -539,8 +539,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         Only VNETs in zones matching the provider's ephemeral-zone naming
         convention are considered leftovers. Pre-existing user VNETs
-        (referenced via sdn_config=None) and the static `inspvm*` SDN are
-        deliberately ignored — they are expected to persist across samples.
+        (referenced via sdn_config=None) and the legacy static `inspvmz` SDN
+        are deliberately ignored — they are expected to persist across samples.
 
         Logs errors but does not raise - if the instance is dirty,
         the subsequent setup will fail and the error handler will deal with it.
