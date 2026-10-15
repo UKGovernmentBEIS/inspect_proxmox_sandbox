@@ -49,8 +49,9 @@ def is_ephemeral_zone(zone_id: str) -> bool:
 
 # Two characters, so a built-in template's build zone can't share a name with
 # a sample's zone (three-character prefix) for any task name of three or more
-# characters. Older versions used a permanent `inspvmz` zone instead; that is
-# not ours to sweep, since templates built back then still reference its VNET.
+# characters. A task named exactly `bi` does share the namespace, but that is
+# confusing rather than damaging: the build zone is torn down before the
+# sample's own zone is created, so the two are never alive at once.
 BUILT_IN_IDS_PREFIX = "bi"
 
 

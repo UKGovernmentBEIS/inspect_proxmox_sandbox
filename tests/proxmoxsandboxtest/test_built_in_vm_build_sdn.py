@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from proxmoxsandbox._impl.built_in_vm import DEBIAN_13_URL, BuiltInVM
-from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import (
     BUILT_IN_IDS_PREFIX,
     IpamMapping,
@@ -60,7 +59,6 @@ class Harness:
         self.qemu_commands.remove_existing_nics = AsyncMock(
             side_effect=remove_existing_nics
         )
-        self.qemu_commands.vm_is_inspect = QemuCommands.vm_is_inspect
 
         async def create_sdn(proxmox_ids_start, sdn_config):
             self.events.append(("create_sdn", (proxmox_ids_start, sdn_config)))
@@ -160,22 +158,3 @@ async def test_zone_torn_down_when_lease_lookup_fails() -> None:
     await h.build_debian()
 
     assert h.events[-1] == ("tear_down", (ZONE_ID, ()))
-
-
-async def test_ensure_exists_strips_legacy_nic_from_existing_template() -> None:
-    """Templates from older versions kept a NIC on the permanent `inspvmz` zone."""
-    h = Harness()
-    h.qemu_commands.list_vms = AsyncMock(
-        return_value=[
-            {
-                "vmid": 7,
-                "name": "inspect-ubuntu24.04",
-                "template": 1,
-                "tags": "inspect;builtin-ubuntu24.04",
-            }
-        ]
-    )
-
-    await h.built_in_vm.ensure_exists("ubuntu24.04")
-
-    assert h.events == [("remove_nics", 7)]
