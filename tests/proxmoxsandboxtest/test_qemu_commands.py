@@ -4,7 +4,7 @@ import pytest
 
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, VnetAliases
-from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
+from proxmoxsandbox._impl.sdn_commands import SdnCommands
 from proxmoxsandbox.schema import (
     SdnConfig,
     VmConfig,
@@ -58,6 +58,11 @@ async def test_none_nic_from_template_tag(
     auto_sdn_vnet_aliases: VnetAliases,
     built_in_vm: BuiltInVM,
 ):
+    """nics=None on existing_vm_template_tag inherits the template's NICs.
+
+    Built-in templates carry none (their build-time NIC is removed), so the
+    clone gets none either, even though an SDN with a VNET is available.
+    """
     await built_in_vm.ensure_exists("ubuntu24.04")
 
     new_vm_id = await qemu_commands.create_and_start_vm(
@@ -72,8 +77,7 @@ async def test_none_nic_from_template_tag(
     )
 
     new_vm = await qemu_commands.read_vm(new_vm_id)
-    assert "net0" in new_vm
-    assert STATIC_SDN_START in new_vm["net0"]
+    assert not any(key.startswith("net") for key in new_vm)
     assert "inspect" in new_vm["tags"]
     assert "builtin-ubuntu24.04" in new_vm["tags"]
 

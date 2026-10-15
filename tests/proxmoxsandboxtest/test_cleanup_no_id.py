@@ -12,7 +12,7 @@ import pytest
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
-from proxmoxsandbox._impl.sdn_commands import is_ephemeral_zone
+from proxmoxsandbox._impl.sdn_commands import SdnCommands, is_ephemeral_zone
 
 
 def _make_infra(
@@ -50,6 +50,9 @@ def _make_infra(
     infra.sdn_commands.list_sdn_zones = AsyncMock(return_value=zones or [])
     infra.sdn_commands.read_all_vnets = AsyncMock(return_value=vnets or [])
     infra.sdn_commands.read_all_ipam_mappings = AsyncMock(return_value=ipam or [])
+    infra.sdn_commands.read_zone_ipam_mappings = (
+        SdnCommands.read_zone_ipam_mappings.__get__(infra.sdn_commands)
+    )
     infra.sdn_commands.tear_down_sdn_zones_and_vnets = AsyncMock()
 
     # Bind the real cleanup_no_id and find_all_zones onto the mock so the
@@ -125,6 +128,8 @@ async def test_cleanup_targets_provider_zone_via_regex():
     [
         ("tlo123z", True),
         ("000000z", True),
+        # Zone a built-in template is built in (BUILT_IN_IDS_PREFIX).
+        ("bi123z", True),
         # Near-miss user-owned names that share a 7-char prefix with a
         # provider zone — these must NOT be claimed for deletion.
         ("abc123za", False),
@@ -132,8 +137,6 @@ async def test_cleanup_targets_provider_zone_via_regex():
         ("abc123zz", False),
         # Conforming substring not at the start.
         ("xabc123z", False),
-        # Static built-in SDN.
-        ("inspvmz", False),
         # Generic user-named zones.
         ("user_zone", False),
         ("a254c5f5", False),
@@ -177,23 +180,19 @@ async def test_cleanup_skips_zone_with_matching_prefix_only():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_skips_static_inspvm_zone():
-    """Static `inspvm*` SDN is not swept by cleanup_no_id.
-
-    The static `inspvm*` SDN is intentionally permanent and must not be
-    swept by cleanup_no_id, even though the provider created it.
-    """
+async def test_cleanup_skips_user_zone_with_vnet():
+    """A user zone is not swept by cleanup_no_id even when it has VNETs."""
     infra = _make_infra(
         vms=[],
-        zones=[{"zone": "inspvmz", "type": "simple"}],
-        vnets=[{"vnet": "inspvmv0", "zone": "inspvmz"}],
+        zones=[{"zone": "user_zone", "type": "simple"}],
+        vnets=[{"vnet": "uservnet", "zone": "user_zone"}],
     )
 
     await infra.cleanup_no_id(skip_confirmation=True)
 
     # No deletion call at all when nothing is targeted.
     assert not infra.sdn_commands.tear_down_sdn_zones_and_vnets.called, (
-        "static inspvm* SDN must not be torn down"
+        "user zone must not be torn down"
     )
 
 

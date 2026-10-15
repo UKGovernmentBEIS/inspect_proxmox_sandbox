@@ -1,12 +1,12 @@
 import abc
+import contextlib
 import os
 import subprocess
 import tempfile
 from io import BytesIO
-from ipaddress import ip_address, ip_network
 from logging import getLogger
 from pathlib import Path
-from typing import BinaryIO, Dict, cast, get_args
+from typing import AsyncIterator, BinaryIO, Dict, cast, get_args
 from urllib.parse import urlparse
 
 import httpx
@@ -18,15 +18,9 @@ from inspect_ai.util import trace_action
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
-from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
+from proxmoxsandbox._impl.sdn_commands import BUILT_IN_IDS_PREFIX, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
-from proxmoxsandbox.schema import (
-    DhcpRange,
-    SdnConfig,
-    SubnetConfig,
-    VmSourceConfig,
-    VnetConfig,
-)
+from proxmoxsandbox.schema import VmSourceConfig
 
 VM_TIMEOUT = 1200
 CLOUD_INIT_TIMEOUT = 1200
@@ -44,8 +38,6 @@ UBUNTU_VMDK_FILENAME = "ubuntu-noble-24.04-cloudimg.vmdk"
 DEBIAN_13_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
 KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.4/kali-linux-2025.4-cloud-genericcloud-amd64.tar.xz"
 KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
-
-STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
 
 
 async def download_to_file(url: str, destination: Path) -> None:
@@ -384,13 +376,13 @@ runcmd:
             built_in, source_image_name, source_image_source_url
         )
 
-        await self.ensure_static_sdn_exists()
-
-        await self.startup_vm(
-            next_available_vm_id,
-            built_in,
-            f"import/{source_image_name}/{ova_vmdk_filename}",
-        )
+        async with self.build_sdn() as vnet_id:
+            await self.startup_vm(
+                next_available_vm_id,
+                built_in,
+                f"import/{source_image_name}/{ova_vmdk_filename}",
+                vnet_id=vnet_id,
+            )
 
     async def ensure_exists_from_qcow2(
         self,
@@ -404,11 +396,13 @@ runcmd:
             built_in, source_image_name, source_image_source_url
         )
 
-        await self.ensure_static_sdn_exists()
-
-        await self.startup_vm(
-            next_available_vm_id, built_in, f"import/{source_image_name}"
-        )
+        async with self.build_sdn() as vnet_id:
+            await self.startup_vm(
+                next_available_vm_id,
+                built_in,
+                f"import/{source_image_name}",
+                vnet_id=vnet_id,
+            )
 
     async def ensure_exists_from_xz(
         self,
@@ -460,16 +454,16 @@ runcmd:
                 Path(download_path).unlink()
                 Path(source_image_name).unlink()
 
-        await self.ensure_static_sdn_exists()
-
-        await self.startup_vm(
-            next_available_vm_id,
-            built_in,
-            f"import/{disk_renamed}",
-            user_data=user_data,
-            disk_gib=disk_gib,
-            cloud_init_timeout=cloud_init_timeout,
-        )
+        async with self.build_sdn() as vnet_id:
+            await self.startup_vm(
+                next_available_vm_id,
+                built_in,
+                f"import/{disk_renamed}",
+                vnet_id=vnet_id,
+                user_data=user_data,
+                disk_gib=disk_gib,
+                cloud_init_timeout=cloud_init_timeout,
+            )
 
     async def ensure_source_uploaded(
         self,
@@ -510,10 +504,17 @@ runcmd:
         next_available_vm_id: int,
         built_in: str,
         import_source: str,
+        vnet_id: str,
         user_data: str = DEFAULT_USER_DATA,
         disk_gib: int | None = None,
         cloud_init_timeout: int = CLOUD_INIT_TIMEOUT,
     ) -> None:
+        """Import, boot, cloud-init and template a VM, with `vnet_id` as its uplink.
+
+        The finished template has no NIC: like OVA templates, clones get
+        theirs from their own sample's SDN, and `vnet_id` is a build-time
+        network that goes away afterwards.
+        """
         name = f"inspect-{built_in}"
 
         with trace_action(
@@ -536,7 +537,7 @@ runcmd:
                     + f"import-from={LOCAL_STORAGE}:{import_source},"
                     + "format=qcow2,cache=writeback",
                     "scsihw": "virtio-scsi-single",
-                    "net0": f"virtio,bridge={STATIC_VNET_ID}",
+                    "net0": f"virtio,bridge={vnet_id}",
                     "serial0": "socket",
                     "vga": "none",
                     "tablet": 0,
@@ -650,34 +651,46 @@ runcmd:
 
             await remove_cdrom()
 
-    async def ensure_static_sdn_exists(self):
-        existing_zones = await self.sdn_commands.list_sdn_zones()
+            # Also releases the build-time DHCP lease, which would otherwise
+            # block deleting the build zone's subnet.
+            await self.qemu_commands.remove_existing_nics(next_available_vm_id)
 
-        exists_already = any(
-            zone_info["zone"] and zone_info["zone"] == f"{STATIC_SDN_START}z"
-            for zone_info in existing_zones
+    @contextlib.asynccontextmanager
+    async def build_sdn(self) -> AsyncIterator[str]:
+        """An ephemeral SDN zone to build a template in; yields its VNET ID.
+
+        Created and torn down exactly like a sample's `auto` SDN, so the
+        template gets DHCP and SNAT for cloud-init. The zone is registered
+        with `sdn_commands` so an interrupted build is still swept by
+        `task_cleanup`, and its name matches `is_ephemeral_zone` so an
+        orphaned one is swept by `cleanup_no_id`.
+        """
+        proxmox_ids_start = await self.sdn_commands.find_proxmox_ids_start(
+            prefix=BUILT_IN_IDS_PREFIX
         )
-
-        if not exists_already:
-            await self.sdn_commands.create_sdn(
-                proxmox_ids_start=STATIC_SDN_START,
-                sdn_config=SdnConfig(
-                    vnet_configs=(
-                        VnetConfig(
-                            subnets=(
-                                SubnetConfig(
-                                    cidr=ip_network("192.168.99.0/24"),
-                                    gateway=ip_address("192.168.99.1"),
-                                    snat=True,
-                                    dhcp_ranges=(
-                                        DhcpRange(
-                                            start=ip_address("192.168.99.50"),
-                                            end=ip_address("192.168.99.100"),
-                                        ),
-                                    ),
-                                ),
-                            )
-                        ),
-                    )
-                ),
+        sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
+            proxmox_ids_start=proxmox_ids_start, sdn_config="auto"
+        )
+        if sdn_zone_id is None:
+            raise RuntimeError("create_sdn returned no zone for an auto SDN")
+        self.sdn_commands.register_sdn_zone(sdn_zone_id)
+        try:
+            yield vnet_aliases[0][0]
+        finally:
+            # Unlike a sample's VMs, the template outlives its zone, so no VM
+            # deletion releases its lease for us; collect whatever is left.
+            try:
+                ipam_mappings = await self.sdn_commands.read_zone_ipam_mappings(
+                    zone_ids={sdn_zone_id}
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"failed to read IPAM leases in build zone {sdn_zone_id}: {e}"
+                )
+                ipam_mappings = []
+            await self.sdn_commands.tear_down_sdn_zone_and_vnet(
+                sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings
+            )
+            self.sdn_commands.deregister_sdn_resources(
+                sdn_zone_id=sdn_zone_id, ipam_mappings=()
             )
