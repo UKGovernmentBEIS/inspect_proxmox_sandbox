@@ -137,8 +137,6 @@ async def test_cleanup_targets_provider_zone_via_regex():
         ("abc123zz", False),
         # Conforming substring not at the start.
         ("xabc123z", False),
-        # Legacy static built-in SDN created by older versions.
-        ("inspvmz", False),
         # Generic user-named zones.
         ("user_zone", False),
         ("a254c5f5", False),
@@ -182,24 +180,19 @@ async def test_cleanup_skips_zone_with_matching_prefix_only():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_skips_static_inspvm_zone():
-    """The legacy static `inspvmz` SDN is not swept by cleanup_no_id.
-
-    Older versions built templates in a permanent `inspvmz` zone, and
-    templates built back then still reference its VNET, so it is not ours
-    to sweep even though the provider created it.
-    """
+async def test_cleanup_skips_user_zone_with_vnet():
+    """A user zone is not swept by cleanup_no_id even when it has VNETs."""
     infra = _make_infra(
         vms=[],
-        zones=[{"zone": "inspvmz", "type": "simple"}],
-        vnets=[{"vnet": "inspvmv0", "zone": "inspvmz"}],
+        zones=[{"zone": "user_zone", "type": "simple"}],
+        vnets=[{"vnet": "uservnet", "zone": "user_zone"}],
     )
 
     await infra.cleanup_no_id(skip_confirmation=True)
 
     # No deletion call at all when nothing is targeted.
     assert not infra.sdn_commands.tear_down_sdn_zones_and_vnets.called, (
-        "static inspvm* SDN must not be torn down"
+        "user zone must not be torn down"
     )
 
 

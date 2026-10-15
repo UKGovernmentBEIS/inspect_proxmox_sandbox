@@ -358,8 +358,7 @@ class InfraCommands(abc.ABC):
         # Only zones matching the provider's ephemeral-zone naming convention
         # are eligible for sweep — `create_sdn` enforces this convention at
         # creation (sdn_commands.create_sdn). Pre-existing user zones
-        # (referenced via sdn_config=None) and the legacy static `inspvmz`
-        # SDN that older versions built templates in do not match, and must
+        # (referenced via sdn_config=None) do not match, and must
         # not be deleted even when an `inspect`-tagged VM is plugged into one
         # of their VNETs.
         # Zones that VMs we created are plugged into. Filtered to provider
