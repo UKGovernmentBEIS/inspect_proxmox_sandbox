@@ -464,6 +464,29 @@ def test_ec2_units_order_after_their_prerequisites() -> None:
     assert "inspect-proxmox-ec2-hostname.service" in _unit_setting(drop_in, "After")
 
 
+def test_ready_unit_gates_on_the_fixups_and_the_api() -> None:
+    # launch.sh and off-host callers poll this one unit instead of the install log.
+    ready = (
+        EC2_PKG / "usr/lib/systemd/system/inspect-proxmox-ready.service"
+    ).read_text()
+    requires = set(_unit_setting(ready, "Requires"))
+    assert requires == {
+        "pveproxy.service",
+        "inspect-proxmox-ec2-password.service",
+        "inspect-proxmox-ec2-certs.service",
+        "inspect-proxmox-host-configure.service",
+    }
+    after = set(_unit_setting(ready, "After"))
+    assert requires <= after
+    assert "inspect-proxmox-egress-lockdown.service" in after
+    assert "RemainAfterExit=yes" in ready
+    # Every unit it Requires must exist in the bundle.
+    for unit in requires - {"pveproxy.service"}:
+        assert (UNITS / unit).exists() or (
+            EC2_PKG / "usr/lib/systemd/system" / unit
+        ).exists(), unit
+
+
 def test_old_unit_names_stay_resolvable() -> None:
     # Off-host checkers (inspect-aisi-sandbox) still ask systemctl for the
     # pre-deb names.

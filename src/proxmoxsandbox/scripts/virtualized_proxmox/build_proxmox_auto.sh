@@ -155,7 +155,7 @@ ordering = "fully-up"
 EOFANSWERS
 
 # Bump both with each host/debian/changelog entry; same bundle and sha256 as scripts/ec2/userdata.sh.
-INSPECT_PROXMOX_HOST_RELEASE=host-v4
+INSPECT_PROXMOX_HOST_RELEASE=host-v5
 INSPECT_PROXMOX_HOST_BUNDLE_SHA256=
 INSPECT_PROXMOX_HOST_BUNDLE_URL="${INSPECT_PROXMOX_HOST_BUNDLE_URL:-https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/releases/download/$INSPECT_PROXMOX_HOST_RELEASE/inspect-proxmox-host-debs.tar}"
 

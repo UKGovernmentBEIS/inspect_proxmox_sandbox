@@ -133,7 +133,7 @@ echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev
 
 # The contract stamped by the inspect-proxmox-host deb. Read locally rather than over the API: if the halt
 # unit has masked pvedaemon, an API read fails and a fine host looks like a stale one.
-WANT_CONTRACT=4
+WANT_CONTRACT=5
 contract=$(pveversion 2>/dev/null | head -1)
 case "$contract" in
     *.aisi[0-9]*) contract=${contract##*.aisi}; contract=${contract%%[!0-9]*} ;;

@@ -7,13 +7,13 @@ inspect_proxmox_sandbox evaluations. `scripts/ec2/userdata.sh` and
 | Package | Contents |
 |---|---|
 | `inspect-proxmox-host` | Host-isolation firewall rules and storage content types (`inspect-proxmox-host-configure.service`, every boot), the pre-conntrack guard on guest traffic to host services (`inspect-proxmox-block-cloud-metadata.service`, policy in `/etc/inspect-proxmox/host-local.rules`) with the link-local/IPv6 forwarding block, the marker-gated egress lockdown with its timer and fail-deadly halt unit, the `.aisiN` contract stamp with its apt hook, `inspect-proxmox-host-seal`. Depends on the exact rebuilt `pve-qemu-kvm` and `libpve-network-perl` versions and pins them above upstream, so `apt upgrade` holds back anything that needs a newer one until this package is rebased. |
-| `inspect-proxmox-host-ec2` | Boot-time units for AMI-launched hosts: node name, certs, root password keyed on instance-id, `vmbr0` plus NAT on the current management NIC, the SDN dnsmasq resolver shim, and the CloudWatch OTel pipeline for `pvestatd` metrics. |
+| `inspect-proxmox-host-ec2` | Boot-time units for AMI-launched hosts: node name, certs, root password keyed on instance-id, `vmbr0` plus NAT on the current management NIC, the SDN dnsmasq resolver shim, the CloudWatch OTel pipeline for `pvestatd` metrics, and `inspect-proxmox-ready.service`, active once those have run and `pveproxy` is up. |
 | `pve-qemu-kvm 11.0.5-0+aisi1` | pve-qemu 11.0.3-3's packaging on upstream QEMU 11.0.5 (virtio-net RSC, VAPIC, io-channel-socket and scsi-disk fixes) plus two AHCI fixes from QEMU master. Drop once a pve-no-subscription build carries all of these. Built by `rebuilds/pve-qemu/build.sh`. |
 | `libpve-network-perl 1.6.7+aisi1` | Upstream plus the IPAM fix from [pve-devel, November 2025](https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html). Rebase per upstream release until it lands. Built by `rebuilds/pve-network/build.sh`. |
 
 ## Contract
 
-The package version is the contract number: `inspect-proxmox-host 4` stamps `.aisi4` onto
+The package version is the contract number: `inspect-proxmox-host 5` stamps `.aisi5` onto
 the version `pveversion` prints and the API serves. `stamp-contract` checks that the
 patched behaviour is present before stamping, so a host that has lost a patch reports
 contract 0 rather than lying. Bump `debian/changelog` whenever something an off-host caller

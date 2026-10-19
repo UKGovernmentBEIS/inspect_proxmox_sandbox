@@ -12,7 +12,7 @@ exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | te
 # The sha256 is of the released inspect-proxmox-host-debs.tar; empty skips the check, which
 # is only acceptable for a candidate bundle you built yourself.
 # Not traced: an override URL may be presigned, and this log ends up in the image.
-INSPECT_PROXMOX_HOST_RELEASE=host-v4
+INSPECT_PROXMOX_HOST_RELEASE=host-v5
 INSPECT_PROXMOX_HOST_BUNDLE_SHA256=
 set +x
 INSPECT_PROXMOX_HOST_BUNDLE_URL="${INSPECT_PROXMOX_HOST_BUNDLE_URL:-https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/releases/download/$INSPECT_PROXMOX_HOST_RELEASE/inspect-proxmox-host-debs.tar}"
