@@ -6,14 +6,14 @@ inspect_proxmox_sandbox evaluations. `scripts/ec2/userdata.sh` and
 
 | Package | Contents |
 |---|---|
-| `inspect-proxmox-host` | Host-isolation firewall rules and storage content types (`inspect-proxmox-host-configure.service`, every boot), link-local/IPv6 forwarding block, the marker-gated egress lockdown with its timer and fail-deadly halt unit, the `.aisiN` contract stamp with its apt hook, `inspect-proxmox-host-seal`. Depends on the rebuilt `pve-qemu-kvm` and `libpve-network-perl` and pins them above upstream. |
+| `inspect-proxmox-host` | Host-isolation firewall rules and storage content types (`inspect-proxmox-host-configure.service`, every boot), the pre-conntrack guard on guest traffic to host services (`inspect-proxmox-block-cloud-metadata.service`, policy in `/etc/inspect-proxmox/host-local.rules`) with the link-local/IPv6 forwarding block, the marker-gated egress lockdown with its timer and fail-deadly halt unit, the `.aisiN` contract stamp with its apt hook, `inspect-proxmox-host-seal`. Depends on the rebuilt `pve-qemu-kvm` and `libpve-network-perl` and pins them above upstream. |
 | `inspect-proxmox-host-ec2` | Boot-time units for AMI-launched hosts: node name, certs, root password keyed on instance-id, `vmbr0` plus NAT on the current management NIC, the SDN dnsmasq resolver shim, and the CloudWatch OTel pipeline for `pvestatd` metrics. |
-| `pve-qemu-kvm 11.0.3-3+aisi1` | Upstream plus two scsi-disk fixes from pve-qemu master. Drop once `>= 11.1.1-1` is in pve-no-subscription. Built by `rebuilds/pve-qemu/build.sh`. |
+| `pve-qemu-kvm 11.0.5-0+aisi1` | pve-qemu 11.0.3-3's packaging on upstream QEMU 11.0.5 (virtio-net RSC, VAPIC, io-channel-socket and scsi-disk fixes) plus two AHCI fixes from QEMU master. Drop once a pve-no-subscription build carries all of these. Built by `rebuilds/pve-qemu/build.sh`. |
 | `libpve-network-perl 1.6.7+aisi1` | Upstream plus the IPAM fix from [pve-devel, November 2025](https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html). Rebase per upstream release until it lands. Built by `rebuilds/pve-network/build.sh`. |
 
 ## Contract
 
-The package version is the contract number: `inspect-proxmox-host 3` stamps `.aisi3` onto
+The package version is the contract number: `inspect-proxmox-host 4` stamps `.aisi4` onto
 the version `pveversion` prints and the API serves. `stamp-contract` checks that the
 patched behaviour is present before stamping, so a host that has lost a patch reports
 contract 0 rather than lying. Bump `debian/changelog` whenever something an off-host caller
@@ -48,3 +48,4 @@ To install a bundle from somewhere else, e.g. an S3 presigned URL while testing,
 The payload directories mirror the target filesystem: `inspect-proxmox-host/usr/libexec/...`
 lands at `/usr/libexec/...`. Units go in `usr/lib/systemd/system`; debhelper enables and
 starts every unit with an `[Install]` section on install, which is why the halt unit has none.
+`etc/` holds conffiles, so an admin's edits to `host-local.rules` survive upgrades.

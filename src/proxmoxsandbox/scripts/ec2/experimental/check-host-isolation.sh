@@ -133,7 +133,7 @@ echo "host $node, mgmt NIC ${nic:-none}, kernel $(uname -r), $(pveversion 2>/dev
 
 # The contract stamped by the inspect-proxmox-host deb. Read locally rather than over the API: if the halt
 # unit has masked pvedaemon, an API read fails and a fine host looks like a stale one.
-WANT_CONTRACT=3
+WANT_CONTRACT=4
 contract=$(pveversion 2>/dev/null | head -1)
 case "$contract" in
     *.aisi[0-9]*) contract=${contract##*.aisi}; contract=${contract%%[!0-9]*} ;;
@@ -423,8 +423,8 @@ only_endpoints_on_443() { # cidr...
     [ -z "$bad" ] && [ "$known" -gt 0 ]
 }
 # IMDS paths from https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-categories.html
-mac=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/mac 2>/dev/null)
-vpc_cidrs=$([ -n "$mac" ] && /usr/local/bin/call-ec2-hypervisor \
+mac=$(/usr/libexec/inspect-proxmox/imds latest/meta-data/mac 2>/dev/null)
+vpc_cidrs=$([ -n "$mac" ] && /usr/libexec/inspect-proxmox/imds \
     "latest/meta-data/network/interfaces/macs/$mac/vpc-ipv4-cidr-blocks" 2>/dev/null)
 if [ "$sweep" = 0 ]; then
     skip "TCP/443 sweep of the VPC" "--no-sweep"

@@ -9,7 +9,7 @@ exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | te
 
 # Bump with each host/debian/changelog entry. The bundle holds inspect-proxmox-host,
 # inspect-proxmox-host-ec2 and the AISI rebuilds of pve-qemu-kvm and libpve-network-perl.
-INSPECT_PROXMOX_HOST_RELEASE=host-v3
+INSPECT_PROXMOX_HOST_RELEASE=host-v4
 INSPECT_PROXMOX_HOST_BUNDLE_URL="${INSPECT_PROXMOX_HOST_BUNDLE_URL:-https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/releases/download/$INSPECT_PROXMOX_HOST_RELEASE/inspect-proxmox-host-debs.tar}"
 echo "INSPECT_PROXMOX_HOST_BUNDLE_URL='$INSPECT_PROXMOX_HOST_BUNDLE_URL'" > /root/proxmox-install.env
 

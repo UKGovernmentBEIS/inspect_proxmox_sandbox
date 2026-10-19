@@ -11,7 +11,7 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironmentConfig,
 )
 
-HOST_CONTRACT = 3
+HOST_CONTRACT = 4
 
 
 def host_contract(version: str) -> int:
