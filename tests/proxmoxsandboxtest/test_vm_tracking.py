@@ -1,19 +1,25 @@
-"""A clone is tracked for task_cleanup from the moment it exists."""
+"""VMs are tracked for task_cleanup from the moment they exist, by int ID."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 
+def _qemu(api) -> QemuCommands:
+    return QemuCommands(api, "pve1", "local", AsyncMock(), MagicMock())
+
+
 @pytest.mark.asyncio
 async def test_clone_is_tracked_even_if_it_never_becomes_ready():
     api = AsyncMock()
-    api.request = AsyncMock(return_value=4242)  # /cluster/nextid
-    task_wrapper = AsyncMock()
-    qemu = QemuCommands(api, "pve1", "local", task_wrapper, MagicMock())
+    # PVE returns /cluster/nextid as a string; tracking must still key by int
+    # so that IDs read back from the VM list (ints) match.
+    api.request = AsyncMock(return_value="4242")
+    qemu = _qemu(api)
 
     with patch.object(
         qemu,
@@ -31,3 +37,41 @@ async def test_clone_is_tracked_even_if_it_never_becomes_ready():
             )
 
     assert 4242 in qemu._tracked_vms
+    qemu.deregister_vms([4242])
+    assert qemu._tracked_vms == {}
+
+
+@pytest.mark.asyncio
+async def test_task_cleanup_forgets_a_vm_that_is_already_gone():
+    """A tracked VM deleted behind our back is dropped, not retried for 300s.
+
+    Stopping a missing VM still returns a UPID; the status read afterwards is
+    the first call to say the VM does not exist.
+    """
+    request = httpx.Request("GET", "https://pve/api2/json/x")
+    missing = httpx.HTTPStatusError(
+        "500",
+        request=request,
+        response=httpx.Response(
+            500,
+            text="Configuration file 'nodes/pve1/qemu-server/4242.conf' does not exist",
+            request=request,
+        ),
+    )
+
+    async def fake_request(method, path, **kwargs):
+        if path.endswith("/status/stop"):
+            return "UPID:pve1:qmstop"
+        raise missing
+
+    api = MagicMock()
+    api.request = AsyncMock(side_effect=fake_request)
+    qemu = _qemu(api)
+    qemu.register_vm(
+        vm_id=4242,
+        vm_config=VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
+    )
+
+    await qemu.task_cleanup()
+
+    assert qemu._tracked_vms == {}

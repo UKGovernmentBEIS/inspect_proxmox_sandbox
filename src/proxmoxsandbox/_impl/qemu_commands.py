@@ -193,9 +193,13 @@ class QemuCommands(abc.ABC):
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
 
+        # Only retry "still running". Stopping a missing VM still returns a
+        # UPID, so a 500 here would otherwise be retried for 300s and come out
+        # as a RetryError that hides the "does not exist" callers look for.
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
             stop=tenacity.stop_after_delay(300),
+            retry=tenacity.retry_if_exception_type(ValueError),
         )
         async def is_not_running() -> None:
             vm_status = await self.async_proxmox.request(
@@ -249,7 +253,8 @@ class QemuCommands(abc.ABC):
         return bridges
 
     async def find_next_available_vm_id(self) -> int:
-        return await self.async_proxmox.request("GET", "/cluster/nextid")
+        # PVE returns this as a JSON string; tracking and list_vms use ints
+        return int(await self.async_proxmox.request("GET", "/cluster/nextid"))
 
     async def start(
         self,

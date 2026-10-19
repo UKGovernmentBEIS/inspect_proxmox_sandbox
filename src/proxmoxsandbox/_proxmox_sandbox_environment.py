@@ -412,6 +412,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             # leftover provider-managed VNETs or inspect-tagged VMs here are
             # orphans from a previous sample whose init failed or whose cleanup
             # didn't run. User pre-existing VNETs are ignored by this check.
+            # A pre-clean that cannot finish fails this sample: building on
+            # top of the leftovers would leave two samples' VMs running.
             await cls._ensure_instance_clean(infra_commands, instance.instance_id)
 
             task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
@@ -478,7 +480,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             # cleanup via task_cleanup(cleanup=...), so whatever got created
             # stays up (still tracked) for task_cleanup to sweep, or for the
             # user to poke at under --no-sandbox-cleanup. The next sample to
-            # acquire this instance pre-cleans it in _ensure_instance_clean.
+            # acquire this instance pre-cleans it in _ensure_instance_clean,
+            # and fails there (releasing the instance again) if it cannot.
             cls.logger.info(
                 f"sample_init failed on instance {instance.instance_id}: {e}. "
                 f"Leaving any partial infrastructure for task_cleanup; "
@@ -499,33 +502,25 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         and the static `inspvm*` SDN are deliberately ignored — they are
         expected to persist across samples.
 
-        Logs errors but does not raise - if the instance is dirty,
-        the subsequent setup will fail and the error handler will deal with it.
+        Raises if the instance cannot be checked or cleaned. Carrying on
+        would not necessarily fail: a new sample gets fresh IDs, so it can
+        come up next to the leftovers and leave both sets of VMs running.
         """
-        try:
-            vnets = await infra_commands.sdn_commands.read_all_vnets()
-            leftover_vnets = [
-                v for v in vnets if "zone" in v and is_ephemeral_zone(v["zone"])
-            ]
-            vms = await infra_commands.qemu_commands.list_vms()
-            leftover_vms = [
-                v for v in vms if QemuCommands.vm_is_inspect(v, template=False)
-            ]
+        vnets = await infra_commands.sdn_commands.read_all_vnets()
+        leftover_vnets = [
+            v for v in vnets if "zone" in v and is_ephemeral_zone(v["zone"])
+        ]
+        vms = await infra_commands.qemu_commands.list_vms()
+        leftover_vms = [v for v in vms if QemuCommands.vm_is_inspect(v, template=False)]
 
-            if leftover_vnets or leftover_vms:
-                cls.logger.warning(
-                    f"Instance {instance_id} has {len(leftover_vnets)} "
-                    f"leftover provider-managed VNETs and {len(leftover_vms)} "
-                    f"leftover VMs! Cleaning up before proceeding..."
-                )
-                await infra_commands.cleanup_no_id(skip_confirmation=True)
-                cls.logger.info(f"Pre-cleaned instance {instance_id}")
-        except Exception as e:
-            cls.logger.error(
-                f"Failed to check/clean instance {instance_id}: "
-                f"{type(e).__name__}: {e}. "
-                f"Proceeding anyway - setup will fail if instance is dirty."
+        if leftover_vnets or leftover_vms:
+            cls.logger.warning(
+                f"Instance {instance_id} has {len(leftover_vnets)} "
+                f"leftover provider-managed VNETs and {len(leftover_vms)} "
+                f"leftover VMs! Cleaning up before proceeding..."
             )
+            await infra_commands.cleanup_no_id(skip_confirmation=True)
+            cls.logger.info(f"Pre-cleaned instance {instance_id}")
 
     @classmethod
     @override
@@ -644,6 +639,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         cls._init_package_log_level()
         if id is None:
             await cls.create_proxmox_instance_pools()
+            failures: list[str] = []
             for instance in cls.proxmox_pool.all_instances():
                 async_proxmox_api = AsyncProxmoxAPI.from_instance_config(instance)
                 infra_commands = InfraCommands.build(
@@ -651,7 +647,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     instance.node,
                     instance.image_storage,
                 )
-                await infra_commands.cleanup_no_id()
+                try:
+                    await infra_commands.cleanup_no_id()
+                except Exception as e:
+                    # Keep going: one bad host should not stop the others
+                    # being swept.
+                    cls.logger.error(
+                        f"cleanup failed on instance {instance.instance_id}: {e}"
+                    )
+                    failures.append(instance.instance_id)
+            if failures:
+                raise RuntimeError(
+                    f"cleanup left resources behind on instances {failures}"
+                )
         else:
             print("\n[red]Cleanup by ID not implemented[/red]\n")
 

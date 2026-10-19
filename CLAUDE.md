@@ -39,7 +39,8 @@ are withheld to prevent cascading failures. The exception is a failed
 `sample_init`: it tears nothing down (only `task_cleanup` knows whether the
 user asked for cleanup, and `--no-sandbox-cleanup` should hold a half-built
 range up), releases the instance, and relies on the next `sample_init`'s
-pre-clean to sweep the leftovers.
+pre-clean to sweep the leftovers. A pre-clean that cannot finish fails that
+sample too, rather than building a second sample next to the leftovers.
 
 ### Inspect AI Lifecycle Integration
 Inspect calls these methods in order:

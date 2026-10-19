@@ -320,14 +320,15 @@ async def test_sample_init_precheck_ignores_pre_existing_vnets(
 
 
 @pytest.mark.asyncio
-async def test_sample_init_precheck_cleanup_fails_but_continues(
+async def test_sample_init_precheck_cleanup_failure_fails_the_sample(
     simple_config_file,
     mock_proxmox_api,
 ):
-    """Test that pre-check logs error if cleanup fails, but continues.
+    """A pre-clean that cannot remove the leftovers fails sample_init.
 
-    If the pre-check detects VNETs but cleanup fails, it should log an error
-    and continue (not raise).
+    Carrying on would build this sample's VMs next to the previous sample's,
+    so the error propagates and nothing new is created. The instance still
+    goes back to the pool: the next sample retries the pre-clean.
     """
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
 
@@ -338,9 +339,6 @@ async def test_sample_init_precheck_cleanup_fails_but_continues(
     infra = _make_infra_mock(
         sdn_commands=sdn_mock,
         cleanup_no_id=AsyncMock(side_effect=RuntimeError("Pre-check cleanup failed")),
-        find_proxmox_ids_start=AsyncMock(
-            side_effect=Exception("Stopping after pre-check")
-        ),
     )
     p1, p2, p3 = _patch_infra(infra)
 
@@ -349,14 +347,17 @@ async def test_sample_init_precheck_cleanup_fails_but_continues(
             await ProxmoxSandboxEnvironment.task_init("test_task", None)
 
             config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="default")
+            pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["default"]
 
-            # Pre-check cleanup fails but sample_init continues
-            # (will fail later for different reason)
-            with pytest.raises(Exception, match="Stopping after pre-check"):
+            with pytest.raises(RuntimeError, match="Pre-check cleanup failed"):
                 await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
 
-            # Verify cleanup was attempted despite failure
-            assert infra.cleanup_no_id.called, "Pre-check should have attempted cleanup"
+            assert infra.cleanup_no_id.called
+            assert not infra.find_proxmox_ids_start.called, (
+                "sample_init must stop before allocating IDs for new VMs"
+            )
+            assert not infra.create_sdn_and_vms.called
+            assert pool.qsize() == 1, "Instance goes back to the pool"
 
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
@@ -364,27 +365,18 @@ async def test_sample_init_precheck_cleanup_fails_but_continues(
 
 
 @pytest.mark.asyncio
-async def test_sample_init_precheck_read_vnets_fails_but_continues(
+async def test_sample_init_precheck_read_failure_fails_the_sample(
     simple_config_file,
     mock_proxmox_api,
 ):
-    """Test that pre-check logs error if read_all_vnets fails, but continues.
-
-    If the pre-check cannot read VNETs, it should log an error and continue
-    (not raise).
-    """
+    """If the pre-check cannot even list VNETs, sample_init fails there."""
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
 
     sdn_mock = MagicMock()
     sdn_mock.read_all_vnets = AsyncMock(
         side_effect=Exception("API error: cannot read VNETs")
     )
-    infra = _make_infra_mock(
-        sdn_commands=sdn_mock,
-        find_proxmox_ids_start=AsyncMock(
-            side_effect=Exception("Stopping after pre-check")
-        ),
-    )
+    infra = _make_infra_mock(sdn_commands=sdn_mock)
     p1, p2, p3 = _patch_infra(infra)
 
     with p1, p2, p3:
@@ -392,16 +384,14 @@ async def test_sample_init_precheck_read_vnets_fails_but_continues(
             await ProxmoxSandboxEnvironment.task_init("test_task", None)
 
             config = ProxmoxSandboxEnvironmentConfig(instance_pool_id="default")
+            pool = ProxmoxSandboxEnvironment.proxmox_pool._instance_pools["default"]
 
-            # Pre-check read fails but sample_init continues
-            # (will fail later for different reason)
-            with pytest.raises(Exception, match="Stopping after pre-check"):
+            with pytest.raises(Exception, match="cannot read VNETs"):
                 await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
 
-            # Cleanup should not have been called (couldn't read VNETs)
-            assert not infra.cleanup_no_id.called, (
-                "Cleanup should not be called if read_all_vnets fails"
-            )
+            assert not infra.cleanup_no_id.called
+            assert not infra.create_sdn_and_vms.called
+            assert pool.qsize() == 1, "Instance goes back to the pool"
 
         finally:
             if "PROXMOX_CONFIG_FILE" in os.environ:
