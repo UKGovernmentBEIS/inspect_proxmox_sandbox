@@ -83,10 +83,11 @@ class QemuCommands(abc.ABC):
                 await self.destroy_vm(vm_id=vm_id, name=vm_config.name)
                 self.deregister_vm(vm_id)
             except httpx.HTTPStatusError as e:
-                # Proxmox returns 500 (not 404) when a VM config file is missing
+                # Proxmox returns 500 (not 404) when a VM config file is missing.
+                # Match the file name: a missing storage says "does not exist" too.
                 already_gone = (
                     e.response.status_code == 500
-                    and "does not exist" in e.response.text
+                    and f"qemu-server/{vm_id}.conf' does not exist" in e.response.text
                 )
                 if already_gone:
                     self.deregister_vm(vm_id)

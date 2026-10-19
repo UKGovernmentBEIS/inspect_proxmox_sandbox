@@ -291,7 +291,7 @@ runcmd:
         for content in existing_content:
             if content["volid"]:
                 for storage_name in storage_names_to_delete:
-                    if content["volid"].endswith(storage_name):
+                    if content["volid"].endswith(f"/{storage_name}"):
                         upid = await self.async_proxmox.request(
                             "DELETE",
                             f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
@@ -321,7 +321,7 @@ runcmd:
     async def content_exists(self, content_name_end: str) -> bool:
         existing_content = await self.read_all_content()
         return any(
-            content["volid"] and content["volid"].endswith(content_name_end)
+            content["volid"] and content["volid"].endswith(f"/{content_name_end}")
             for content in existing_content
         )
 

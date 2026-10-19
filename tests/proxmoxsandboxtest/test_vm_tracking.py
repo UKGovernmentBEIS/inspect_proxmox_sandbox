@@ -75,3 +75,35 @@ async def test_task_cleanup_forgets_a_vm_that_is_already_gone():
     await qemu.task_cleanup()
 
     assert qemu._tracked_vms == {}
+
+
+@pytest.mark.asyncio
+async def test_task_cleanup_keeps_a_vm_whose_storage_is_missing():
+    """A "does not exist" about some other object does not drop the VM."""
+    request = httpx.Request("DELETE", "https://pve/api2/json/x")
+    other_missing = httpx.HTTPStatusError(
+        "500",
+        request=request,
+        response=httpx.Response(
+            500, text="storage 'local-lvm' does not exist", request=request
+        ),
+    )
+
+    async def fake_request(method, path, **kwargs):
+        if path.endswith("/status/stop"):
+            return "UPID:pve1:qmstop"
+        if path.endswith("/status/current"):
+            return {"status": "stopped"}
+        raise other_missing
+
+    api = MagicMock()
+    api.request = AsyncMock(side_effect=fake_request)
+    qemu = _qemu(api)
+    qemu.register_vm(
+        vm_id=4242,
+        vm_config=VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
+    )
+
+    await qemu.task_cleanup()
+
+    assert 4242 in qemu._tracked_vms

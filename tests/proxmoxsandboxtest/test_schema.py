@@ -280,3 +280,9 @@ def test_vnet_alias_accepts_what_proxmox_accepts(alias: str) -> None:
 def test_vnet_alias_rejects_what_proxmox_rejects(alias: str) -> None:
     with pytest.raises(ValidationError):
         VnetConfig(alias=alias)
+
+
+@pytest.mark.parametrize("name", ["foo\n", "foo bar", "-foo", "foo-", "foo..bar"])
+def test_vm_name_rejects_non_dns_names(name: str) -> None:
+    with pytest.raises(ValidationError, match="not a valid DNS name"):
+        VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04"), name=name)

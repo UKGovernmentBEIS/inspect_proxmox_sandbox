@@ -84,13 +84,18 @@ async def test_teardown_reports_only_zones_that_are_gone():
         if method == "DELETE" and path == "/cluster/sdn/zones/stuck1z":
             raise _http_error(500, "zone is used by vnet")
         if method == "DELETE" and path == "/cluster/sdn/zones/gone12z":
-            raise _http_error(500, "zone 'gone12z' does not exist")
+            raise _http_error(
+                500, "delete sdn zone object failed: sdn zone 'gone12z' does not exist"
+            )
+        if method == "DELETE" and path == "/cluster/sdn/zones/vnet12z":
+            # a vnet vanished mid-teardown; the zone itself is still there
+            raise _http_error(500, "sdn vnet 'vnet12v0' does not exist")
         return None
 
     sdn = _sdn_commands(request)
 
     deleted = await sdn.tear_down_sdn_zones_and_vnets(
-        ["stuck1z", "gone12z", "fine12z"], ()
+        ["stuck1z", "gone12z", "fine12z", "vnet12z"], ()
     )
 
     assert deleted == {"gone12z", "fine12z"}

@@ -470,11 +470,13 @@ class SdnCommands(abc.ABC):
                     )
                     deleted.add(sdn_zone_id)
                 except httpx.HTTPStatusError as e:
-                    # Proxmox has been observed to return 500 (not 404) when a
-                    # zone or vnet does not exist; treat that as already gone
+                    # Proxmox returns 500 (not 404) for a missing zone. Only the
+                    # zone counts: a vnet that went missing mid-teardown leaves
+                    # the zone behind.
                     already_gone = (
                         e.response.status_code == 500
-                        and "does not exist" in e.response.text
+                        and f"sdn zone '{sdn_zone_id}' does not exist"
+                        in e.response.text
                     )
                     if already_gone:
                         deleted.add(sdn_zone_id)

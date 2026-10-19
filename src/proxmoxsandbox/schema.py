@@ -350,7 +350,7 @@ class VmConfig(BaseModel, frozen=True):
     @field_validator("name")
     @classmethod
     def _validate_name_is_dns_name(cls, name: str) -> str:
-        if not PVE_DNS_NAME_RE.match(name):
+        if not PVE_DNS_NAME_RE.fullmatch(name):
             raise ValueError(
                 f"VM name {name!r} is not a valid DNS name (Proxmox requires "
                 + "dot-separated labels of letters, digits and hyphens, not "
