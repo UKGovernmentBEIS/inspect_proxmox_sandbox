@@ -199,6 +199,7 @@ mk-build-deps -ir -t 'apt-get -o DPkg::Lock::Timeout=600 -y --no-install-recomme
 make deb
 
 dpkg -i "pve-qemu-kvm_${PATCHED_VERSION}_amd64.deb"
+apt-mark hold pve-qemu-kvm
 /usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -F quirk_mode_page_set_block_size
 
 apt-get -o DPkg::Lock::Timeout=600 -y purge pve-qemu-kvm-build-deps
@@ -263,6 +264,7 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
          my $reversednszone = get_reversedns_zone($subnetid, $subnet, $reversedns, $ip);
 
 EOFPATCH
+apt-mark hold libpve-network-perl
 
 STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
 cat > "$STAMP" << 'STAMP_CONTRACT'
