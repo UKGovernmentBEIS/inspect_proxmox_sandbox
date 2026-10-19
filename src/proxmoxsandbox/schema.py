@@ -74,9 +74,11 @@ class VnetConfig(BaseModel, frozen=True):
     """
 
     alias: Optional[
-        # original regex (?^i:[\(\)-_.\w\d\s]{0,256}) but that's not especially
-        # Python-compatible
-        Annotated[str, Field(pattern=r"[()-_.[a-z][A-Z][0-9]\s]{0,256}")]
+        # Proxmox checks qr/[\(\)-_.\w\d\s]{0,256}/i anchored at both ends; \w is
+        # spelled out because pydantic's regex engine cannot compile the unicode class
+        # repeated 256 times.
+        # Rejecting it here beats a 400 from the VNET POST after the zone exists.
+        Annotated[str, Field(pattern=r"^[()-_.a-zA-Z0-9\s]{0,256}$")]
     ] = None
     subnets: Tuple[SubnetConfig, ...] = ()
 

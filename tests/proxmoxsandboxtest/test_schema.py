@@ -10,6 +10,7 @@ from proxmoxsandbox.schema import (
     VmConfig,
     VmNicConfig,
     VmSourceConfig,
+    VnetConfig,
 )
 
 
@@ -265,3 +266,17 @@ def test_vmconfig_name_valid_dns_name(name):
 def test_vmconfig_name_invalid_dns_name(name):
     with pytest.raises(ValidationError, match="is not a valid DNS name"):
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04"), name=name)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["ok_alias-1 (two).three", "", "x" * 256, "Mixed Case 42"],
+)
+def test_vnet_alias_accepts_what_proxmox_accepts(alias: str) -> None:
+    assert VnetConfig(alias=alias).alias == alias
+
+
+@pytest.mark.parametrize("alias", ["bad!alias", "x" * 257, "curly{brace}"])
+def test_vnet_alias_rejects_what_proxmox_rejects(alias: str) -> None:
+    with pytest.raises(ValidationError):
+        VnetConfig(alias=alias)
