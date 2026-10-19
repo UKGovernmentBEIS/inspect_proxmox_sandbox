@@ -1,0 +1,14 @@
+[Unit]
+Description=Regenerate Proxmox SSL certs with current IP
+After=pve-cluster.service inspect-proxmox-ec2-hostname.service
+Before=pvedaemon.service pveproxy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/inspect-proxmox/ec2-certs
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+# Name the pre-deb provisioners used; off-host checkers still ask for it. Drop once they check the contract instead.
+Alias=proxmox-ami-fixup-certs.service

@@ -1,0 +1,14 @@
+[Unit]
+Description=Inspect Proxmox host: storage content types and host-isolation firewall rules
+After=network-online.target pve-cluster.service pve-firewall.service proxmox-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/inspect-proxmox/configure
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+# Name the pre-deb provisioners used; off-host checkers still ask for it. Drop once they check the contract instead.
+Alias=proxmox-ami-fixup-firewall.service

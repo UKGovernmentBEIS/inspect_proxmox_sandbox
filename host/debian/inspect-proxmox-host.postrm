@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+GUARD=inspect-proxmox-block-cloud-metadata.service
+
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    F=/usr/share/perl5/PVE/pvecfg.pm
+    if [ -f "$F" ] && grep -q '\.aisi[0-9]' "$F"; then
+        sed -i -E 's/\.aisi[0-9]+//g' "$F"
+        [ -d /run/systemd/system ] && systemctl try-reload-or-restart pvedaemon pveproxy >/dev/null 2>&1 || true
+    fi
+    # Drop the guard's symlinks now its unit file is gone: pvedaemon, pveproxy and
+    # pve-guests would otherwise Require a missing unit and fail to start at the next boot.
+    # purge, not disable, and on remove too: deb-systemd-helper only recreates links it
+    # has no record of, so anything less leaves a reinstall without the .requires links.
+    # The unit itself is left running; its rules do no harm and go at reboot.
+    deb-systemd-helper purge "$GUARD" >/dev/null || true
+    deb-systemd-helper unmask "$GUARD" >/dev/null || true
+    [ -d /run/systemd/system ] && systemctl --system daemon-reload >/dev/null 2>&1 || true
+fi
+
+#DEBHELPER#

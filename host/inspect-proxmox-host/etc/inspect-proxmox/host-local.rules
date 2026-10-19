@@ -1,0 +1,11 @@
+# Guest traffic addressed to the host itself, evaluated in raw PREROUTING before
+# connection tracking (see block-cloud-metadata). RETURN admits, DROP denies; the
+# management NIC and loopback are exempted before these run. Edit, then
+# `systemctl reload inspect-proxmox-block-cloud-metadata.service` (reload, not restart:
+# the API and guest startup Require this unit, so a restart stops them).
+-A INSP-SANDBOX-HOST-LOCAL -p udp --sport 68 --dport 67 -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -p udp --dport 53 -m addrtype --dst-type LOCAL -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -p tcp --dport 53 -m addrtype --dst-type LOCAL -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -p icmp --icmp-type echo-request -m addrtype --dst-type LOCAL -j RETURN
+-A INSP-SANDBOX-HOST-LOCAL -m addrtype --dst-type LOCAL -j DROP
+-A INSP-SANDBOX-HOST-LOCAL -j RETURN

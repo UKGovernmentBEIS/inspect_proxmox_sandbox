@@ -1,3 +1,9 @@
+"""Pins the host configuration shipped in the inspect-proxmox-host debs under host/.
+
+Also checks that both provisioners install the same release of the bundle, and that
+the release matches the contract the e2e tests assert.
+"""
+
 import os
 import re
 import shutil
@@ -7,7 +13,7 @@ import time
 import unittest
 from pathlib import Path
 
-import pytest
+from .proxmox_sandbox_utils import HOST_CONTRACT
 
 REPO_ROOT = Path(__file__).parents[2]
 EC2_SCRIPTS = REPO_ROOT / "src" / "proxmoxsandbox" / "scripts" / "ec2"
@@ -19,6 +25,14 @@ VIRTUALIZED_SCRIPT = (
     / "virtualized_proxmox"
     / "build_proxmox_auto.sh"
 )
+PROVISIONERS = [EC2_SCRIPTS / "userdata.sh", VIRTUALIZED_SCRIPT]
+HOST = REPO_ROOT / "host"
+BASE_PKG = HOST / "inspect-proxmox-host"
+EC2_PKG = HOST / "inspect-proxmox-host-ec2"
+LIBEXEC = BASE_PKG / "usr" / "libexec" / "inspect-proxmox"
+UNITS = BASE_PKG / "usr" / "lib" / "systemd" / "system"
+GUARD_SCRIPT = LIBEXEC / "block-cloud-metadata"
+HOST_LOCAL_RULES = BASE_PKG / "etc" / "inspect-proxmox" / "host-local.rules"
 
 
 def test_launch_contains_expected_imds_settings() -> None:
@@ -30,62 +44,52 @@ def test_launch_contains_expected_imds_settings() -> None:
     ) in launch
 
 
-@pytest.mark.parametrize(
-    "provisioner",
-    [
-        EC2_SCRIPTS / "userdata.sh",
-        VIRTUALIZED_SCRIPT,
-    ],
-)
-def test_provisioners_contain_expected_iptables_rules(provisioner: Path) -> None:
-    # Both provisioners enforce RFC 3927 section 7 (a router must not forward IPv4
-    # link-local), rather than denylisting one cloud's metadata IP, and treat
-    # IPv6 as unsupported for sandbox guests. The two blocks are kept identical.
-    script = provisioner.read_text()
+def test_block_cloud_metadata_rules() -> None:
+    # RFC 3927 section 7 (a router must not forward IPv4 link-local), rather than a
+    # denylist of one cloud's metadata IP; IPv6 is unsupported for sandbox guests.
+    script = GUARD_SCRIPT.read_text()
 
-    # Destination drop in raw PREROUTING (host requests are OUTPUT, unaffected).
+    # Destination drop in raw PREROUTING (host requests are OUTPUT, unaffected),
+    # behind the host-local guard's jump.
     assert "iptables -w -t raw -I PREROUTING 2 -d 169.254.0.0/16 -j DROP" in script
     # Source drop in FORWARD, not PREROUTING, so the host's own link-local
     # replies (INPUT) are left intact.
     assert "iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP" in script
     assert "iptables -w -t raw -I PREROUTING 1 -s 169.254.0.0/16 -j DROP" not in script
+    assert "ip6tables -w -A FORWARD -j DROP" in script
     # Host-bound traffic is denied before conntrack; infrastructure services
     # and management ingress keep their explicit exceptions.
     assert "CHAIN=INSP-SANDBOX-HOST-LOCAL" in script
     assert "iptables-restore -w --noflush" in script
     assert "cat /etc/inspect-proxmox/host-local.rules" in script
-    rules = _extract_heredoc(script, "HOST_LOCAL_RULES")
+    assert "--physdev-is-bridged" not in script
+    assert '[ -e "/sys/class/net/${MEMBER##*/}/device" ] || continue' in script
+    rules = HOST_LOCAL_RULES.read_text()
     assert "--sport 68 --dport 67 -j RETURN" in rules
     assert "-p udp --dport 53 -m addrtype --dst-type LOCAL -j RETURN" in rules
     assert "-p tcp --dport 53 -m addrtype --dst-type LOCAL -j RETURN" in rules
     assert "-m addrtype --dst-type LOCAL -j DROP" in rules
-    assert "--physdev-is-bridged" not in script
-    assert '[ -e "/sys/class/net/${MEMBER##*/}/device" ] || continue' in script
-    # IPv6 unsupported: disabled on guest interfaces + forwarded v6 dropped.
-    assert "net.ipv6.conf.default.disable_ipv6 = 1" in script
-    assert "ip6tables -w -A FORWARD -j DROP" in script
-    # Boot service installed and enabled.
-    assert "ExecStart=/usr/local/bin/inspect-proxmox-block-cloud-metadata.sh" in script
-    assert "systemctl enable inspect-proxmox-block-cloud-metadata.service" in script
     # The single-cloud denylist is gone.
     assert "169.254.169.254/32" not in script
     assert "fd00:ec2::254" not in script
 
+    sysctl = (
+        BASE_PKG / "usr" / "lib" / "sysctl.d" / "99-inspect-proxmox-disable-ipv6.conf"
+    ).read_text()
+    assert "net.ipv6.conf.default.disable_ipv6 = 1" in sysctl
 
-def _extract_heredoc(script: str, delimiter: str) -> str:
-    match = re.search(
-        rf"<< '{delimiter}'\n(.*?\n){delimiter}\n", script, flags=re.DOTALL
+    unit = (UNITS / "inspect-proxmox-block-cloud-metadata.service").read_text()
+    assert "ExecStart=/usr/libexec/inspect-proxmox/block-cloud-metadata" in unit
+    assert "WantedBy=multi-user.target" in unit
+
+
+def test_host_guard_gates_api_and_guest_startup() -> None:
+    unit = (UNITS / "inspect-proxmox-block-cloud-metadata.service").read_text()
+    settings = dict(
+        line.split("=", 1)
+        for line in unit.splitlines()
+        if "=" in line and not line.startswith("#")
     )
-    assert match, f"heredoc {delimiter} not found"
-    return match.group(1)
-
-
-@pytest.mark.parametrize(
-    "provisioner", [EC2_SCRIPTS / "userdata.sh", VIRTUALIZED_SCRIPT]
-)
-def test_host_guard_gates_api_and_guest_startup(provisioner: Path) -> None:
-    unit = _extract_heredoc(provisioner.read_text(), "BLOCK_METADATA_UNIT")
-    settings = dict(line.split("=", 1) for line in unit.splitlines() if "=" in line)
     consumers = {"pvedaemon.service", "pveproxy.service", "pve-guests.service"}
     assert consumers <= set(settings.get("RequiredBy", "").split())
     assert consumers <= set(settings.get("Before", "").split())
@@ -94,78 +98,154 @@ def test_host_guard_gates_api_and_guest_startup(provisioner: Path) -> None:
     assert settings.get("ExecReload") == settings["ExecStart"]
 
 
-@pytest.mark.parametrize(
-    "delimiter",
-    [
-        "BLOCK_METADATA",
-        "HOST_LOCAL_RULES",
-        "EGRESS_LOCKDOWN",
-        "EGRESS_LOCKDOWN_UNIT",
-        "EGRESS_LOCKDOWN_TIMER",
-        "EGRESS_LOCKDOWN_HALT_UNIT",
-    ],
-)
-def test_firewall_heredocs_identical(delimiter: str) -> None:
-    userdata = (EC2_SCRIPTS / "userdata.sh").read_text()
-    virtualized = VIRTUALIZED_SCRIPT.read_text()
+def test_egress_lockdown() -> None:
+    lockdown = (LIBEXEC / "egress-lockdown").read_text()
 
-    assert _extract_heredoc(userdata, delimiter) == _extract_heredoc(
-        virtualized, delimiter
-    )
-
-
-@pytest.mark.parametrize(
-    "provisioner",
-    [
-        EC2_SCRIPTS / "userdata.sh",
-        VIRTUALIZED_SCRIPT,
-    ],
-)
-def test_provisioners_contain_egress_lockdown(provisioner: Path) -> None:
-    script = provisioner.read_text()
-
-    assert "cat > /usr/local/bin/inspect-proxmox-egress-lockdown.sh" in script
-    assert "ExecStart=/usr/local/bin/inspect-proxmox-egress-lockdown.sh" in script
-    assert "systemctl enable inspect-proxmox-egress-lockdown.service" in script
-    assert "systemctl enable inspect-proxmox-egress-lockdown.timer" in script
-    assert "OnFailure=inspect-proxmox-egress-lockdown-halt.service" in script
-    assert "systemctl mask --runtime pveproxy.service pvedaemon.service" in script
-    assert "systemctl stop pveproxy.service pvedaemon.service" in script
     assert (
         'iptables -w -t mangle -I FORWARD 1 -o "$NIC" '
         '-m comment --comment "$COMMENT $RUN_ID" -j DROP'
-    ) in script
+    ) in lockdown
     assert (
         'iptables -w -t mangle -I FORWARD 1 -i "$NIC" '
         '-m comment --comment "$COMMENT $RUN_ID" -j DROP'
-    ) in script
+    ) in lockdown
     assert (
         'iptables -w -t mangle -I OUTPUT 1 -o "$NIC" -m owner --uid-owner dnsmasq '
         '-m comment --comment "$COMMENT $RUN_ID" -j DROP'
-    ) in script
+    ) in lockdown
     assert (
         "iptables -w -t mangle -I FORWARD 1 "
         '-m comment --comment "$COMMENT $RUN_ID" -j DROP'
-    ) in script
+    ) in lockdown
     assert (
         "iptables -w -t filter -I INPUT 1 ! -i lo -p udp --dport 53 "
         '-m comment --comment "$COMMENT $RUN_ID" -j REJECT'
-    ) in script
+    ) in lockdown
     assert (
         "iptables -w -t filter -I INPUT 1 ! -i lo -p tcp --dport 53 "
         '-m comment --comment "$COMMENT $RUN_ID" -j REJECT --reject-with tcp-reset'
-    ) in script
-    assert "OnUnitActiveSec=1min" in script
-    lockdown = _extract_heredoc(script, "EGRESS_LOCKDOWN")
-    assert "could not determine management NIC" not in lockdown
+    ) in lockdown
     assert "ERROR: no default-route NIC found" in lockdown
-    assert "RemainAfterExit" not in _extract_heredoc(script, "EGRESS_LOCKDOWN_UNIT")
+
+    service = (UNITS / "inspect-proxmox-egress-lockdown.service").read_text()
+    assert "ExecStart=/usr/libexec/inspect-proxmox/egress-lockdown" in service
+    assert "OnFailure=inspect-proxmox-egress-lockdown-halt.service" in service
+    assert "RemainAfterExit" not in service
+    assert "WantedBy=multi-user.target" in service
+
+    timer = (UNITS / "inspect-proxmox-egress-lockdown.timer").read_text()
+    assert "OnUnitActiveSec=1min" in timer
+    assert "WantedBy=timers.target" in timer
+
+    halt = (UNITS / "inspect-proxmox-egress-lockdown-halt.service").read_text()
+    assert "systemctl mask --runtime pveproxy.service pvedaemon.service" in halt
+    assert "systemctl stop pveproxy.service pvedaemon.service" in halt
+    # Only ever run via OnFailure, never enabled on its own.
+    assert "[Install]" not in halt
+
+
+def test_packages_stay_out_of_usr_local() -> None:
+    # Debian policy: a package must not ship files under /usr/local.
+    for pkg in (BASE_PKG, EC2_PKG):
+        assert not (pkg / "usr" / "local").exists()
+
+
+def _changelog_version() -> int:
+    top = (HOST / "debian" / "changelog").read_text().splitlines()[0]
+    match = re.match(r"inspect-proxmox-host \((\d+)\)", top)
+    assert match, top
+    return int(match.group(1))
+
+
+def test_host_contract_is_the_package_version() -> None:
+    # stamp-contract writes .aisi<version>; the e2e tests assert against HOST_CONTRACT.
+    assert _changelog_version() == HOST_CONTRACT
+
+
+def test_provisioners_install_the_current_release() -> None:
+    release = f"INSPECT_PROXMOX_HOST_RELEASE=host-v{_changelog_version()}"
+    for provisioner in PROVISIONERS:
+        script = provisioner.read_text()
+        assert release in script, provisioner
+        assert "inspect-proxmox-host-debs.tar" in script, provisioner
+        # No --allow-downgrades: a repo that has moved past a rebuild must fail
+        # the bake.
+        assert "apt-get install -y ./" in script, provisioner
+        assert "--allow-downgrades" not in script, provisioner
+        assert "INSPECT_PROXMOX_HOST_BUNDLE_SHA256=" in script, provisioner
+        assert '  /root/inspect-proxmox-host-debs.tar" | sha256sum -c' in script or (
+            '  debs.tar" | sha256sum -c' in script
+        ), provisioner
+        assert "inspect-proxmox-host-seal" in script, provisioner
+
+
+def test_ec2_provisioner_keeps_the_bundle_url_out_of_the_image() -> None:
+    # Stage 1 fetches under `set +x` and nothing persists the URL: an override may be a
+    # presigned URL, and /root/install-proxmox.log is baked into the AMI.
+    script = (EC2_SCRIPTS / "userdata.sh").read_text()
+    assert "proxmox-install.env" not in script
+    for use in (
+        'INSPECT_PROXMOX_HOST_BUNDLE_URL="${',
+        'curl -fsSL "$INSPECT_PROXMOX_HOST_BUNDLE_URL"',
+    ):
+        at = script.index(use)
+        assert script.rfind("set +x", 0, at) > script.rfind("set -x", 0, at), use
+    assert (
+        "rm -rf /tmp/inspect-proxmox-host /root/inspect-proxmox-host-debs.tar" in script
+    )
+
+
+def _rebuild_version(name: str) -> str:
+    script = (HOST / "rebuilds" / name / "build.sh").read_text()
+    match = re.search(r'^PATCHED_VERSION="([^"]+)"', script, flags=re.MULTILINE)
+    assert match, name
+    return match.group(1)
+
+
+def test_depends_and_pin_track_the_rebuilds() -> None:
+    control = (HOST / "debian" / "control").read_text()
+    qemu = _rebuild_version("pve-qemu")
+    network = _rebuild_version("pve-network")
+    # Exact, so an upstream version cannot satisfy the dependency; only the pin would.
+    assert f"pve-qemu-kvm (= {qemu})" in control
+    assert f"libpve-network-perl (= {network})" in control
+    for version in (qemu, network):
+        assert "+aisi" in version
+
+    pin = (
+        BASE_PKG / "etc" / "apt" / "preferences.d" / "inspect-proxmox-host"
+    ).read_text()
+    for package in ("pve-qemu-kvm", "libpve-network-perl", "libpve-network-api-perl"):
+        assert package in pin
+    assert r"Pin: version /\+aisi/" in pin
+    assert "Pin-Priority: 1001" in pin
+
+
+def test_stamp_refuses_without_the_patches() -> None:
+    stamp = (LIBEXEC / "stamp-contract").read_text()
+    assert "quirk_mode_page_set_block_size" in stamp
+    assert "DNS_SETUP:" in stamp
+    # An upstream package can pass the behavioural checks (the quirk is in QEMU 11.0.5);
+    # the stamp must also insist on the rebuilds themselves.
+    assert "for pkg in pve-qemu-kvm libpve-network-perl; do" in stamp
+    assert "*+aisi*) ;;" in stamp
+    patch = (
+        HOST / "rebuilds" / "pve-network" / "ipam-reuse-ip-for-known-mac.patch"
+    ).read_text()
+    assert "+DNS_SETUP:" in patch
 
 
 @unittest.skipUnless(
     os.environ.get("PROXMOX_KERNEL_TESTS") == "1", "requires a disposable Linux host"
 )
 class HostLocalKernelTest(unittest.TestCase):
+    """Runs the guard script in network namespaces: root, iptables, dnsmasq needed.
+
+    PROXMOX_GUARD_SCRIPT points at an installed copy to test a host's own files
+    (its /etc/inspect-proxmox/host-local.rules is then used too); otherwise the
+    payload under host/ is tested.
+    """
+
     def run_command(self, *args: str, check: bool = True) -> str:
         result = subprocess.run(args, capture_output=True, text=True)
         if check:
@@ -213,17 +293,10 @@ class HostLocalKernelTest(unittest.TestCase):
         source = os.environ.get("PROXMOX_GUARD_SCRIPT")
         if source:
             self.script = Path(source).read_text()
-        else:
-            userdata = Path(__file__).parents[2] / (
-                "src/proxmoxsandbox/scripts/ec2/userdata.sh"
-            )
-            self.script = userdata.read_text().split("<< 'BLOCK_METADATA'\n", 1)[1]
-            self.script = self.script.split("\nBLOCK_METADATA\n", 1)[0]
-        if source:
             rules = Path("/etc/inspect-proxmox/host-local.rules").read_text()
         else:
-            rules = userdata.read_text().split("<< 'HOST_LOCAL_RULES'\n", 1)[1]
-            rules = rules.split("\nHOST_LOCAL_RULES\n", 1)[0]
+            self.script = GUARD_SCRIPT.read_text()
+            rules = HOST_LOCAL_RULES.read_text()
         self.rules_path = self.root / "host-local.rules"
         self.rules_path.write_text(rules + "\n")
         self.script = self.script.replace(
@@ -343,3 +416,101 @@ print('UDP_AND_TCP_DNS_OK')
         self.assertNotEqual(result.returncode, 0)
         rules = self.ns("host", "iptables", "-t", "raw", "-S")
         self.assertNotIn("INSP-SANDBOX-HOST-LOCAL", rules)
+
+
+def test_guard_lifecycle_is_hand_managed() -> None:
+    # dh's default snippets restart a unit on upgrade and stop it on remove. The
+    # guard is RequiredBy pvedaemon, pveproxy and pve-guests, so either would take
+    # the API and every VM down. rules keeps it (and the OnFailure-only halt unit)
+    # out of dh_installsystemd,
+    # and the maintainer scripts enable, start, reload and disable it themselves.
+    rules = (HOST / "debian" / "rules").read_text()
+    managed = [
+        line.strip().rstrip("\\").strip()
+        for line in rules.splitlines()
+        if line.strip().startswith("inspect-proxmox-")
+    ]
+    assert managed == [
+        "inspect-proxmox-egress-lockdown.service",
+        "inspect-proxmox-egress-lockdown.timer",
+        "inspect-proxmox-host-configure.service",
+    ]
+    assert "--no-enable" not in rules and "--no-start" not in rules
+    postinst = (HOST / "debian" / "inspect-proxmox-host.postinst").read_text()
+    assert 'deb-systemd-helper enable "$GUARD"' in postinst
+    assert 'deb-systemd-invoke reload-or-restart "$GUARD"' in postinst
+    assert 'deb-systemd-invoke start "$GUARD"' in postinst
+    assert 'restart "$GUARD"' not in postinst.replace("reload-or-restart", "")
+    postrm = (HOST / "debian" / "inspect-proxmox-host.postrm").read_text()
+    # On remove as well as purge: see the comment in postrm.
+    assert 'deb-systemd-helper purge "$GUARD"' in postrm
+    assert 'disable "$GUARD"' not in postrm
+
+
+def test_ec2_units_order_after_their_prerequisites() -> None:
+    ec2_units = EC2_PKG / "usr" / "lib" / "systemd" / "system"
+    network = (ec2_units / "inspect-proxmox-ec2-network.service").read_text()
+    # NAT ACCEPTs must come after the guard's drops exist.
+    assert "inspect-proxmox-block-cloud-metadata.service" in _unit_setting(
+        network, "After"
+    )
+    assert "inspect-proxmox-ec2-hostname.service" in _unit_setting(network, "After")
+    hostname = (ec2_units / "inspect-proxmox-ec2-hostname.service").read_text()
+    assert "pve-cluster.service" in _unit_setting(hostname, "Before")
+    # Firewall rules are node-scoped, so they must be created under the final node name.
+    drop_in = (
+        ec2_units / "inspect-proxmox-host-configure.service.d" / "ec2.conf"
+    ).read_text()
+    assert "inspect-proxmox-ec2-hostname.service" in _unit_setting(drop_in, "After")
+
+
+def test_ready_unit_gates_on_the_fixups_and_the_api() -> None:
+    # launch.sh and off-host callers poll this one unit instead of the install log.
+    ready = (
+        EC2_PKG / "usr/lib/systemd/system/inspect-proxmox-ready.service"
+    ).read_text()
+    requires = set(_unit_setting(ready, "Requires"))
+    assert requires == {
+        "pveproxy.service",
+        "inspect-proxmox-ec2-password.service",
+        "inspect-proxmox-ec2-certs.service",
+        "inspect-proxmox-host-configure.service",
+    }
+    after = set(_unit_setting(ready, "After"))
+    assert requires <= after
+    assert "inspect-proxmox-egress-lockdown.service" in after
+    assert "RemainAfterExit=yes" in ready
+    # Every unit it Requires must exist in the bundle.
+    for unit in requires - {"pveproxy.service"}:
+        assert (UNITS / unit).exists() or (
+            EC2_PKG / "usr/lib/systemd/system" / unit
+        ).exists(), unit
+
+
+def test_old_unit_names_stay_resolvable() -> None:
+    # Off-host checkers (inspect-aisi-sandbox) still ask systemctl for the
+    # pre-deb names.
+    expected = {
+        EC2_PKG / "usr/lib/systemd/system/inspect-proxmox-ec2-hostname.service": (
+            "proxmox-ami-fixup-hostname.service"
+        ),
+        EC2_PKG / "usr/lib/systemd/system/inspect-proxmox-ec2-certs.service": (
+            "proxmox-ami-fixup-certs.service"
+        ),
+        EC2_PKG / "usr/lib/systemd/system/inspect-proxmox-ec2-network.service": (
+            "proxmox-ami-fixup-nat.service"
+        ),
+        UNITS / "inspect-proxmox-host-configure.service": (
+            "proxmox-ami-fixup-firewall.service"
+        ),
+    }
+    for unit, alias in expected.items():
+        assert _unit_setting(unit.read_text(), "Alias") == [alias], unit
+
+
+def _unit_setting(unit: str, key: str) -> list[str]:
+    values: list[str] = []
+    for line in unit.splitlines():
+        if line.startswith(f"{key}="):
+            values.extend(line.split("=", 1)[1].split())
+    return values

@@ -1,8 +1,8 @@
 """End-to-end check that the Proxmox host actually isolates sandbox VMs.
 
-Host firewall isolation is configured by the provisioning scripts (see the
+Host firewall isolation comes from the inspect-proxmox-host deb (see the
 README's "Host firewall isolation" section). Every supported way of standing
-up a test host applies it, so this runs unconditionally as part of the
+up a test host installs it, so this runs unconditionally as part of the
 integration suite — if it fails, the host you're testing against wasn't
 provisioned correctly (e.g. a hand-rolled Proxmox missing the firewall config).
 
@@ -29,12 +29,17 @@ pytestmark = pytest.mark.req_proxmox
 
 # Catches a host whose units fired once and are now disabled, or a stale AMI that
 # never had them: the guest probes below would pass on such a host until the rules
-# were next reloaded.
+# were next reloaded. The NAT bridge unit ships only in the EC2 package.
 HOST_UNITS_SCRIPT = """
 set -eu
-for unit in proxmox-ami-fixup-firewall.service \
-            inspect-proxmox-block-cloud-metadata.service \
-            proxmox-ami-fixup-nat.service; do
+units="inspect-proxmox-host-configure.service"
+units="$units inspect-proxmox-block-cloud-metadata.service"
+ec2_state=$(dpkg-query -W -f '${db:Status-Status}' \\
+    inspect-proxmox-host-ec2 2>/dev/null || true)
+if [ "$ec2_state" = installed ]; then
+    units="$units inspect-proxmox-ec2-network.service"
+fi
+for unit in $units; do
     systemctl is-enabled -q "$unit"
     [ "$(systemctl show -p Result --value "$unit")" = success ]
 done

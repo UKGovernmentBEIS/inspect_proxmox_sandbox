@@ -13,9 +13,9 @@ import base64
 import gzip
 from pathlib import Path
 
-# Measured after base64, which inflates the gzip by a third, so this leaves the raw
-# form well under 16384 and trips a growing script before RunInstances does.
-BUDGET = 15000
+# Well under EC2's 16384 (the Lambda path wraps this in more cloud-init YAML), so a
+# growing script trips this before RunInstances does.
+BUDGET = 8000
 
 SCRIPT = (
     Path(__file__).parents[2]

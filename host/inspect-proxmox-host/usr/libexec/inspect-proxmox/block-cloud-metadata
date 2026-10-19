@@ -1,0 +1,55 @@
+#!/bin/bash
+# Confine sandbox guests at the host's forwarding layer, and deny them the host's own
+# services before connection tracking can admit a forged "established" packet.
+set -euo pipefail
+
+CHAIN=INSP-SANDBOX-HOST-LOCAL
+C=isp
+MGMT=$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | sort -u)
+[ -n "$MGMT" ] || exit 1
+# A bridged management NIC is exempted per physical member port, so a guest tap on the
+# same bridge is not. Refuse to guess if no member has a device behind it.
+for NIC in $MGMT; do
+    [ ! -d "/sys/class/net/$NIC/brif" ] || ls "/sys/class/net/$NIC"/brif/*/../device >/dev/null 2>&1 || exit 1
+done
+JUMPS=$(iptables -w -t raw -S PREROUTING |
+    sed -n "s/^-A PREROUTING -m comment --comment $C -j $CHAIN$/-D PREROUTING -m comment --comment $C -j $CHAIN/p")
+# One iptables-restore so a rejected policy leaves the previous rules in place.
+{
+    cat <<RULES
+*raw
+:$CHAIN - [0:0]
+-F $CHAIN
+-A $CHAIN -i lo -j RETURN
+RULES
+    for NIC in $MGMT; do
+        if [ -d "/sys/class/net/$NIC/brif" ]; then
+            for MEMBER in "/sys/class/net/$NIC"/brif/*; do
+                [ -e "/sys/class/net/${MEMBER##*/}/device" ] || continue
+                echo "-A $CHAIN -m physdev --physdev-in ${MEMBER##*/} -j RETURN"
+            done
+        else
+            echo "-A $CHAIN -i $NIC -j RETURN"
+        fi
+    done
+    cat /etc/inspect-proxmox/host-local.rules || exit 1
+    echo "$JUMPS"
+    echo "-I PREROUTING 1 -m comment --comment $C -j $CHAIN"
+    echo COMMIT
+} | iptables-restore -w --noflush
+
+# RFC 3927: a router must not forward IPv4 link-local. The destination drop goes in raw
+# PREROUTING (after the host-local jump), ahead of any FORWARD ACCEPT; host requests are
+# OUTPUT so unaffected.
+iptables -w -t raw -C PREROUTING -d 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -t raw -I PREROUTING 2 -d 169.254.0.0/16 -j DROP
+# The source drop must be FORWARD, not raw PREROUTING: the latter would also drop the
+# host's own on-link replies (IMDS/DNS) and break it.
+iptables -w -C FORWARD -s 169.254.0.0/16 -j DROP 2>/dev/null \
+    || iptables -w -I FORWARD 1 -s 169.254.0.0/16 -j DROP
+
+# Guest v6 is unsupported; FORWARD sees only transit, so the host's own v6 is intact.
+if command -v ip6tables >/dev/null; then
+    ip6tables -w -C FORWARD -j DROP 2>/dev/null \
+        || ip6tables -w -A FORWARD -j DROP
+fi

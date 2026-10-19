@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+# Two units are kept away from dh's lifecycle snippets. The guard is RequiredBy pvedaemon,
+# pveproxy and pve-guests, so dh's restart on upgrade and stop on remove would take the API
+# and every running VM down with it; its enable/start/reload/disable live in the maintainer
+# scripts. The halt unit only ever runs via OnFailure and must never be started.
+override_dh_installsystemd:
+	dh_installsystemd -pinspect-proxmox-host-ec2
+	dh_installsystemd -pinspect-proxmox-host \
+		inspect-proxmox-egress-lockdown.service \
+		inspect-proxmox-egress-lockdown.timer \
+		inspect-proxmox-host-configure.service

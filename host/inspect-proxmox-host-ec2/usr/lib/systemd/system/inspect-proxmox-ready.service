@@ -1,0 +1,14 @@
+[Unit]
+Description=Host ready: per-boot fixups done and the API up
+# Requires= keeps this from starting if a fixup failed, and takes it down when the egress
+# lockdown's halt stops pveproxy. pveproxy binds before forking, so After= means listening.
+Requires=pveproxy.service inspect-proxmox-ec2-password.service inspect-proxmox-ec2-certs.service inspect-proxmox-host-configure.service
+After=pveproxy.service inspect-proxmox-ec2-password.service inspect-proxmox-ec2-certs.service inspect-proxmox-host-configure.service inspect-proxmox-egress-lockdown.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+
+[Install]
+WantedBy=multi-user.target

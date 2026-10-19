@@ -1,0 +1,16 @@
+.TH INSPECT-PROXMOX-HOST-STATUS 8 "2026-09-21" "inspect-proxmox-host" "System Administration"
+.SH NAME
+inspect-proxmox-host-status \- report the guest egress lockdown's state
+.SH SYNOPSIS
+.B inspect-proxmox-host-status
+.SH DESCRIPTION
+Prints the facts an off-host caller needs to judge whether the guest egress lockdown is
+fully in place: the installed contract, whether the marker is present, unit enablement
+and result, the default-route interfaces, the mangle-table rules and the SDN dnsmasq
+upstream resolver file. Sections are introduced by lines starting with
+.B ###
+and the report ends with
+.BR "### end" .
+It never exits non-zero, so a broken host still reports.
+.SH SEE ALSO
+.BR inspect-proxmox-host-seal (8)

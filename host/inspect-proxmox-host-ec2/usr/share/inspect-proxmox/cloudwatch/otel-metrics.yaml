@@ -1,0 +1,39 @@
+receivers:
+  otlp/cwagent:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+processors:
+  resourcedetection/cwagent:
+    # env reads ec2.tag.Name from OTEL_RESOURCE_ATTRIBUTES (set at boot from IMDS);
+    # ec2 adds instance-id/region/AZ/type.
+    detectors: [env, ec2]
+    timeout: 5s
+  # pvestatd emits ~1400 datapoints/cycle, past CloudWatch's 1000-per-request limit, mostly
+  # per-VM-per-disk proxmox_vm_blockstat_*. Of those keep rd/wr operations + total_time_ns
+  # per device (IOPS, and latency = Dtime/Dops); the [a-z]+[0-9]+ match deliberately excludes
+  # failed_/invalid_ counters. pressureio* is io PSI. Everything else is dropped.
+  filter/cwagent:
+    error_mode: ignore
+    metrics:
+      metric:
+        - 'not IsMatch(name, "^(proxmox_vm_(cpu|cpus|mem|maxmem|memhost|balloon|freemem|disk|maxdisk)|proxmox_vm_pressureio(full|some)|proxmox_vm_blockstat_[a-z]+[0-9]+_(rd|wr)_(operations|total_time_ns)_total|proxmox_node_(memory|cpustat|blockstat)_.+|proxmox_storage_(used|total|avail))$")'
+  cumulativetodelta/cwagent: {}
+  # Backstop for the 1000-datapoint limit if the guest count outgrows the filter.
+  batch/cwagent:
+    send_batch_size: 1000
+    send_batch_max_size: 1000
+exporters:
+  otlphttp/cwagent:
+    metrics_endpoint: "https://monitoring.${env:AWS_REGION}.amazonaws.com/v1/metrics"
+    compression: gzip
+    auth: { authenticator: sigv4auth/cwagent }
+extensions:
+  sigv4auth/cwagent: { service: monitoring, region: "${env:AWS_REGION}" }
+service:
+  extensions: [sigv4auth/cwagent]
+  pipelines:
+    metrics/cwagent:
+      receivers: [otlp/cwagent]
+      processors: [filter/cwagent, resourcedetection/cwagent, cumulativetodelta/cwagent, batch/cwagent]
+      exporters: [otlphttp/cwagent]
