@@ -140,7 +140,7 @@ mkdir -p /tmp/inspect-proxmox-host
 cd /tmp/inspect-proxmox-host
 curl -fsSL "$INSPECT_PROXMOX_HOST_BUNDLE_URL" -o debs.tar
 tar xf debs.tar
-apt-get install -y ./*.deb
+apt-get install -y --allow-downgrades ./*.deb
 cd /
 rm -rf /tmp/inspect-proxmox-host
 

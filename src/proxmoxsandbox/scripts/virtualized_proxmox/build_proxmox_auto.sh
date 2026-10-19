@@ -154,9 +154,17 @@ source = "from-iso"
 ordering = "fully-up"
 EOFANSWERS
 
-cat << 'EOFONFIRSTBOOT' > on-first-boot.sh
+# Bump with each host/debian/changelog entry; same bundle scripts/ec2/userdata.sh installs.
+INSPECT_PROXMOX_HOST_RELEASE=host-v4
+INSPECT_PROXMOX_HOST_BUNDLE_URL="${INSPECT_PROXMOX_HOST_BUNDLE_URL:-https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/releases/download/$INSPECT_PROXMOX_HOST_RELEASE/inspect-proxmox-host-debs.tar}"
+
+# The URL is baked in: on-first-boot.sh runs inside the new VM, where this environment isn't visible.
+cat << EOFONFIRSTBOOTHEAD > on-first-boot.sh
 #!/usr/bin/env bash
 set -euo pipefail
+INSPECT_PROXMOX_HOST_BUNDLE_URL='$INSPECT_PROXMOX_HOST_BUNDLE_URL'
+EOFONFIRSTBOOTHEAD
+cat << 'EOFONFIRSTBOOT' >> on-first-boot.sh
 
 # should not be necessary as this should only be run once
 # but for some reason this is not always working
@@ -164,10 +172,6 @@ set -euo pipefail
 if [ -f /var/local/inspect-proxmox-on-first-boot.done ]; then
   exit 0
 fi
-
-# Bump with each host/debian/changelog entry; same bundle scripts/ec2/userdata.sh installs.
-INSPECT_PROXMOX_HOST_RELEASE=host-v4
-INSPECT_PROXMOX_HOST_BUNDLE_URL="${INSPECT_PROXMOX_HOST_BUNDLE_URL:-https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/releases/download/$INSPECT_PROXMOX_HOST_RELEASE/inspect-proxmox-host-debs.tar}"
 
 # enable serial console
 systemctl enable serial-getty@ttyS0
@@ -193,7 +197,8 @@ mkdir -p /tmp/inspect-proxmox-host
 cd /tmp/inspect-proxmox-host
 curl -fsSL "$INSPECT_PROXMOX_HOST_BUNDLE_URL" -o debs.tar
 tar xf debs.tar
-apt-get install -y ./inspect-proxmox-host_*.deb ./pve-qemu-kvm_*.deb ./libpve-network-*.deb
+# Downgrades allowed: the bundle's rebuilds must win even if the repo has moved past them (see the apt pin they install).
+apt-get install -y --allow-downgrades ./inspect-proxmox-host_*.deb ./pve-qemu-kvm_*.deb ./libpve-network-*.deb
 cd /
 rm -rf /tmp/inspect-proxmox-host
 

@@ -168,7 +168,7 @@ def test_provisioners_install_the_current_release() -> None:
         script = provisioner.read_text()
         assert release in script, provisioner
         assert "inspect-proxmox-host-debs.tar" in script, provisioner
-        assert "apt-get install -y ./" in script, provisioner
+        assert "apt-get install -y --allow-downgrades ./" in script, provisioner
         assert "inspect-proxmox-host-seal" in script, provisioner
 
 
