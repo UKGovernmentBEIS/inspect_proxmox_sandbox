@@ -409,8 +409,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             # leftover provider-managed VNETs or inspect-tagged VMs here are
             # orphans from a previous sample whose init failed or whose cleanup
             # didn't run. User pre-existing VNETs are ignored by this check.
-            # A pre-clean that cannot finish fails this sample: building on
-            # top of the leftovers would leave two samples' VMs running.
+            # A pre-clean that cannot finish fails this sample.
             await cls._ensure_instance_clean(infra_commands, instance.instance_id)
 
             task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
