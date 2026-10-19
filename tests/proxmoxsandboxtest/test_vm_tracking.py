@@ -10,7 +10,7 @@ from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 
 def _qemu(api) -> QemuCommands:
-    return QemuCommands(api, "pve1", "local", AsyncMock(), MagicMock())
+    return QemuCommands(api, "pve1", "local", MagicMock())
 
 
 @pytest.mark.asyncio

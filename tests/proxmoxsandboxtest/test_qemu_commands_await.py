@@ -34,7 +34,6 @@ def _qemu() -> QemuCommands:
         async_proxmox=MagicMock(),
         node="pve",
         image_storage="local-lvm",
-        task_wrapper=MagicMock(),
         storage_commands=MagicMock(),
     )
 
