@@ -264,6 +264,7 @@ cat << 'EOFPATCH' | patch /usr/share/perl5/PVE/Network/SDN/Subnets.pm
          my $reversednszone = get_reversedns_zone($subnetid, $subnet, $reversedns, $ip);
 
 EOFPATCH
+# /usr/share/perl5/PVE/Network/SDN/Subnets.pm is managed by libpve-network-perl, so we must prevent an upgrade undoing the patch
 apt-mark hold libpve-network-perl
 
 STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
