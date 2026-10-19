@@ -14,7 +14,6 @@ from proxmoxsandbox._impl.async_proxmox import (
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox.schema import VmConfig
 
 # Budgets for the two VM readiness preconditions, in seconds.
@@ -45,7 +44,6 @@ class QemuCommands(abc.ABC):
     TRACE_NAME = "proxmox_qemu_command"
 
     async_proxmox: AsyncProxmoxAPI
-    task_wrapper: TaskWrapper
     image_storage: str
     storage_commands: LocalStorageCommands
     node: str
@@ -56,11 +54,9 @@ class QemuCommands(abc.ABC):
         async_proxmox: AsyncProxmoxAPI,
         node: str,
         image_storage: str,
-        task_wrapper: TaskWrapper,
         storage_commands: LocalStorageCommands,
     ):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = task_wrapper
         self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
@@ -516,91 +512,82 @@ class QemuCommands(abc.ABC):
         vm_id: int,
         extra_tags: List[str] = [],
     ) -> None:
-        async def update_network() -> None:
-            network_update_json: ProxmoxJsonDataType = {}
+        network_update_json: ProxmoxJsonDataType = {}
 
-            nic_prefix = (
-                "virtio"
-                if vm_config.nic_controller is None
-                else vm_config.nic_controller
-            )
-            # If we have nics configured, we need to look up existing VNETs
-            existing_vnet_mapping = {}
-            try:
-                # Fetch all existing VNETs from Proxmox
-                all_vnets = await self.async_proxmox.request(
-                    "GET", "/cluster/sdn/vnets"
-                )
+        nic_prefix = (
+            "virtio" if vm_config.nic_controller is None else vm_config.nic_controller
+        )
+        # If we have nics configured, we need to look up existing VNETs
+        existing_vnet_mapping = {}
+        try:
+            # Fetch all existing VNETs from Proxmox
+            all_vnets = await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
 
-                if all_vnets:
-                    for vnet in all_vnets:
-                        if "alias" in vnet and vnet["alias"]:
-                            # Map alias to the actual VNET ID
-                            existing_vnet_mapping[vnet["alias"]] = vnet["vnet"]
-            except Exception as e:
-                self.logger.error(f"Error fetching existing VNETs: {e}")
+            if all_vnets:
+                for vnet in all_vnets:
+                    if "alias" in vnet and vnet["alias"]:
+                        # Map alias to the actual VNET ID
+                        existing_vnet_mapping[vnet["alias"]] = vnet["vnet"]
+        except Exception as e:
+            self.logger.error(f"Error fetching existing VNETs: {e}")
 
-            self.logger.debug(f"Existing VNET mapping: {existing_vnet_mapping}")
-            self.logger.debug(f"SDN VNET aliases: {sdn_vnet_aliases}")
+        self.logger.debug(f"Existing VNET mapping: {existing_vnet_mapping}")
+        self.logger.debug(f"SDN VNET aliases: {sdn_vnet_aliases}")
 
-            if vm_config.nics is None:
-                if (
-                    vm_config.vm_source_config.built_in
-                    or vm_config.vm_source_config.ova
-                ):
-                    await self.remove_existing_nics(vm_id)
-                    # Only add the first VNET if
-                    # there are any defined in sdn_vnet_aliases
-                    if sdn_vnet_aliases and len(sdn_vnet_aliases) > 0:
-                        first_vnet_id = sdn_vnet_aliases[0][0]
-                        firewall_flag = ",firewall=1" if vm_config.firewall else ""
-                        network_update_json["net0"] = (
-                            f"{nic_prefix},bridge={first_vnet_id}{firewall_flag}"
-                        )
-                    # otherwise do nothing - no networks will be added
-                # for other vm_source_configs, we *do not touch* networking config
-            else:
+        if vm_config.nics is None:
+            if vm_config.vm_source_config.built_in or vm_config.vm_source_config.ova:
                 await self.remove_existing_nics(vm_id)
-                # Convert the SDN aliases to a mapping
-                alias_mapping = self._convert_sdn_vnet_aliases(sdn_vnet_aliases)
+                # Only add the first VNET if
+                # there are any defined in sdn_vnet_aliases
+                if sdn_vnet_aliases and len(sdn_vnet_aliases) > 0:
+                    first_vnet_id = sdn_vnet_aliases[0][0]
+                    firewall_flag = ",firewall=1" if vm_config.firewall else ""
+                    network_update_json["net0"] = (
+                        f"{nic_prefix},bridge={first_vnet_id}{firewall_flag}"
+                    )
+                # otherwise do nothing - no networks will be added
+            # for other vm_source_configs, we *do not touch* networking config
+        else:
+            await self.remove_existing_nics(vm_id)
+            # Convert the SDN aliases to a mapping
+            alias_mapping = self._convert_sdn_vnet_aliases(sdn_vnet_aliases)
 
-                # For each NIC in the config
-                for i, nic in enumerate(vm_config.nics):
-                    # Check if the alias exists in our mapping first
-                    # (from configured SDN)
-                    if nic.vnet_alias in alias_mapping:
-                        bridge_name = alias_mapping[nic.vnet_alias]
-                    # Then check if it exists in existing VNETs
-                    elif nic.vnet_alias in existing_vnet_mapping:
-                        bridge_name = existing_vnet_mapping[nic.vnet_alias]
-                    else:
-                        # If we can't find it anywhere,
-                        # log what we found and raise an error
-                        self.logger.error(
-                            f"VNET alias '{nic.vnet_alias}' not found in Proxmox."
-                        )
-                        self.logger.error(
-                            f"Available aliases: {list(existing_vnet_mapping.keys())}"
-                        )
-                        raise ValueError(
-                            f"VNET alias '{nic.vnet_alias}' not found in Proxmox"
-                        )
+            # For each NIC in the config
+            for i, nic in enumerate(vm_config.nics):
+                # Check if the alias exists in our mapping first
+                # (from configured SDN)
+                if nic.vnet_alias in alias_mapping:
+                    bridge_name = alias_mapping[nic.vnet_alias]
+                # Then check if it exists in existing VNETs
+                elif nic.vnet_alias in existing_vnet_mapping:
+                    bridge_name = existing_vnet_mapping[nic.vnet_alias]
+                else:
+                    # If we can't find it anywhere,
+                    # log what we found and raise an error
+                    self.logger.error(
+                        f"VNET alias '{nic.vnet_alias}' not found in Proxmox."
+                    )
+                    self.logger.error(
+                        f"Available aliases: {list(existing_vnet_mapping.keys())}"
+                    )
+                    raise ValueError(
+                        f"VNET alias '{nic.vnet_alias}' not found in Proxmox"
+                    )
 
-                    netx = f"{nic_prefix},bridge={bridge_name}"
-                    if nic.mac:
-                        netx += f",macaddr={str(nic.mac).upper()}"
-                    if vm_config.firewall:
-                        netx += ",firewall=1"
-                    network_update_json[f"net{i}"] = netx
+                netx = f"{nic_prefix},bridge={bridge_name}"
+                if nic.mac:
+                    netx += f",macaddr={str(nic.mac).upper()}"
+                if vm_config.firewall:
+                    netx += ",firewall=1"
+                network_update_json[f"net{i}"] = netx
 
-            if network_update_json:
-                await self.async_proxmox.request(
-                    "POST",
-                    f"/nodes/{self.node}/qemu/{vm_id}/config",
-                    json=network_update_json,
-                )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(update_network)
+        if network_update_json:
+            upid = await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{vm_id}/config",
+                json=network_update_json,
+            )
+            await self.async_proxmox.wait_for_task(upid=upid)
 
         upid = await self.async_proxmox.request(
             "POST",
