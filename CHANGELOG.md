@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- EC2 hosts have `inspect-proxmox-ready.service`, active once a boot has the fixups done and the API up, so a caller can poll one unit over SSM instead of inferring readiness from the install log; `launch.sh` does so. Hosts from `userdata.sh` carry contract `aisi4`.
 - Bundled provisioning scripts `apt-mark hold` the rebuilt `pve-qemu-kvm` and the patched `libpve-network-perl`. Hosts built earlier need `apt-mark hold pve-qemu-kvm libpve-network-perl` applied by hand.
 - VMs with `is_sandbox=False` are no longer given to Inspect as sandboxes, fixing a bug where Inspect since 0.3.274 tries to `exec()` on every sandbox, causing ~7-minute timeouts for each VM without a guest agent during sample init.
 - `kali2025.4` built-in now installs `kali-linux-everything`; delete any existing `builtin-kali2025.4` template to pick this up

@@ -271,7 +271,7 @@ STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
 cat > "$STAMP" << 'STAMP_CONTRACT'
 #!/bin/bash
 set -euo pipefail
-C=aisi3
+C=aisi4
 F=/usr/share/perl5/PVE/pvecfg.pm
 before=$(md5sum < "$F")
 sed -i -E "s/\.aisi[0-9]+//g
@@ -774,6 +774,26 @@ WantedBy=multi-user.target
 OTELAPPLYUNIT
 systemctl daemon-reload
 systemctl enable cloudwatch-otel-apply.service
+
+# Per-boot readiness, as a unit: active once the fixups have run and pveproxy is
+# up (it binds before forking, so After= means listening). Requires= keeps it
+# from starting if a fixup failed, and takes it down when the egress lockdown's
+# halt stops pveproxy. Poll with `systemctl is-active`. Contract aisi4.
+cat > /etc/systemd/system/inspect-proxmox-ready.service << 'READY_UNIT'
+[Unit]
+Description=Host ready: per-boot fixups done and the API up
+Requires=pveproxy.service proxmox-ami-fixup-password.service proxmox-ami-fixup-certs.service proxmox-ami-fixup-firewall.service
+After=pveproxy.service proxmox-ami-fixup-password.service proxmox-ami-fixup-certs.service proxmox-ami-fixup-firewall.service inspect-proxmox-egress-lockdown.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+
+[Install]
+WantedBy=multi-user.target
+READY_UNIT
+systemctl enable inspect-proxmox-ready.service
 
 pveum user list --output-format json | jq -r '.[].userid' |
 while IFS= read -r userid; do

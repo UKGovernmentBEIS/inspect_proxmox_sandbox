@@ -273,14 +273,13 @@ runcmd:
 
         await attach_to_vm()
 
-    # for test code only
-    async def clear_builtins(self) -> None:
-        existing_vms = await self.known_builtins()
-        for built_in, vm_id in existing_vms.items():
-            await self.qemu_commands.destroy_vm(vm_id=vm_id, name=f"inspect-{built_in}")
+    async def remove_source_images(self) -> None:
+        """Delete the downloaded upstream images from import storage.
 
-        existing_content = await self.read_all_content()
-
+        Templates hold their own copy of the disk (import-from copies it), so
+        this only means a later ensure_exists for a missing built-in downloads
+        again.
+        """
         storage_names_to_delete = [
             Path(urlparse(UBUNTU_URL).path).name,
             Path(urlparse(DEBIAN_13_URL).path).name,
@@ -288,7 +287,7 @@ runcmd:
         ]
 
         deletion_upids: list[str] = []
-        for content in existing_content:
+        for content in await self.read_all_content():
             if content["volid"]:
                 for storage_name in storage_names_to_delete:
                     if content["volid"].endswith(storage_name):
@@ -301,6 +300,14 @@ runcmd:
 
         for upid in deletion_upids:
             await self.async_proxmox.wait_for_task(upid=upid)
+
+    # for test code only
+    async def clear_builtins(self) -> None:
+        existing_vms = await self.known_builtins()
+        for built_in, vm_id in existing_vms.items():
+            await self.qemu_commands.destroy_vm(vm_id=vm_id, name=f"inspect-{built_in}")
+
+        await self.remove_source_images()
 
     async def known_builtins(self) -> Dict[str, int]:
         existing_vms = await self.qemu_commands.list_vms()
