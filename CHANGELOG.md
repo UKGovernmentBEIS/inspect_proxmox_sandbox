@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: a guest file-read reply that qemu-server 9.2.11+ rejects now raises `GuestAgentTamperError` at once; it was retried as a dropped guest-agent channel for several minutes and surfaced as a timeout
 - VMs with `is_sandbox=False` are no longer given to Inspect as sandboxes, fixing a bug where Inspect since 0.3.274 tries to `exec()` on every sandbox, causing ~7-minute timeouts for each VM without a guest agent during sample init.
 - `kali2025.4` built-in now installs `kali-linux-everything`; delete any existing `builtin-kali2025.4` template to pick this up
 - Bundled provisioners restrict guest access to host services before connection tracking, retaining management ingress and DHCP/DNS. New hosts carry contract `aisi3`.
