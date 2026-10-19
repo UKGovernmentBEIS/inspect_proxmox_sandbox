@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 
+GUARD=inspect-proxmox-block-cloud-metadata.service
+
 if [ "$1" = configure ]; then
     # PVE SDN runs its own dnsmasq per zone; the system instance would take port 53.
     deb-systemd-helper disable dnsmasq.service >/dev/null 2>&1 || true
@@ -9,6 +11,23 @@ if [ "$1" = configure ]; then
     # Fails the install if the patched packages aren't actually in place: the stamp is
     # the whole point, so a host that can't carry it must not look installed.
     /usr/libexec/inspect-proxmox/stamp-contract
+
+    # The guard, by hand (see debian/rules). Enabled like dh would; on upgrade it is
+    # reloaded, never restarted, because the units that Require it would restart too.
+    deb-systemd-helper unmask "$GUARD" >/dev/null || true
+    if deb-systemd-helper --quiet was-enabled "$GUARD"; then
+        deb-systemd-helper enable "$GUARD" >/dev/null || true
+    else
+        deb-systemd-helper update-state "$GUARD" >/dev/null || true
+    fi
+    if [ -d /run/systemd/system ]; then
+        deb-systemd-invoke daemon-reload >/dev/null || true
+        if [ -n "$2" ]; then
+            deb-systemd-invoke reload-or-restart "$GUARD" >/dev/null || true
+        else
+            deb-systemd-invoke start "$GUARD" >/dev/null || true
+        fi
+    fi
 fi
 
 #DEBHELPER#

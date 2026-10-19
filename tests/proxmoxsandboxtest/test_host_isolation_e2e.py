@@ -34,7 +34,9 @@ HOST_UNITS_SCRIPT = """
 set -eu
 units="inspect-proxmox-host-configure.service"
 units="$units inspect-proxmox-block-cloud-metadata.service"
-if dpkg-query -W inspect-proxmox-host-ec2 >/dev/null 2>&1; then
+ec2_state=$(dpkg-query -W -f '${db:Status-Status}' \\
+    inspect-proxmox-host-ec2 2>/dev/null || true)
+if [ "$ec2_state" = installed ]; then
     units="$units inspect-proxmox-ec2-network.service"
 fi
 for unit in $units; do

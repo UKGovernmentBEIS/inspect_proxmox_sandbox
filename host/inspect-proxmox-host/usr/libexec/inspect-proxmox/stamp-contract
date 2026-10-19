@@ -13,15 +13,24 @@ N=$(dpkg-query -W -f '${Version}' inspect-proxmox-host)
 N=${N%%[^0-9]*}
 before=$(md5sum < "$F")
 restart_if_changed() {
-    [ "$(md5sum < "$F")" = "$before" ] || systemctl try-reload-or-restart pvedaemon pveproxy
+    [ "$(md5sum < "$F")" = "$before" ] || [ ! -d /run/systemd/system ] || systemctl try-reload-or-restart pvedaemon pveproxy
 }
 
 sed -i -E 's/\.aisi[0-9]+//g' "$F"
 
 ok=1
-/usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -qF quirk_mode_page_set_block_size \
+# The behavioural checks catch a patch that went missing; the version checks catch an
+# upstream package that happens to pass them (the scsi quirk is in QEMU 11.0.5) but
+# lacks the rest of the rebuild.
+for pkg in pve-qemu-kvm libpve-network-perl; do
+    case "$(dpkg-query -W -f '${Version}' "$pkg" 2>/dev/null)" in
+        *+aisi*) ;;
+        *) echo "ERROR: $pkg is not the AISI rebuild" >&2; ok=0 ;;
+    esac
+done
+/usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -F quirk_mode_page_set_block_size >/dev/null \
     || { echo "ERROR: pve-qemu-kvm lacks the scsi-disk quirk patch" >&2; ok=0; }
-grep -qF 'DNS_SETUP:' /usr/share/perl5/PVE/Network/SDN/Subnets.pm \
+grep -F 'DNS_SETUP:' /usr/share/perl5/PVE/Network/SDN/Subnets.pm >/dev/null \
     || { echo "ERROR: libpve-network-perl lacks the IPAM MAC-reuse patch" >&2; ok=0; }
 if [ "$ok" = 0 ]; then
     echo "ERROR: not stamping aisi$N; this host reports contract 0" >&2

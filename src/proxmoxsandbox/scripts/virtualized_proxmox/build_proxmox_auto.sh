@@ -154,15 +154,18 @@ source = "from-iso"
 ordering = "fully-up"
 EOFANSWERS
 
-# Bump with each host/debian/changelog entry; same bundle scripts/ec2/userdata.sh installs.
+# Bump both with each host/debian/changelog entry; same bundle and sha256 as scripts/ec2/userdata.sh.
 INSPECT_PROXMOX_HOST_RELEASE=host-v4
+INSPECT_PROXMOX_HOST_BUNDLE_SHA256=
 INSPECT_PROXMOX_HOST_BUNDLE_URL="${INSPECT_PROXMOX_HOST_BUNDLE_URL:-https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/releases/download/$INSPECT_PROXMOX_HOST_RELEASE/inspect-proxmox-host-debs.tar}"
 
-# The URL is baked in: on-first-boot.sh runs inside the new VM, where this environment isn't visible.
+# Baked in: on-first-boot.sh runs inside the new VM, where this environment isn't visible.
+# The script stays in the ISO and the template, so don't pass a URL you'd mind others reading.
 cat << EOFONFIRSTBOOTHEAD > on-first-boot.sh
 #!/usr/bin/env bash
 set -euo pipefail
 INSPECT_PROXMOX_HOST_BUNDLE_URL='$INSPECT_PROXMOX_HOST_BUNDLE_URL'
+INSPECT_PROXMOX_HOST_BUNDLE_SHA256='$INSPECT_PROXMOX_HOST_BUNDLE_SHA256'
 EOFONFIRSTBOOTHEAD
 cat << 'EOFONFIRSTBOOT' >> on-first-boot.sh
 
@@ -196,9 +199,12 @@ apt-get install -y xterm curl
 mkdir -p /tmp/inspect-proxmox-host
 cd /tmp/inspect-proxmox-host
 curl -fsSL "$INSPECT_PROXMOX_HOST_BUNDLE_URL" -o debs.tar
+if [ -n "$INSPECT_PROXMOX_HOST_BUNDLE_SHA256" ]; then
+    echo "$INSPECT_PROXMOX_HOST_BUNDLE_SHA256  debs.tar" | sha256sum -c
+fi
 tar xf debs.tar
-# Downgrades allowed: the bundle's rebuilds must win even if the repo has moved past them (see the apt pin they install).
-apt-get install -y --allow-downgrades ./inspect-proxmox-host_*.deb ./pve-qemu-kvm_*.deb ./libpve-network-*.deb
+# A repo that has moved past a rebuild makes this a downgrade, which apt refuses: rebase the rebuild.
+apt-get install -y ./inspect-proxmox-host_*.deb ./pve-qemu-kvm_*.deb ./libpve-network-*.deb
 cd /
 rm -rf /tmp/inspect-proxmox-host
 

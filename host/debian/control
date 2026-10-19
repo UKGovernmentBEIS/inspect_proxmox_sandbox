@@ -11,8 +11,8 @@ Package: inspect-proxmox-host
 Architecture: all
 Depends: ${misc:Depends},
          proxmox-ve,
-         pve-qemu-kvm (>= 11.0.5-0+aisi1),
-         libpve-network-perl (>= 1.6.7+aisi1),
+         pve-qemu-kvm (= 11.0.5-0+aisi1),
+         libpve-network-perl (= 1.6.7+aisi1),
          dnsmasq,
          iptables,
          jq

@@ -10,3 +10,5 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+# Name the pre-deb provisioners used; off-host checkers still ask for it. Drop once they check the contract instead.
+Alias=proxmox-ami-fixup-certs.service

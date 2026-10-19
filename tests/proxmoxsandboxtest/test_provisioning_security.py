@@ -168,8 +168,31 @@ def test_provisioners_install_the_current_release() -> None:
         script = provisioner.read_text()
         assert release in script, provisioner
         assert "inspect-proxmox-host-debs.tar" in script, provisioner
-        assert "apt-get install -y --allow-downgrades ./" in script, provisioner
+        # No --allow-downgrades: a repo that has moved past a rebuild must fail
+        # the bake.
+        assert "apt-get install -y ./" in script, provisioner
+        assert "--allow-downgrades" not in script, provisioner
+        assert "INSPECT_PROXMOX_HOST_BUNDLE_SHA256=" in script, provisioner
+        assert '  /root/inspect-proxmox-host-debs.tar" | sha256sum -c' in script or (
+            '  debs.tar" | sha256sum -c' in script
+        ), provisioner
         assert "inspect-proxmox-host-seal" in script, provisioner
+
+
+def test_ec2_provisioner_keeps_the_bundle_url_out_of_the_image() -> None:
+    # Stage 1 fetches under `set +x` and nothing persists the URL: an override may be a
+    # presigned URL, and /root/install-proxmox.log is baked into the AMI.
+    script = (EC2_SCRIPTS / "userdata.sh").read_text()
+    assert "proxmox-install.env" not in script
+    for use in (
+        'INSPECT_PROXMOX_HOST_BUNDLE_URL="${',
+        'curl -fsSL "$INSPECT_PROXMOX_HOST_BUNDLE_URL"',
+    ):
+        at = script.index(use)
+        assert script.rfind("set +x", 0, at) > script.rfind("set -x", 0, at), use
+    assert (
+        "rm -rf /tmp/inspect-proxmox-host /root/inspect-proxmox-host-debs.tar" in script
+    )
 
 
 def _rebuild_version(name: str) -> str:
@@ -183,8 +206,9 @@ def test_depends_and_pin_track_the_rebuilds() -> None:
     control = (HOST / "debian" / "control").read_text()
     qemu = _rebuild_version("pve-qemu")
     network = _rebuild_version("pve-network")
-    assert f"pve-qemu-kvm (>= {qemu})" in control
-    assert f"libpve-network-perl (>= {network})" in control
+    # Exact, so an upstream version cannot satisfy the dependency; only the pin would.
+    assert f"pve-qemu-kvm (= {qemu})" in control
+    assert f"libpve-network-perl (= {network})" in control
     for version in (qemu, network):
         assert "+aisi" in version
 
@@ -193,6 +217,7 @@ def test_depends_and_pin_track_the_rebuilds() -> None:
     ).read_text()
     for package in ("pve-qemu-kvm", "libpve-network-perl", "libpve-network-api-perl"):
         assert package in pin
+    assert r"Pin: version /\+aisi/" in pin
     assert "Pin-Priority: 1001" in pin
 
 
@@ -200,6 +225,10 @@ def test_stamp_refuses_without_the_patches() -> None:
     stamp = (LIBEXEC / "stamp-contract").read_text()
     assert "quirk_mode_page_set_block_size" in stamp
     assert "DNS_SETUP:" in stamp
+    # An upstream package can pass the behavioural checks (the quirk is in QEMU 11.0.5);
+    # the stamp must also insist on the rebuilds themselves.
+    assert "for pkg in pve-qemu-kvm libpve-network-perl; do" in stamp
+    assert "*+aisi*) ;;" in stamp
     patch = (
         HOST / "rebuilds" / "pve-network" / "ipam-reuse-ip-for-known-mac.patch"
     ).read_text()
@@ -387,3 +416,78 @@ print('UDP_AND_TCP_DNS_OK')
         self.assertNotEqual(result.returncode, 0)
         rules = self.ns("host", "iptables", "-t", "raw", "-S")
         self.assertNotIn("INSP-SANDBOX-HOST-LOCAL", rules)
+
+
+def test_guard_lifecycle_is_hand_managed() -> None:
+    # dh's default snippets restart a unit on upgrade and stop it on remove. The
+    # guard is RequiredBy pvedaemon, pveproxy and pve-guests, so either would take
+    # the API and every VM down. rules keeps it (and the OnFailure-only halt unit)
+    # out of dh_installsystemd,
+    # and the maintainer scripts enable, start, reload and disable it themselves.
+    rules = (HOST / "debian" / "rules").read_text()
+    managed = [
+        line.strip().rstrip("\\").strip()
+        for line in rules.splitlines()
+        if line.strip().startswith("inspect-proxmox-")
+    ]
+    assert managed == [
+        "inspect-proxmox-egress-lockdown.service",
+        "inspect-proxmox-egress-lockdown.timer",
+        "inspect-proxmox-host-configure.service",
+    ]
+    assert "--no-enable" not in rules and "--no-start" not in rules
+    postinst = (HOST / "debian" / "inspect-proxmox-host.postinst").read_text()
+    assert 'deb-systemd-helper enable "$GUARD"' in postinst
+    assert 'deb-systemd-invoke reload-or-restart "$GUARD"' in postinst
+    assert 'deb-systemd-invoke start "$GUARD"' in postinst
+    assert 'restart "$GUARD"' not in postinst.replace("reload-or-restart", "")
+    postrm = (HOST / "debian" / "inspect-proxmox-host.postrm").read_text()
+    # On remove as well as purge: see the comment in postrm.
+    assert 'deb-systemd-helper purge "$GUARD"' in postrm
+    assert 'disable "$GUARD"' not in postrm
+
+
+def test_ec2_units_order_after_their_prerequisites() -> None:
+    ec2_units = EC2_PKG / "usr" / "lib" / "systemd" / "system"
+    network = (ec2_units / "inspect-proxmox-ec2-network.service").read_text()
+    # NAT ACCEPTs must come after the guard's drops exist.
+    assert "inspect-proxmox-block-cloud-metadata.service" in _unit_setting(
+        network, "After"
+    )
+    assert "inspect-proxmox-ec2-hostname.service" in _unit_setting(network, "After")
+    hostname = (ec2_units / "inspect-proxmox-ec2-hostname.service").read_text()
+    assert "pve-cluster.service" in _unit_setting(hostname, "Before")
+    # Firewall rules are node-scoped, so they must be created under the final node name.
+    drop_in = (
+        ec2_units / "inspect-proxmox-host-configure.service.d" / "ec2.conf"
+    ).read_text()
+    assert "inspect-proxmox-ec2-hostname.service" in _unit_setting(drop_in, "After")
+
+
+def test_old_unit_names_stay_resolvable() -> None:
+    # Off-host checkers (inspect-aisi-sandbox) still ask systemctl for the
+    # pre-deb names.
+    expected = {
+        EC2_PKG / "usr/lib/systemd/system/inspect-proxmox-ec2-hostname.service": (
+            "proxmox-ami-fixup-hostname.service"
+        ),
+        EC2_PKG / "usr/lib/systemd/system/inspect-proxmox-ec2-certs.service": (
+            "proxmox-ami-fixup-certs.service"
+        ),
+        EC2_PKG / "usr/lib/systemd/system/inspect-proxmox-ec2-network.service": (
+            "proxmox-ami-fixup-nat.service"
+        ),
+        UNITS / "inspect-proxmox-host-configure.service": (
+            "proxmox-ami-fixup-firewall.service"
+        ),
+    }
+    for unit, alias in expected.items():
+        assert _unit_setting(unit.read_text(), "Alias") == [alias], unit
+
+
+def _unit_setting(unit: str, key: str) -> list[str]:
+    values: list[str] = []
+    for line in unit.splitlines():
+        if line.startswith(f"{key}="):
+            values.extend(line.split("=", 1)[1].split())
+    return values

@@ -7,14 +7,27 @@
 set -euxo pipefail
 exec > >(while IFS= read -r line; do echo "$(date '+%H:%M:%S') $line"; done | tee /root/install-proxmox.log) 2>&1
 
-# Bump with each host/debian/changelog entry. The bundle holds inspect-proxmox-host,
+# Bump both with each host/debian/changelog entry. The bundle holds inspect-proxmox-host,
 # inspect-proxmox-host-ec2 and the AISI rebuilds of pve-qemu-kvm and libpve-network-perl.
+# The sha256 is of the released inspect-proxmox-host-debs.tar; empty skips the check, which
+# is only acceptable for a candidate bundle you built yourself.
+# Not traced: an override URL may be presigned, and this log ends up in the image.
 INSPECT_PROXMOX_HOST_RELEASE=host-v4
+INSPECT_PROXMOX_HOST_BUNDLE_SHA256=
+set +x
 INSPECT_PROXMOX_HOST_BUNDLE_URL="${INSPECT_PROXMOX_HOST_BUNDLE_URL:-https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/releases/download/$INSPECT_PROXMOX_HOST_RELEASE/inspect-proxmox-host-debs.tar}"
-echo "INSPECT_PROXMOX_HOST_BUNDLE_URL='$INSPECT_PROXMOX_HOST_BUNDLE_URL'" > /root/proxmox-install.env
+set -x
 
 apt-get update -y
 apt-get install -y wget curl
+
+# Fetched now, installed in stage 2 once proxmox-ve is in.
+set +x
+curl -fsSL "$INSPECT_PROXMOX_HOST_BUNDLE_URL" -o /root/inspect-proxmox-host-debs.tar
+set -x
+if [ -n "$INSPECT_PROXMOX_HOST_BUNDLE_SHA256" ]; then
+    echo "$INSPECT_PROXMOX_HOST_BUNDLE_SHA256  /root/inspect-proxmox-host-debs.tar" | sha256sum -c
+fi
 
 imds() {
     local token
@@ -117,7 +130,6 @@ cat > /root/proxmox-install-stage2.sh << 'STAGE2'
 #!/bin/bash
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
-source /root/proxmox-install.env
 
 echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selections
 echo "postfix postfix/mailname string proxmox.localdomain" | debconf-set-selections
@@ -135,14 +147,14 @@ dpkg -i /tmp/cwagent.deb
 
 # Everything beyond a stock Proxmox. The postinst refuses unless the rebuilt Proxmox
 # packages are in place, so a partial bundle fails here rather than producing a host
-# that reports contract 0.
+# that reports contract 0. If the repo has moved past a rebuild, apt refuses the
+# downgrade and the bake fails: rebase the rebuild rather than ship an older one.
 mkdir -p /tmp/inspect-proxmox-host
 cd /tmp/inspect-proxmox-host
-curl -fsSL "$INSPECT_PROXMOX_HOST_BUNDLE_URL" -o debs.tar
-tar xf debs.tar
-apt-get install -y --allow-downgrades ./*.deb
+tar xf /root/inspect-proxmox-host-debs.tar
+apt-get install -y ./*.deb
 cd /
-rm -rf /tmp/inspect-proxmox-host
+rm -rf /tmp/inspect-proxmox-host /root/inspect-proxmox-host-debs.tar
 
 inspect-proxmox-host-seal
 
