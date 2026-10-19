@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-- Fix: with `--no-sandbox-cleanup`, a failed `sample_init` now leaves its partial VMs and SDN up for inspection instead of destroying them
-- Fix: a `sample_init` whose pre-clean of the instance fails now errors instead of creating VMs next to the leftovers; SDN zones are tracked from before creation and stay tracked (and are retried) when a teardown fails
-- `VnetConfig.alias` is now validated against Proxmox's rule (up to 256 of `()-_.`, word and space characters); previously any string passed and Proxmox rejected it mid-`sample_init`
-- Fix: a `VmConfig.name` with a trailing newline is rejected; cleanup no longer takes a Proxmox "does not exist" about another object (a storage, a VNET) as the VM or zone being gone; storage lookups no longer match a file whose name merely ends in the wanted name
 - VMs with `is_sandbox=False` are no longer given to Inspect as sandboxes, fixing a bug where Inspect since 0.3.274 tries to `exec()` on every sandbox, causing ~7-minute timeouts for each VM without a guest agent during sample init.
 - `kali2025.4` built-in now installs `kali-linux-everything`; delete any existing `builtin-kali2025.4` template to pick this up
 - Bundled provisioners restrict guest access to host services before connection tracking, retaining management ingress and DHCP/DNS. New hosts carry contract `aisi3`.
@@ -35,6 +31,10 @@
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 - Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
 - VMs boot concurrently rather than one after another
+- Fix: with `--no-sandbox-cleanup`, a failed `sample_init` now leaves its partial VMs and SDN up for inspection instead of destroying them
+- Fix: a `sample_init` whose pre-clean of the instance fails now errors instead of creating VMs next to the leftovers; SDN zones are tracked from before creation and stay tracked (and are retried) when a teardown fails
+- `VnetConfig.alias` is now validated against Proxmox's rule (up to 256 of `()-_.`, word and space characters); previously any string passed and Proxmox rejected it mid-`sample_init`
+- Fix: a `VmConfig.name` with a trailing newline is rejected; cleanup no longer takes a Proxmox "does not exist" about another object (a storage, a VNET) as the VM or zone being gone; storage lookups no longer match a file whose name merely ends in the wanted name
 
 ## 0.11.0 - 2026-06-01
 
