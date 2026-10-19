@@ -3,8 +3,9 @@
 # container, with shellcheck, lintian and systemd-analyze verify as gates.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-# build/ contents are root-owned from the previous container run
-[ -d "$HERE/build" ] && docker run --rm -v "$HERE/build:/build" debian:trixie rm -rf /build/src /build/inspect-proxmox-host_* /build/inspect-proxmox-host-ec2_*
+# build/ contents are root-owned from the previous container run; the glob must expand in
+# the container, or a stale older version stays behind for bundle.sh to pack.
+[ -d "$HERE/build" ] && docker run --rm -v "$HERE/build:/build" debian:trixie sh -c 'rm -rf /build/src /build/inspect-proxmox-host_* /build/inspect-proxmox-host-ec2_*'
 mkdir -p "$HERE/build/src"
 cp -a "$HERE/debian" "$HERE/inspect-proxmox-host" "$HERE/inspect-proxmox-host-ec2" "$HERE/build/src/"
 docker build -q -t inspect-proxmox-host-build "$HERE" >/dev/null
