@@ -212,29 +212,31 @@ poweroff
 EOFONFIRSTBOOT
 
 # Pre-pull base image from a pull-through cache if configured, e.g.:
-# DEBIAN_BASE_IMAGE=123456789.dkr.ecr.eu-west-2.amazonaws.com/docker-hub/library/debian:bookworm-slim
+# DEBIAN_BASE_IMAGE=123456789.dkr.ecr.eu-west-2.amazonaws.com/docker-hub/library/debian:trixie-slim
 if [ -n "${DEBIAN_BASE_IMAGE:-}" ]; then
     docker pull "$DEBIAN_BASE_IMAGE"
-    docker tag "$DEBIAN_BASE_IMAGE" debian:bookworm-slim
+    docker tag "$DEBIAN_BASE_IMAGE" debian:trixie-slim
 fi
 
+# Proxmox removes superseded ISOs from enterprise.proxmox.com/iso, so this 404s when a
+# new point release comes out; bump it then. The assistant must be new enough for the ISO.
 cat << 'EOFDOCKER' > Dockerfile
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y \
-     gnupg \
+     ca-certificates \
      wget \
      xorriso \
      && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /iso
 
-RUN wget -q -O /iso/proxmox.iso https://enterprise.proxmox.com/iso/proxmox-ve_9.0-1.iso
+RUN wget -q -O /iso/proxmox.iso https://enterprise.proxmox.com/iso/proxmox-ve_9.2-1.iso
 
-# Confusingly, although Proxmox 9 is based on trixie (Debian 13), this Docker build
-# must continue to use bookworm (Debian 12) because there are not yet any trixie proxmox packages.
-RUN echo "deb http://download.proxmox.com/debian/pve/ bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve.list
-RUN wget -O- http://download.proxmox.com/debian/proxmox-release-bookworm.gpg | apt-key add -
+RUN wget -q -O /usr/share/keyrings/proxmox-archive-keyring.gpg https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
+     && echo "136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45  /usr/share/keyrings/proxmox-archive-keyring.gpg" | sha256sum -c \
+     && printf 'Types: deb\nURIs: http://download.proxmox.com/debian/pve\nSuites: trixie\nComponents: pve-no-subscription\nSigned-By: /usr/share/keyrings/proxmox-archive-keyring.gpg\n' \
+        > /etc/apt/sources.list.d/pve-no-subscription.sources
 
 RUN apt-get update && apt-get install -y \
      proxmox-auto-install-assistant \
