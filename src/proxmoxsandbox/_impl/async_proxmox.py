@@ -272,6 +272,18 @@ class AsyncProxmoxAPI:
                 ),
             )
             if response.is_error:
+                reason = response.reason_phrase
+                # qemu-server >= 9.2.11 validates guest-file-read replies itself;
+                # this prefix means the guest lied. As a bare 500 it gets retried.
+                if response.status_code == 500 and reason.startswith(
+                    "agent file-read:"
+                ):
+                    raise tamper(
+                        vm_id,
+                        "file-read",
+                        "Proxmox rejected the reply",
+                        _bounded_error_text(reason),
+                    )
                 raise _http_status_error(response)
             data = response.json()["data"]
         if modern:
