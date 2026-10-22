@@ -113,6 +113,42 @@ async def test_chunked_upload_does_not_re_enter_exec(os_type, tmp_start, platfor
     executor.exec.assert_not_called()
 
 
+@pytest.mark.parametrize("succeeded", [False, True])
+async def test_iso_attempt_registers_exact_target_before_staging(succeeded):
+    agent = MagicMock(write_file=AsyncMock())
+    filepath = "/tmp/proxmox_exec_test/script.sh"
+    data = b"x" * (guest_exec._WRITE_CHUNK_SIZE + 1)
+    owned = []
+
+    async def attempt(file, contents):
+        assert file == filepath
+        assert contents is data
+        assert owned == [filepath]
+        return succeeded
+
+    attempt_iso = AsyncMock(side_effect=attempt)
+    executor = GuestExecutor(agent, 100, try_iso_write=attempt_iso)
+    executor.exec = AsyncMock()
+
+    parts = await executor._stage_file(filepath, data, owned)
+
+    attempt_iso.assert_awaited_once_with(filepath, data)
+    if succeeded:
+        assert parts == []
+        assert owned == [filepath]
+        agent.write_file.assert_not_awaited()
+    else:
+        assert parts == [f"{filepath}.part0", f"{filepath}.part1"]
+        assert owned == [filepath, *parts]
+        assert (
+            b"".join(
+                call.kwargs["content"] for call in agent.write_file.await_args_list
+            )
+            == data
+        )
+    executor.exec.assert_not_awaited()
+
+
 async def test_write_file_chunks_text_by_encoded_bytes() -> None:
     env = _make_sandbox()
     env.exec = AsyncMock()  # type: ignore[method-assign]

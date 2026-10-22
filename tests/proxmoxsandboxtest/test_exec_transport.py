@@ -2,7 +2,7 @@
 
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -153,4 +153,19 @@ async def test_status_retry_does_not_relaunch(monkeypatch, os_type):
     result = await guest.sandbox(monkeypatch, os_type=os_type).exec(["echo", "test"])
     assert result.success
     assert guest.status_reads == 2
+    assert len(guest.launches) == 1
+
+
+async def test_windows_execution_keeps_qga_staging_with_zero_iso_threshold(monkeypatch):
+    guest = Guest()
+    sandbox = guest.sandbox(monkeypatch, os_type="win11")
+    sandbox.ISO_WRITE_THRESHOLD_BYTES = 0
+
+    with patch("proxmoxsandbox._proxmox_sandbox_environment.IsoWriter") as writer:
+        result = await sandbox.exec(["echo", "x" * 100_000])
+
+    writer.assert_not_called()
+    assert result.success
+    assert len(guest.writes) > 1
+    assert all(".part" in write["file"] for write in guest.writes)
     assert len(guest.launches) == 1

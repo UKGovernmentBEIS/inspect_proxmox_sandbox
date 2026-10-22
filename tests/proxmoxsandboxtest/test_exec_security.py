@@ -20,12 +20,14 @@ async def test_failed_private_directory_setup_never_uploads_payload(os_type, sta
     agent.exec_command = AsyncMock(return_value=123)
     agent.get_agent_exec_status = AsyncMock(return_value=status)
     agent.write_file = AsyncMock()
-    executor = GuestExecutor(agent, 100, os_type)
+    attempt_iso = AsyncMock(return_value=True)
+    executor = GuestExecutor(agent, 100, os_type, try_iso_write=attempt_iso)
 
     with pytest.raises(RuntimeError, match="private execution directory"):
         await executor.exec(["echo", "payload"], input="private input", timeout=1)
 
     agent.write_file.assert_not_awaited()
+    attempt_iso.assert_not_awaited()
     agent.exec_command_once.assert_not_awaited()
     assert agent.exec_command.await_count == 1
     command = agent.exec_command.await_args.args[1]

@@ -33,7 +33,9 @@ def config_file_env():
     del os.environ["PROXMOX_CONFIG_FILE"]
 
 
-async def _sample_init(*vms: VmConfig) -> dict:
+async def _sample_init(
+    *vms: VmConfig, iso_write_threshold_bytes: int | None = None
+) -> dict:
     infra = MagicMock()
     infra.sdn_commands.read_all_vnets = AsyncMock(return_value=[])
     infra.built_in_vm.ensure_exists = AsyncMock()
@@ -55,8 +57,25 @@ async def _sample_init(*vms: VmConfig) -> dict:
         patch.object(InfraCommands, "set_instance"),
     ):
         await ProxmoxSandboxEnvironment.task_init("test_task", None)
-        config = ProxmoxSandboxEnvironmentConfig(vms_config=vms)
+        config = ProxmoxSandboxEnvironment.config_deserialize(
+            {"vms_config": vms, "iso_write_threshold_bytes": iso_write_threshold_bytes}
+        )
+        assert isinstance(config, ProxmoxSandboxEnvironmentConfig)
         return await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
+
+
+@pytest.mark.parametrize("threshold", [None, 0, 64])
+async def test_sample_init_applies_deserialized_iso_threshold(
+    config_file_env, mock_proxmox_api, monkeypatch, threshold
+):
+    monkeypatch.setattr(ProxmoxSandboxEnvironment, "ISO_WRITE_THRESHOLD_BYTES", 1024)
+    sandboxes = await _sample_init(
+        _vm("romeo"), _vm("juliet"), iso_write_threshold_bytes=threshold
+    )
+
+    expected = 1024 if threshold is None else threshold
+    assert all(env.ISO_WRITE_THRESHOLD_BYTES == expected for env in sandboxes.values())
+    assert ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES == 1024
 
 
 async def test_named_default_sandbox_is_registered_under_both_keys(

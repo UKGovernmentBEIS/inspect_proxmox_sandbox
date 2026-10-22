@@ -156,8 +156,10 @@ def test_untimed_command_stops_waiting_even_when_upload_keeps_progressing(monkey
     assert observed.launched is False
 
 
-@pytest.mark.parametrize("stage", ["iso_attach", "iso_detach", "iso_delete"])
-def test_large_exec_scripts_do_not_use_iso_staging(stage):
+@pytest.mark.parametrize(
+    "stage", ["iso_attach", "iso_copy", "iso_detach", "iso_delete"]
+)
+def test_large_exec_iso_transfer_shares_the_execution_deadline(stage):
     observed = isolated(
         Scenario(
             operation="exec",
@@ -166,8 +168,8 @@ def test_large_exec_scripts_do_not_use_iso_staging(stage):
             fault=Fault(stage=stage),
         )
     )
-    assert observed.kind == "exec"
-    assert observed.stdout == "hello\n"
+    assert observed.kind == "timeout"
+    assert observed.launched is False
 
 
 async def test_cancelled_iso_transfer_is_not_reused_by_the_next_write():
@@ -176,6 +178,7 @@ async def test_cancelled_iso_transfer_is_not_reused_by_the_next_write():
     )
     api = AsyncProxmoxAPI("proxmox.test:8006", "test-user", "test-password")
     sandbox = make_sandbox(api)
+    sandbox.ISO_WRITE_THRESHOLD_BYTES = 0
     client = partial(httpx.AsyncClient, transport=httpx.MockTransport(replies.handle))
 
     async def wait_for_attach():
@@ -207,6 +210,7 @@ async def test_slow_successful_iso_cleanup_preserves_the_fast_transfer(stage):
     )
     api = AsyncProxmoxAPI("proxmox.test:8006", "test-user", "test-password")
     sandbox = make_sandbox(api)
+    sandbox.ISO_WRITE_THRESHOLD_BYTES = 0
     client = partial(httpx.AsyncClient, transport=httpx.MockTransport(replies.handle))
 
     with patch("httpx.AsyncClient", client), patch("time.monotonic", replies.now):
@@ -249,8 +253,10 @@ async def test_slow_temporary_file_cleanup_is_allowed_to_finish():
     replies = CleanupReplies()
     api = AsyncProxmoxAPI("proxmox.test:8006", "test-user", "test-password")
     sandbox = make_sandbox(api)
+    payload = b"x" * 100_000
+    sandbox.ISO_WRITE_THRESHOLD_BYTES = len(payload) + 1
     client = partial(httpx.AsyncClient, transport=httpx.MockTransport(replies.handle))
     with patch("httpx.AsyncClient", client), patch("time.monotonic", replies.now):
-        await sandbox.write_file("/sample", b"x" * 100_000)
+        await sandbox.write_file("/sample", payload)
 
     assert replies.cleanup_finished

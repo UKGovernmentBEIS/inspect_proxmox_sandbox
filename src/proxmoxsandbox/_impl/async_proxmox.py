@@ -466,13 +466,18 @@ class AsyncProxmoxAPI:
         self,
         *,
         upid: str,
+        initial_poll_interval: float = 1.0,
     ) -> None:
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")
         node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
 
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            wait=tenacity.wait_exponential(
+                multiplier=initial_poll_interval,
+                min=initial_poll_interval,
+                exp_base=1.3,
+            ),
             stop=tenacity.stop_after_delay(1200),
             retry=tenacity.retry_if_result(lambda x: x is False),
         )

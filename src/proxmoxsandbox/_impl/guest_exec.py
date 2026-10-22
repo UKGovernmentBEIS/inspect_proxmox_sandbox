@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+from collections.abc import Awaitable, Callable
 from logging import getLogger
 from uuid import uuid4
 
@@ -76,6 +77,8 @@ class GuestExecutor:
         agent_commands: AgentCommands,
         vm_id: int,
         os_type: str | None = None,
+        *,
+        try_iso_write: Callable[[str, bytes], Awaitable[bool]] | None = None,
     ) -> None:
         self.agent_commands = agent_commands
         self.vm_id = vm_id
@@ -83,6 +86,7 @@ class GuestExecutor:
         self.platform = exec_windows if windows else exec_linux
         self._separator = "\\" if windows else "/"
         self._inline_stdin_limit = -1 if windows else _INLINE_STDIN_LIMIT
+        self._try_iso_write = try_iso_write
 
     async def exec(
         self,
@@ -114,7 +118,7 @@ class GuestExecutor:
 
         async def prepare_and_launch() -> int:
             nonlocal launch_attempted
-            # Validate the private workspace before QGA creates any data files.
+            # Validate the private workspace before staging any execution data.
             await self._prepare_workspace(workspace)
             stdin = input
             stdin_file = None
@@ -284,13 +288,13 @@ class GuestExecutor:
     async def _stage_file(
         self, filepath: str, data: bytes, disposable: list[str]
     ) -> list[str]:
-        """Upload only into the private workspace; the claimant assembles chunks.
-
-        Generic file transfers can expose staging files or attached ISO contents
-        to other guest users, independently of the destination's permissions.
-        Register targets before writing so failed partial uploads can be cleaned too.
-        """
+        """Try ISO before QGA; the claimant assembles any fallback chunks."""
+        # Register before either transport so a partial upload can be cleaned.
         disposable.append(filepath)
+        if self._try_iso_write is not None and await self._try_iso_write(
+            filepath, data
+        ):
+            return []
         if len(data) <= _WRITE_CHUNK_SIZE:
             await self.agent_commands.write_file(
                 vm_id=self.vm_id, filepath=filepath, content=data
