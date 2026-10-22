@@ -14,7 +14,7 @@ from inspect_ai.util import ExecResult, OutputLimitExceededError
 from proxmoxsandbox._impl.agent_commands import (
     _QGA_MAX_RETRIES,
     AgentCommands,
-    GuestAgentCommunicationTimeoutError,
+    GuestExecNotStartedError,
     HealthcheckTransportExhaustedError,
 )
 from proxmoxsandbox._impl.healthcheck import (
@@ -260,7 +260,7 @@ async def test_confirmed_unhealthy_starts_a_new_probe_budget(monkeypatch):
     [
         _transport_error(),
         _http_500(),
-        GuestAgentCommunicationTimeoutError("communication deadline"),
+        GuestExecNotStartedError(130, TimeoutError("communication deadline")),
         HealthcheckTransportExhaustedError(25),
     ],
 )
