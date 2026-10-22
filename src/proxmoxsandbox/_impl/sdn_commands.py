@@ -310,6 +310,8 @@ class SdnCommands(abc.ABC):
                 vnet_json: ProxmoxJsonDataType = {"vnet": vnet_id, "zone": sdn_zone_id}
                 if vnet_config.alias is not None:
                     vnet_json["alias"] = vnet_config.alias
+                if vnet_config.vlan_aware:
+                    vnet_json["vlanaware"] = True
                 existing_vnet_aliases.append((vnet_id, vnet_config.alias))
                 await self.async_proxmox.request(
                     "POST",
