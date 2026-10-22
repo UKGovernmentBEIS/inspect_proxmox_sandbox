@@ -40,7 +40,6 @@ from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, is_ephemeral_zone
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
 from proxmoxsandbox.schema import (
     OsType,
@@ -64,7 +63,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     infra_commands: InfraCommands
     agent_commands: AgentCommands
     qemu_commands: QemuCommands
-    task_wrapper: TaskWrapper
     all_ipam_mappings: Tuple[IpamMapping, ...]
     vm_id: int
     name: str
@@ -96,11 +94,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         instance: ProxmoxInstanceConfig | None = None,
         pool_id: str | None = None,
         os_type: OsType | None = None,
+        iso_write_threshold_bytes: int | None = None,
     ):
         self.infra_commands = infra_commands
         self.agent_commands = agent_commands
         self.qemu_commands = infra_commands.qemu_commands
-        self.task_wrapper = infra_commands.task_wrapper
         self.all_ipam_mappings = ipam_mappings
         self.vm_id = vm_id
         self.name = name
@@ -109,6 +107,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.instance = instance
         self.pool_id = pool_id
         self.os_type = os_type
+        if iso_write_threshold_bytes is not None:
+            self.ISO_WRITE_THRESHOLD_BYTES = iso_write_threshold_bytes
         self._iso_fast_path_disabled = False
         self._iso_write_lock = asyncio.Lock()
 
@@ -255,6 +255,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     instance=instance,
                     pool_id=pool_id,
                     os_type=vm_config.os_type,
+                    iso_write_threshold_bytes=config.iso_write_threshold_bytes,
                 )
                 # The first sandbox VM is also Inspect's "default". Config
                 # validation guarantees there is one and that no later VM took
@@ -482,6 +483,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             self.agent_commands,
             self.vm_id,
             self.os_type,
+            try_iso_write=self._try_iso_write,
         )
         return await executor.exec(cmd, input, cwd, env, user, timeout)
 
@@ -517,16 +519,11 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 raise ex
 
-    # Above this size, write_file uses the ISO fast path; below it, chunked
-    # QGA. Not a true crossover: benchmarking (live ubuntu24.04) found ISO
-    # wins down to ~8 KiB — it collapses to one in-guest exec, beating even
-    # QGA's separate mkdir+write round-trips. Set deliberately above the
-    # crossover so trivially-small writes stay on the simpler QGA path (no
-    # storage upload, smaller failure surface) and keep that fallback path
-    # exercised on the normal route. Linux only — Windows always chunks.
-    ISO_WRITE_THRESHOLD_BYTES = 128 * 1024
+    # Keep single-chunk writes on QGA; larger writes otherwise need temporary
+    # chunks, assembly and cleanup. Per-sandbox configuration can override this.
+    ISO_WRITE_THRESHOLD_BYTES = _WRITE_CHUNK_SIZE + 1
 
-    async def _try_iso_write(self, file: str, contents: str | bytes) -> bool:
+    async def _try_iso_write(self, file: str, contents: bytes) -> bool:
         """Attempt ISO transfer; return False on ordinary failures or when skipped.
 
         Cancellation and malformed replies propagate and disable future ISO writes.
@@ -546,18 +543,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             if self._iso_fast_path_disabled:
                 return False
             try:
-                content_bytes = (
-                    contents
-                    if isinstance(contents, bytes)
-                    else contents.encode("utf-8")
-                )
                 iso_writer = IsoWriter(
                     async_proxmox=self.infra_commands.async_proxmox,
                     agent_commands=self.agent_commands,
                     storage_commands=self.qemu_commands.storage_commands,
                     node=self.infra_commands.node,
                 )
-                await iso_writer.write_file(self.vm_id, file, content_bytes)
+                await iso_writer.write_file(self.vm_id, file, contents)
                 return True
             except (asyncio.CancelledError, GuestAgentTamperError):
                 self._iso_fast_path_disabled = True
@@ -588,17 +580,16 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         # and recombining using cat (Linux) or copy /b (Windows).
 
         is_windows = self._is_windows()
+        content_bytes = (
+            contents if isinstance(contents, bytes) else contents.encode("utf-8")
+        )
 
         # Linux large-file fast path: hot-plug ISO instead of chunked QGA. Skips
         # the parent-mkdir round-trip below — the in-guest ISO script does its own
         # `mkdir -p -- "$(dirname target)"`, so doing it here too would waste one
-        # whole env.exec() (~2s of QGA round-trips).
-        if await self._try_iso_write(file, contents):
+        # whole env.exec().
+        if await self._try_iso_write(file, content_bytes):
             return
-
-        content_bytes = (
-            contents if isinstance(contents, bytes) else contents.encode("utf-8")
-        )
 
         # Create parent directory
         if is_windows:
@@ -755,23 +746,15 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
     async def create_snapshot(self, snapshot_name: str) -> None:
         """Creates a snapshot of the VM."""
-
-        async def snapshotter() -> None:
-            await self.agent_commands.create_snapshot(
-                vm_id=self.vm_id, snapshot_name=snapshot_name
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
+        await self.agent_commands.create_snapshot(
+            vm_id=self.vm_id, snapshot_name=snapshot_name
+        )
 
     async def restore_snapshot(self, snapshot_name: str) -> None:
         """Restores a snapshot of the VM."""
-
-        async def snapshotter() -> None:
-            await self.agent_commands.rollback_to_snapshot(
-                vm_id=self.vm_id, snapshot_name=snapshot_name
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
+        await self.agent_commands.rollback_to_snapshot(
+            vm_id=self.vm_id, snapshot_name=snapshot_name
+        )
         await self.qemu_commands.await_vm(
             vm_id=self.vm_id,
             requires_guest_agent=True,

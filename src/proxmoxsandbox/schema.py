@@ -490,6 +490,8 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
             PROXMOX_CONFIG_FILE or defaults to "default" for single-instance mode)
         sdn_config: Software-defined networking configuration
         vms_config: Configurations for virtual machines
+        iso_write_threshold_bytes: Minimum encoded payload size for ISO writes;
+            None inherits the provider default, and zero tries every supported write
     """
 
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
@@ -502,6 +504,7 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     vms_config: Tuple[VmConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
+    iso_write_threshold_bytes: int | None = Field(default=None, ge=0)
 
     def vm_names(self) -> Tuple[str, ...]:
         """Names in vms_config order."""

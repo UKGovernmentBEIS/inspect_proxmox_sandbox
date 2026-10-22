@@ -1,7 +1,7 @@
 """Healthchecks recover one execution within one transport budget."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -12,6 +12,7 @@ from proxmoxsandbox._impl.deadline import within_budget
 from proxmoxsandbox._impl.guest_exec import GuestExecResultError
 from proxmoxsandbox._impl.healthcheck import HealthCheckFailed, HealthCheckRunner
 from proxmoxsandbox._impl.infra_commands import InfraCommands
+from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 from proxmoxsandbox.schema import HealthCheck, VmConfig, VmSourceConfig
 
 from .guest_agent_fixture import execution_stage
@@ -134,6 +135,21 @@ def runner(execute, *, retries=2):
     )
 
 
+async def test_large_linux_healthcheck_keeps_qga_staging(monkeypatch):
+    monkeypatch.setattr(ProxmoxSandboxEnvironment, "ISO_WRITE_THRESHOLD_BYTES", 0)
+    guest = Guest()
+    execute = guest.production_executor(monkeypatch, os_type="l26")
+
+    with patch("proxmoxsandbox._proxmox_sandbox_environment.IsoWriter") as writer:
+        result = await execute(HealthCheck(test=("echo", "x" * 100_000), timeout=1))
+
+    writer.assert_not_called()
+    assert result.success
+    assert len(guest.writes) > 1
+    assert all(".part" in write["file"] for write in guest.writes)
+    assert len(guest.launches) == 1
+
+
 def shorten_budget(monkeypatch):
     async def short_budget(operation, seconds, **kwargs):
         return await within_budget(operation, min(seconds, 0.02), **kwargs)
@@ -214,6 +230,7 @@ async def test_unresolved_execution_deadline_retains_identity(
     assert error.value.pid == 123
     assert error.value.script_path == guest.writes[0]["file"]
     assert error.value.script_path in str(error.value)
+    assert guest.cleanups == []
 
 
 @pytest.mark.parametrize("os_type", ["win11", "l26"])

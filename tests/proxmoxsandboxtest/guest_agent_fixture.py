@@ -41,6 +41,7 @@ class Fault(BaseModel):
         "cleanup",
         "read",
         "iso_attach",
+        "iso_copy",
         "iso_detach",
         "iso_delete",
     ]
@@ -103,7 +104,9 @@ class Observation(BaseModel):
     status_reads: int = 0
 
 
-def execution_stage(command: list[str]) -> Literal["prepare", "launch", "cleanup"]:
+def execution_stage(
+    command: list[str],
+) -> Literal["prepare", "launch", "cleanup", "iso_copy"]:
     """Separate private-directory setup from the command under test."""
     body = command[-1]
     if "-EncodedCommand" in command:
@@ -112,6 +115,8 @@ def execution_stage(command: list[str]) -> Literal["prepare", "launch", "cleanup
         return "cleanup"
     if "claimed" in body:
         return "launch"
+    if "mount -o ro" in body and "/tmp/_wf_iso_" in body:
+        return "iso_copy"
     if "CreateDirectory" in body or ("stat -c" in body and "mkdir -m 700" in body):
         return "prepare"
     if (
@@ -120,7 +125,6 @@ def execution_stage(command: list[str]) -> Literal["prepare", "launch", "cleanup
         or (command[:2] == ["sh", "-c"] and "rm -f -- " in body)
     ):
         return "cleanup"
-    # Generic write_file's ISO copy still invokes a raw guest command.
     return "launch"
 
 
@@ -218,11 +222,13 @@ class GuestReplies:
                 v.startswith("none,") for v in json.loads(request.content).values()
             )
             await self.apply_fault("iso_detach" if empty else "iso_attach")
-            data = {}
+            data = "UPID:test-node:1:1:1:qmconfig:100:test-user:"
         elif route == "upload":
             if not scenario.iso_uploads:
                 return httpx.Response(500, text="ISO uploads disabled by scenario")
-            data = {}
+            data = "UPID:test-node:1:1:1:imgcopy::test-user:"
+        elif route == "status" and "/tasks/UPID:" in request.url.path:
+            data = {"status": "stopped", "exitstatus": "OK"}
         elif request.method == "DELETE" and "/content/" in request.url.path:
             await self.apply_fault("iso_delete")
             data = {}

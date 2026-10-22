@@ -556,14 +556,16 @@ When using `PROXMOX_CONFIG_FILE`, cleanup runs against every instance in the con
 
 The project follows [semantic versioning](https://semver.org/) and is aiming for a 1.0 release. Until then, backward-compatibility is not guaranteed.
 
-## Large `write_file` fast path
+## Large upload fast path
 
-For Linux guests, `write_file` payloads larger than 128 KiB are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot, sidestepping the QEMU guest-agent's ~60 KiB per-call write cap. Ordinary transfer failures fall back to chunked QGA. Cancellation or a malformed guest reply fails the current call and disables the CD-ROM method for later writes. Windows always uses chunked QGA.
+By default, Linux `write_file()` payloads and staged `exec()` scripts or input files larger than 40 KiB (after UTF-8 encoding for text) are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot. Smaller writes fit in one QGA chunk; larger QGA writes need temporary chunks, assembly and cleanup. Ordinary transfer failures fall back to chunked QGA. Cancellation or a malformed guest reply fails the current call and disables the CD-ROM method for later writes. Windows and startup healthchecks continue to use QGA.
+
+The ISO is mounted inside an exclusively created private directory. Guest users who can read the raw CD device can still read the payload; ISO transfer does not guarantee confidentiality from code running in the guest.
 
 Two things worth knowing:
 
-- **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it — move that content to `sata0`–`sata4`, or disable the fast path.
-- **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. A failed or cancelled transfer also disables this method for the affected VM.
+- **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it; move that content to `sata0`–`sata4`. Changing the write threshold does not remove this reservation.
+- **Choosing the threshold.** Set `iso_write_threshold_bytes` on `ProxmoxSandboxEnvironmentConfig` to the minimum encoded payload size in bytes. `None` (the default) inherits `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES`, so global overrides still apply. Zero tries ISO for every supported write; a threshold above your largest payload keeps writes on QGA. A failed or cancelled transfer also disables the ISO method for the affected VM.
 
 ## Guest-agent replies and command waiting
 
@@ -573,7 +575,7 @@ Completion comes from the command's terminal result, not a retry's PID. If it ca
 
 Linux enforces command timeouts inside the guest. Windows currently only limits the completion wait, so expiry raises `GuestExecIncompleteError`: the guest command may still be running. Windows guest-side timeout enforcement is not implemented.
 
-Uploads, retries and result collection share a waiting allowance: the command timeout plus 188 seconds for grace and communication. Preparation and launch recovery are capped at 180 seconds within that allowance. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Sample resource cleanup gets a separate two-minute allowance per step.
+Uploads, retries and result collection share a waiting allowance: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Sample resource cleanup gets a separate two-minute allowance per step.
 
 Each healthcheck execution has one budget of 25 failed transport requests across upload, launch, status and result reads, with retries spaced by its `interval`. Exhaustion fails startup instead of starting another transport budget. Confirmed unhealthy results still use the healthcheck's service retry policy.
 
@@ -581,7 +583,7 @@ Each healthcheck execution has one budget of 25 failed transport requests across
 
 QGA must run as root on Linux or LocalSystem on Windows. Before uploading any execution data, the provider creates and verifies a private directory: service-owned `0700` on Linux, or a protected SYSTEM-only inheritable DACL on Windows. Existing objects with unexpected permissions, owners or links are rejected, not repaired. Windows preparation uses the built-in Windows PowerShell and .NET Framework. The OS temporary directory and its ancestors must retain their normal protected ownership and deletion permissions.
 
-Scripts, input, output and recovery records stay inside that directory. Large execution inputs use private QGA chunks, not the general `write_file` or ISO transfer paths. A Linux command with `user=` receives its intended input through an already-open descriptor; it does not gain access to the directory. No privileges or capabilities are granted. These controls do not hide secrets the caller explicitly puts in a payload's process arguments, or restrict files the payload itself creates.
+Scripts, input, output and recovery records are stored inside that directory. Large Linux execution uploads use the ISO fast path described above, with private QGA staging as the fallback. A Linux command with `user=` receives its intended input through an already-open descriptor; it does not gain access to the directory. No privileges or capabilities are granted. These controls do not hide secrets the caller explicitly puts in a payload's process arguments, or restrict files the payload itself creates.
 
 Root, SYSTEM and accounts with equivalent privileges can still alter every guest record and response. Execution IDs prevent accidental replay; they do not authenticate a hostile guest's output or prove that its command stopped. Guest output stays data: the provider does not evaluate it as host code, open it as a host path or use it to choose a network destination. Callers must not treat guest output as trusted instructions or expose privileged host tools on that basis.
 
@@ -599,10 +601,6 @@ Guest HTTP responses are size-limited before JSON parsing, then checked for the 
 The built-in VMs (`ubuntu24.04`, `debian13`, `kali2025.4`) pin specific upstream image URLs in `built_in_vm.py`. These are not auto-updated — when a new upstream release appears (e.g. a new Kali quarterly release), the URL, the `Literal` type in `schema.py`, and all references in tests and examples must be updated together.
 
 The Kali built-in installs the `kali-linux-everything` metapackage on top of the buildpack set, so an eval can run offline.
-
-## Tech debt
-
-- Inconsistent use of task_wrapper and tenacity
 
 ## Developing
 

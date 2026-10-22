@@ -12,8 +12,7 @@ from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 async def test_clone_is_tracked_even_if_it_never_becomes_ready():
     api = AsyncMock()
     api.request = AsyncMock(return_value=4242)  # /cluster/nextid
-    task_wrapper = AsyncMock()
-    qemu = QemuCommands(api, "pve1", "local", task_wrapper, MagicMock())
+    qemu = QemuCommands(api, "pve1", "local", MagicMock())
 
     with patch.object(
         qemu,

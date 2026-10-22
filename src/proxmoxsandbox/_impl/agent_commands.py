@@ -310,8 +310,10 @@ class AgentCommands:
     async def create_snapshot(self, vm_id: int, snapshot_name: str) -> None:
         path = f"/nodes/{self.node}/qemu/{vm_id}/snapshot"
         data: ProxmoxJsonDataType = {"snapname": snapshot_name, "vmstate": 1}
-        await self.async_proxmox.request("POST", path, json=data)
+        upid = await self.async_proxmox.request("POST", path, json=data)
+        await self.async_proxmox.wait_for_task(upid=upid)
 
     async def rollback_to_snapshot(self, vm_id: int, snapshot_name: str) -> None:
         path = f"/nodes/{self.node}/qemu/{vm_id}/snapshot/{snapshot_name}/rollback"
-        await self.async_proxmox.request("POST", path)
+        upid = await self.async_proxmox.request("POST", path)
+        await self.async_proxmox.wait_for_task(upid=upid)

@@ -179,6 +179,7 @@ async def test_wrapper_death_is_incomplete_not_a_fabricated_exit_code(
         await task
     await guest.settle()
     assert raised.value.vm_id == 100
+    assert Path(raised.value.script_path).is_file()
     assert guest.cleanups == []
     assert next(tmp_path.glob("proxmox_exec_*/claimed")).is_dir()
     assert not list(tmp_path.glob("proxmox_exec_*/script.returncode"))
@@ -200,6 +201,7 @@ async def test_cancellation_retains_execution_without_replaying(monkeypatch, tmp
     await guest.settle()
     assert len(guest.launches) == 1
     assert marker.read_text() == "side\n"
+    assert next(tmp_path.glob("proxmox_exec_*/script.sh")).is_file()
     assert next(tmp_path.glob("proxmox_exec_*/claimed")).is_dir()
     assert next(tmp_path.glob("proxmox_exec_*/script.returncode")).read_text() == "0"
     assert guest.cleanups == []
@@ -224,3 +226,83 @@ async def test_chunked_stdin_is_assembled_inside_the_private_workspace(
     )
     assert next(tmp_path.glob("proxmox_exec_*/claimed")).is_dir()
     assert not list(tmp_path.glob("proxmox_exec_*/stdin*"))
+
+
+@pytest.mark.parametrize("partial_write", [False, True])
+@pytest.mark.parametrize(
+    ("input_size", "script_size", "fail_at"),
+    [(100_000, 0, 3), (35_000, 0, 1), (0, 100_000, 3), (0, 0, 1), (100_000, 0, 4)],
+    ids=[
+        "chunked-stdin",
+        "single-stdin",
+        "chunked-script",
+        "single-script",
+        "script-after-stdin",
+    ],
+)
+async def test_failed_staging_removes_partial_execution_data(
+    monkeypatch, tmp_path, input_size, script_size, fail_at, partial_write
+):
+    guest = LocalGuest()
+    request = guest.request
+    failure = _failure("upload failed")
+    writes = 0
+
+    async def fail_upload(method, path, *, json=None):
+        nonlocal writes
+        if path.endswith("/file-write"):
+            writes += 1
+            if writes == fail_at:
+                if partial_write:
+                    Path(json["file"]).write_bytes(
+                        base64.b64decode(json["content"])[:17]
+                    )
+                raise failure
+        return await request(method, path, json=json)
+
+    monkeypatch.setattr(guest, "request", fail_upload)
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        await guest.executor(monkeypatch, tmp_path, retries=1).exec(
+            ["echo", "payload"],
+            input=b"x" * input_size if input_size else None,
+            env={"PAYLOAD": "x" * script_size} if script_size else None,
+            timeout=5,
+        )
+    await guest.settle()
+
+    assert raised.value is failure
+    assert writes == fail_at
+    assert guest.launches == []
+    assert len(guest.cleanups) == 1
+    workspace = next(tmp_path.glob("proxmox_exec_*"))
+    assert list(workspace.iterdir()) == []
+
+
+async def test_pre_launch_cancellation_removes_partial_input(monkeypatch, tmp_path):
+    guest = LocalGuest()
+    request = guest.request
+    upload_started = asyncio.Event()
+
+    async def partial_upload(method, path, *, json=None):
+        if path.endswith("/file-write"):
+            Path(json["file"]).write_bytes(base64.b64decode(json["content"])[:17])
+            upload_started.set()
+            await asyncio.Future()
+        return await request(method, path, json=json)
+
+    monkeypatch.setattr(guest, "request", partial_upload)
+    task = asyncio.create_task(
+        guest.executor(monkeypatch, tmp_path).exec(
+            ["echo", "payload"], input=b"x" * 100_000, timeout=5
+        )
+    )
+    await asyncio.wait_for(upload_started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await guest.settle()
+
+    assert guest.launches == []
+    assert len(guest.cleanups) == 1
+    workspace = next(tmp_path.glob("proxmox_exec_*"))
+    assert list(workspace.iterdir()) == []

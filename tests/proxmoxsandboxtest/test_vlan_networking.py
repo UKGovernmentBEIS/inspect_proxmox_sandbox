@@ -6,7 +6,6 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
 from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 from proxmoxsandbox.schema import (
     ProxmoxSandboxEnvironmentConfig,
@@ -22,16 +21,6 @@ from proxmoxsandbox.schema import (
 def api():
     mock = MagicMock(spec=AsyncProxmoxAPI)
     mock.request = AsyncMock(return_value=[])
-    return mock
-
-
-@pytest.fixture
-def task_wrapper():
-    async def run_action(action):
-        await action()
-
-    mock = MagicMock(spec=TaskWrapper)
-    mock.do_action_and_wait_for_tasks = AsyncMock(side_effect=run_action)
     return mock
 
 
@@ -86,12 +75,8 @@ async def test_create_vlan_aware_vnet(api, vlan_aware):
 
 @pytest.mark.parametrize("vlan_tag", [None, 12, 4094])
 @pytest.mark.parametrize("existing_vnet", [False, True])
-async def test_nic_vlan_tag_keeps_mac_firewall_and_order(
-    api, task_wrapper, vlan_tag, existing_vnet
-):
-    commands = QemuCommands(
-        api, "pve", "local", task_wrapper, MagicMock(spec=LocalStorageCommands)
-    )
+async def test_nic_vlan_tag_keeps_mac_firewall_and_order(api, vlan_tag, existing_vnet):
+    commands = QemuCommands(api, "pve", "local", MagicMock(spec=LocalStorageCommands))
     aliases = [("uplink0", "uplink"), ("fabric0", "fabric")]
     if existing_vnet:
         api.request.return_value = [
@@ -132,10 +117,8 @@ async def test_nic_vlan_tag_keeps_mac_firewall_and_order(
         )
 
 
-async def test_unspecified_template_nics_are_not_rewritten(api, task_wrapper):
-    commands = QemuCommands(
-        api, "pve", "local", task_wrapper, MagicMock(spec=LocalStorageCommands)
-    )
+async def test_unspecified_template_nics_are_not_rewritten(api):
+    commands = QemuCommands(api, "pve", "local", MagicMock(spec=LocalStorageCommands))
     config = VmConfig(vm_source_config=VmSourceConfig(existing_vm_template_tag="guest"))
 
     await commands.configure_network_and_tags(config, [], vm_id=101)

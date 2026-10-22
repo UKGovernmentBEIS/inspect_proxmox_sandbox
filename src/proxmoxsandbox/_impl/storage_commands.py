@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 
 LOCAL_STORAGE = "local"
 """Proxmox's built-in directory storage at /var/lib/vz, always available."""
@@ -16,14 +15,10 @@ class LocalStorageCommands(abc.ABC):
     TRACE_NAME = "proxmox_storage_commands"
 
     async_proxmox: AsyncProxmoxAPI
-    task_wrapper: TaskWrapper
     node: str
 
-    def __init__(
-        self, async_proxmox: AsyncProxmoxAPI, node: str, task_wrapper: TaskWrapper
-    ):
+    def __init__(self, async_proxmox: AsyncProxmoxAPI, node: str):
         self.async_proxmox = async_proxmox
-        self.task_wrapper = task_wrapper
         self.node = node
 
     async def upload_file_to_storage(
@@ -69,12 +64,14 @@ class LocalStorageCommands(abc.ABC):
                     if size_match:
                         return
 
-        async def do_upload():
-            await self.async_proxmox.upload_file(
-                self.node, LOCAL_STORAGE, file, content_type, filename=filename
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(do_upload)
+        upid = await self.async_proxmox.upload_file(
+            node=self.node,
+            storage=LOCAL_STORAGE,
+            file=file,
+            content_type=content_type,
+            filename=filename,
+        )
+        await self.async_proxmox.wait_for_task(upid=upid)
 
     async def list_storage(self) -> list[dict[str, Any]]:
         return await self.async_proxmox.request(

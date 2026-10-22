@@ -205,16 +205,17 @@ def test_workspace_preparation_and_upload_share_one_transport_budget(
     assert guest.uploads == [start + 75 + 5 * attempt for attempt in range(10)]
     assert len(guest.upload_paths) == 1
     assert guest.launches == ([] if exhausted else [start + 120])
+    assert guest.cleanups == [start + 120]
 
 
 @pytest.mark.parametrize("os_type", ["l26", "win11"])
 def test_workspace_preparation_and_upload_share_one_deadline(os_type):
-    guest = Guest(prepare_delay=90, upload_delay=91)
+    guest = Guest(prepare_delay=90, upload_delay=129)
     with virtual_clock() as loop:
         start = loop.time()
         with pytest.raises(HealthCheckFailed):
             loop.run_until_complete(guest.runner(loop, os_type=os_type).run())
-        assert loop.time() - start == 180
+        assert loop.time() - start == 218
 
     assert guest.prepares == [start]
     assert guest.prepare_statuses == [start + 90]
@@ -306,21 +307,25 @@ def test_late_upload_recovery_leaves_time_for_command(os_type):
 @pytest.mark.parametrize(
     "stall", [False, True], ids=["late-response", "never-responds"]
 )
-def test_preparation_deadline_cannot_spend_command_runtime(os_type, stall):
-    guest = Guest(upload_delay=181, stall=stall)
+def test_staging_stops_at_overall_execution_deadline(os_type, stall):
+    guest = Guest(upload_delay=219, stall=stall)
     with virtual_clock() as loop:
         start = loop.time()
         with pytest.raises(HealthCheckFailed):
             loop.run_until_complete(guest.runner(loop, os_type=os_type).run())
-        assert loop.time() - start == 180
+        assert loop.time() - start == 218
 
     assert len(guest.uploads) == 1
     assert guest.launches == []
+    assert guest.cleanups == []
 
 
 @pytest.mark.parametrize("os_type", ["l26", "win11"])
-def test_cancellation_stops_transport_without_launch_or_retry(os_type):
-    guest = Guest(stall=True)
+@pytest.mark.parametrize("cleanup_delay", [0, 3600])
+def test_pre_launch_cancellation_bounds_cleanup_without_launch_or_retry(
+    os_type, cleanup_delay
+):
+    guest = Guest(stall=True, cleanup_delay=cleanup_delay)
 
     async def cancel(check):
         task = asyncio.create_task(check.run())
@@ -332,11 +337,59 @@ def test_cancellation_stops_transport_without_launch_or_retry(os_type):
     with virtual_clock() as loop:
         start = loop.time()
         loop.run_until_complete(cancel(guest.runner(loop, os_type=os_type)))
-        assert loop.time() == start
+        assert loop.time() - start == min(cleanup_delay, 8)
 
     assert len(guest.uploads) == 1
     assert guest.cancelled
     assert guest.launches == []
+    assert guest.cleanups == [start]
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
+def test_pre_launch_cleanup_is_not_shielded_from_further_cancellation(os_type):
+    guest = Guest(stall=True, cleanup_delay=3600)
+
+    async def cancel(check):
+        task = asyncio.create_task(check.run())
+        await guest.started.wait()
+        task.cancel()
+        while not guest.cleanups and not task.done():
+            await asyncio.sleep(0)
+        assert guest.cleanups
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with virtual_clock() as loop:
+        start = loop.time()
+        loop.run_until_complete(cancel(guest.runner(loop, os_type=os_type)))
+        assert loop.time() == start
+
+    assert len(guest.uploads) == 1
+    assert guest.launches == []
+    assert guest.cleanups == [start]
+    assert guest.cleanup_cancelled
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
+@pytest.mark.parametrize("prepare_delay", [0, 217])
+def test_failed_upload_cleanup_uses_only_remaining_execution_budget(
+    os_type, prepare_delay
+):
+    guest = Guest(prepare_delay=prepare_delay, upload_failures=1, cleanup_delay=3600)
+    agent = AgentCommands(guest, "pve", qga_max_retries=1)  # type: ignore[arg-type]
+    with virtual_clock() as loop:
+        start = loop.time()
+        with pytest.raises(httpx.HTTPStatusError, match="guest-file-close"):
+            loop.run_until_complete(
+                GuestExecutor(agent, 100, os_type).exec(["echo", "ready"], timeout=30)
+            )
+        assert loop.time() - start == min(prepare_delay + 8, 218)
+
+    assert len(guest.uploads) == 1
+    assert guest.launches == []
+    assert guest.cleanups == [start + prepare_delay]
+    assert guest.cleanup_cancelled
 
 
 @pytest.mark.parametrize("os_type", ["l26", "win11"])

@@ -73,6 +73,21 @@ def _config(*vms: VmConfig) -> ProxmoxSandboxEnvironmentConfig:
     return ProxmoxSandboxEnvironmentConfig(vms_config=vms)
 
 
+def test_iso_write_threshold_defaults_to_none():
+    assert ProxmoxSandboxEnvironmentConfig().iso_write_threshold_bytes is None
+
+
+@pytest.mark.parametrize("threshold", [None, 0, 262144])
+def test_iso_write_threshold_accepts_none_or_nonnegative_bytes(threshold):
+    config = ProxmoxSandboxEnvironmentConfig(iso_write_threshold_bytes=threshold)
+    assert config.iso_write_threshold_bytes == threshold
+
+
+def test_iso_write_threshold_rejects_negative_bytes():
+    with pytest.raises(ValidationError, match="iso_write_threshold_bytes"):
+        ProxmoxSandboxEnvironmentConfig(iso_write_threshold_bytes=-1)
+
+
 def test_healthcheck_defaults_follow_compose_names_not_values():
     hc = HealthCheck(test=("true",))
     assert hc.interval == 5

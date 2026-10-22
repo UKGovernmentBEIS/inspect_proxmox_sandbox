@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+from collections.abc import Awaitable, Callable
 from logging import getLogger
 from uuid import uuid4
 
@@ -76,6 +77,8 @@ class GuestExecutor:
         agent_commands: AgentCommands,
         vm_id: int,
         os_type: str | None = None,
+        *,
+        try_iso_write: Callable[[str, bytes], Awaitable[bool]] | None = None,
     ) -> None:
         self.agent_commands = agent_commands
         self.vm_id = vm_id
@@ -83,6 +86,7 @@ class GuestExecutor:
         self.platform = exec_windows if windows else exec_linux
         self._separator = "\\" if windows else "/"
         self._inline_stdin_limit = -1 if windows else _INLINE_STDIN_LIMIT
+        self._try_iso_write = try_iso_write
 
     async def exec(
         self,
@@ -114,7 +118,7 @@ class GuestExecutor:
 
         async def prepare_and_launch() -> int:
             nonlocal launch_attempted
-            # Validate the private workspace before QGA creates any data files.
+            # Validate the private workspace before staging any execution data.
             await self._prepare_workspace(workspace)
             stdin = input
             stdin_file = None
@@ -123,25 +127,32 @@ class GuestExecutor:
                 data = input if isinstance(input, bytes) else input.encode("utf-8")
                 if len(data) > self._inline_stdin_limit:
                     stdin, stdin_file = None, f"{tmp_start}stdin"
-                    stdin_parts, uploaded = await self._stage_file(stdin_file, data)
-                    disposable.extend(uploaded)
+                    stdin_parts = await self._stage_file(stdin_file, data, disposable)
             script = self.platform.build_script(
                 tmp_start, cmd, stdin, cwd, env or {}, user, timeout, stdin_file
             )
-            parts, uploaded = await self._stage_file(
-                script_path, script.encode("utf-8")
+            parts = await self._stage_file(
+                script_path, script.encode("utf-8"), disposable
             )
-            disposable.extend(uploaded)
             launch = self.platform.build_launch(tmp_start, parts, stdin_parts)
             launch_attempted = True
             return await self.agent_commands.exec_command(self.vm_id, launch)
 
+        async def cleanup() -> None:
+            await within_budget(
+                self.agent_commands.exec_command_once(
+                    self.vm_id, self.platform.build_cleanup(disposable)
+                ),
+                min(
+                    _EXEC_POLL_GRACE_SECONDS,
+                    deadline - asyncio.get_running_loop().time(),
+                ),
+            )
+
         async def collect() -> ExecResult[str]:
             nonlocal pid, returncode, launch_error
             try:
-                pid = await within_budget(
-                    prepare_and_launch(), _EXEC_AGENT_BUDGET_SECONDS
-                )
+                pid = await prepare_and_launch()
             except (httpx.TransportError, httpx.HTTPStatusError, TimeoutError) as exc:
                 if not launch_attempted:
                     raise
@@ -192,11 +203,22 @@ class GuestExecutor:
 
         try:
             result = await within_budget(collect(), waiting_allowance)
-        except (
-            httpx.HTTPError,
-            TimeoutError,
-            HealthcheckTransportExhaustedError,
-        ) as exc:
+        except (Exception, asyncio.CancelledError) as exc:
+            # After any launch attempt, the payload may still need these files.
+            if not launch_attempted and disposable:
+                try:
+                    await cleanup()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "VM %s: pre-launch cleanup failed: %s",
+                        self.vm_id,
+                        cleanup_error,
+                    )
+            if not isinstance(
+                exc,
+                (httpx.HTTPError, TimeoutError, HealthcheckTransportExhaustedError),
+            ):
+                raise
             if returncode is not None:
                 raise GuestExecResultError(
                     self.vm_id, pid, script_path, returncode
@@ -210,7 +232,7 @@ class GuestExecutor:
             if isinstance(exc, TimeoutError):
                 raise GuestAgentCommunicationTimeoutError(
                     f"VM {self.vm_id}: command preparation exceeded its "
-                    f"{_EXEC_AGENT_BUDGET_SECONDS}s guest-agent allowance"
+                    "execution waiting allowance"
                 ) from exc
             raise
 
@@ -221,15 +243,7 @@ class GuestExecutor:
             for suffix in ("script.stdout", "script.stderr", "script.returncode.tmp")
         )
         try:
-            await within_budget(
-                self.agent_commands.exec_command_once(
-                    self.vm_id, self.platform.build_cleanup(disposable)
-                ),
-                min(
-                    _EXEC_POLL_GRACE_SECONDS,
-                    deadline - asyncio.get_running_loop().time(),
-                ),
-            )
+            await cleanup()
         except GuestAgentTamperError:
             raise
         except Exception as exc:
@@ -272,25 +286,28 @@ class GuestExecutor:
             delay = min(delay * 1.3, _EXEC_POLL_MAX_INTERVAL_SECONDS)
 
     async def _stage_file(
-        self, filepath: str, data: bytes
-    ) -> tuple[list[str], list[str]]:
-        """Upload only into the private workspace; the claimant assembles chunks.
-
-        Generic file transfers can expose staging files or attached ISO contents
-        to other guest users, independently of the destination's permissions.
-        """
+        self, filepath: str, data: bytes, disposable: list[str]
+    ) -> list[str]:
+        """Try ISO before QGA; the claimant assembles any fallback chunks."""
+        # Register before either transport so a partial upload can be cleaned.
+        disposable.append(filepath)
+        if self._try_iso_write is not None and await self._try_iso_write(
+            filepath, data
+        ):
+            return []
         if len(data) <= _WRITE_CHUNK_SIZE:
             await self.agent_commands.write_file(
                 vm_id=self.vm_id, filepath=filepath, content=data
             )
-            return [], [filepath]
+            return []
         chunks, width = _split_chunks(data)
         parts = [f"{filepath}.part{i:0{width}d}" for i in range(len(chunks))]
+        disposable.extend(parts)
         for part, chunk in zip(parts, chunks):
             await self.agent_commands.write_file(
                 vm_id=self.vm_id, filepath=part, content=chunk
             )
-        return parts, [filepath, *parts]
+        return parts
 
     async def _read_return_code(self, tmp_start: str) -> int | None:
         """Read the atomically published terminal record, if it exists."""
