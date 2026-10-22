@@ -73,14 +73,15 @@ async def test_create_vlan_aware_vnet(api, vlan_aware):
     assert (zone, aliases) == ("vln123z", [("vln123v0", "fabric")])
 
 
-@pytest.mark.parametrize("vlan_tag", [None, 12, 4094])
+@pytest.mark.parametrize("vlan_tag", ["trunk", 12, 4094])
 @pytest.mark.parametrize("existing_vnet", [False, True])
 async def test_nic_vlan_tag_keeps_mac_firewall_and_order(api, vlan_tag, existing_vnet):
     commands = QemuCommands(api, "pve", "local", MagicMock(spec=LocalStorageCommands))
     aliases = [("uplink0", "uplink"), ("fabric0", "fabric")]
     if existing_vnet:
         api.request.return_value = [
-            {"vnet": vnet, "alias": alias} for vnet, alias in aliases
+            {"vnet": "uplink0", "alias": "uplink"},
+            {"vnet": "fabric0", "alias": "fabric", "vlanaware": 1},
         ]
 
     config = VmConfig(
@@ -99,7 +100,7 @@ async def test_nic_vlan_tag_keeps_mac_firewall_and_order(api, vlan_tag, existing
             config, [] if existing_vnet else aliases, vm_id=101
         )
 
-    tag = "" if vlan_tag is None else f",tag={vlan_tag}"
+    tag = "" if vlan_tag == "trunk" else f",tag={vlan_tag}"
     api.request.assert_any_await(
         "POST",
         "/nodes/pve/qemu/101/config",
@@ -115,6 +116,28 @@ async def test_nic_vlan_tag_keeps_mac_firewall_and_order(api, vlan_tag, existing
             body_content=f"delete={name}",
             content_type="application/x-www-form-urlencoded",
         )
+
+
+@pytest.mark.parametrize(
+    ("vlanaware", "vlan_tag", "error"),
+    [(1, None, "must set vlan_tag"), (None, 12, "not VLAN-aware")],
+)
+async def test_pre_existing_vnet_vlan_mismatch_is_rejected(
+    api, vlanaware, vlan_tag, error
+):
+    commands = QemuCommands(api, "pve", "local", MagicMock(spec=LocalStorageCommands))
+    vnet = {"vnet": "fabric0", "alias": "fabric"}
+    if vlanaware is not None:
+        vnet["vlanaware"] = vlanaware
+    api.request.return_value = [vnet]
+    config = VmConfig(
+        vm_source_config=VmSourceConfig(existing_vm_template_tag="guest"),
+        nics=(VmNicConfig(vnet_alias="fabric", vlan_tag=vlan_tag),),
+    )
+
+    with patch.object(commands, "read_vm", AsyncMock(return_value={})):
+        with pytest.raises(ValueError, match=error):
+            await commands.configure_network_and_tags(config, [], vm_id=101)
 
 
 async def test_unspecified_template_nics_are_not_rewritten(api):

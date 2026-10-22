@@ -71,7 +71,10 @@ class VnetConfig(BaseModel, frozen=True):
         alias: A human-readable alias for the virtual network.
             The alias is also used in this configuration to link each VM in the Vnet.
         subnets: Subnet configurations for this virtual network.
-        vlan_aware: Enable VLAN-aware bridging. Defaults to False.
+        vlan_aware: Enable VLAN-aware bridging. Defaults to False. Proxmox
+            refuses subnets on a VLAN-aware VNet, so the host has no address,
+            DHCP or SNAT on it: routing between VLANs must be done by a guest.
+            Every NIC on it must set `VmNicConfig.vlan_tag`.
     """
 
     alias: Optional[
@@ -81,6 +84,15 @@ class VnetConfig(BaseModel, frozen=True):
     ] = None
     subnets: Tuple[SubnetConfig, ...] = ()
     vlan_aware: bool = False
+
+    @model_validator(mode="after")
+    def _validate_no_subnets_when_vlan_aware(self) -> "VnetConfig":
+        if self.vlan_aware and self.subnets:
+            raise ValueError(
+                f"VNet {self.alias!r}: Proxmox does not allow subnets on a "
+                "VLAN-aware VNet"
+            )
+        return self
 
 
 class SdnConfig(BaseModel, frozen=True):
@@ -156,14 +168,19 @@ class VmNicConfig(BaseModel, frozen=True):
             If specified, a DHCP static mapping (host reservation) will be created.
             Requires a MAC address to be specified as well.
             Please read the notes in README.md for Proxmox server patching requirements
-        vlan_tag: Access VLAN ID, from 1 to 4094, on a VLAN-aware VNet.
-            Omit for an untagged interface or a guest-managed VLAN trunk.
+        vlan_tag: Required on a VLAN-aware VNet, and not allowed on any other.
+            An integer from 1 to 4094 makes an access port: the guest sees
+            untagged frames and can reach only that VLAN. "trunk" makes a trunk
+            port carrying every VLAN (1 untagged, 2-4094 tagged), so the guest
+            can join any VLAN on the VNet; give it only to router-like VMs.
     """
 
     vnet_alias: str
     mac: Optional[MacAddress] = None
     ipv4: Optional[IPvAnyAddress] = None
-    vlan_tag: Optional[int] = Field(default=None, ge=1, le=4094, strict=True)
+    vlan_tag: Optional[
+        Union[Annotated[int, Field(ge=1, le=4094, strict=True)], Literal["trunk"]]
+    ] = None
 
     @model_validator(mode="after")
     def _validate_ipv4_requires_mac(self) -> "VmNicConfig":
@@ -173,6 +190,22 @@ class VmNicConfig(BaseModel, frozen=True):
                 + "DHCP static mapping"
             )
         return self
+
+
+def check_nic_vlan(nic: VmNicConfig, vlan_aware: bool) -> None:
+    """Raise if `nic.vlan_tag` doesn't match whether its VNet is VLAN-aware."""
+    # An untagged NIC on a VLAN-aware VNet is silently a trunk on every VLAN,
+    # so trunks must be asked for by name.
+    if vlan_aware and nic.vlan_tag is None:
+        raise ValueError(
+            f"NIC on VLAN-aware VNet {nic.vnet_alias!r} must set vlan_tag to an "
+            'access VLAN (1-4094) or "trunk"'
+        )
+    if not vlan_aware and nic.vlan_tag is not None:
+        raise ValueError(
+            f"NIC on VNet {nic.vnet_alias!r} sets vlan_tag, but that VNet is not "
+            "VLAN-aware"
+        )
 
 
 # Proxmox QEMU OS types. See https://pve.proxmox.com/wiki/Manual:_qm.conf
@@ -525,6 +558,32 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
                     f"depends_on, so they must be unique within a sample"
                 )
             seen[vm.name] = i
+        return self
+
+    @model_validator(mode="after")
+    def _validate_nic_vlans(self) -> "ProxmoxSandboxEnvironmentConfig":
+        # NICs on pre-existing VNets are checked when the VM is configured.
+        if not isinstance(self.sdn_config, SdnConfig):
+            return self
+        vnets = self.sdn_config.vnet_configs
+        vlan_aware = {vnet.alias: vnet.vlan_aware for vnet in vnets}
+        for vm in self.vms_config:
+            if vm.nics is None:
+                # Built-in and OVA VMs get one untagged NIC on the first VNet.
+                if (
+                    vnets
+                    and vnets[0].vlan_aware
+                    and (vm.vm_source_config.built_in or vm.vm_source_config.ova)
+                ):
+                    raise ValueError(
+                        f"VM {vm.name!r} has no nics, so would be put on the "
+                        f"VLAN-aware VNet {vnets[0].alias!r} as a trunk; give "
+                        "it nics with a vlan_tag"
+                    )
+                continue
+            for nic in vm.nics:
+                if nic.vnet_alias in vlan_aware:
+                    check_nic_vlan(nic, vlan_aware[nic.vnet_alias])
         return self
 
     @model_validator(mode="after")

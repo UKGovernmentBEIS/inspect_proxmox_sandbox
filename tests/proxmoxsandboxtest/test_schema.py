@@ -7,6 +7,8 @@ from pydantic_extra_types.mac_address import MacAddress
 from proxmoxsandbox.schema import (
     HealthCheck,
     ProxmoxSandboxEnvironmentConfig,
+    SdnConfig,
+    SubnetConfig,
     VmConfig,
     VmNicConfig,
     VmSourceConfig,
@@ -50,16 +52,73 @@ def test_vnetconfig_not_vlan_aware_by_default():
     assert VnetConfig(alias="lan").vlan_aware is False
 
 
-@pytest.mark.parametrize("vlan_tag", [1, 2, 12, 4094])
+@pytest.mark.parametrize("vlan_tag", [1, 2, 12, 4094, "trunk"])
 def test_vmnicconfig_vlan_tag(vlan_tag):
     nic = VmNicConfig(vnet_alias="lan", vlan_tag=vlan_tag)
     assert nic.vlan_tag == vlan_tag
 
 
-@pytest.mark.parametrize("vlan_tag", [-1, 0, 4095, 2.5, True, "2"])
+@pytest.mark.parametrize("vlan_tag", [-1, 0, 4095, 2.5, True, "2", "Trunk"])
 def test_vmnicconfig_rejects_invalid_vlan_tag(vlan_tag):
     with pytest.raises(ValidationError, match="vlan_tag"):
         VmNicConfig(vnet_alias="lan", vlan_tag=vlan_tag)
+
+
+def test_vnetconfig_rejects_subnets_when_vlan_aware():
+    subnet = SubnetConfig(
+        cidr="10.0.0.0/24", gateway="10.0.0.1", snat=False, dhcp_ranges=()
+    )
+    with pytest.raises(ValidationError, match="subnets on a VLAN-aware VNet"):
+        VnetConfig(alias="fabric", vlan_aware=True, subnets=(subnet,))
+
+
+def _vlan_config(
+    *nics: VmNicConfig, vm_source: VmSourceConfig | None = None
+) -> ProxmoxSandboxEnvironmentConfig:
+    return ProxmoxSandboxEnvironmentConfig(
+        vms_config=(
+            VmConfig(
+                vm_source_config=vm_source or VmSourceConfig(built_in="ubuntu24.04"),
+                nics=nics or None,
+            ),
+        ),
+        sdn_config=SdnConfig(
+            vnet_configs=(
+                VnetConfig(alias="fabric", vlan_aware=True),
+                VnetConfig(alias="lan"),
+            ),
+            use_pve_ipam_dnsnmasq=False,
+        ),
+    )
+
+
+@pytest.mark.parametrize("vlan_tag", [12, "trunk"])
+def test_nic_on_vlan_aware_vnet_with_vlan_tag(vlan_tag):
+    _vlan_config(
+        VmNicConfig(vnet_alias="fabric", vlan_tag=vlan_tag),
+        VmNicConfig(vnet_alias="lan"),
+        VmNicConfig(vnet_alias="pre-existing", vlan_tag=vlan_tag),
+    )
+
+
+def test_nic_on_vlan_aware_vnet_requires_vlan_tag():
+    with pytest.raises(ValidationError, match='access VLAN .* or "trunk"'):
+        _vlan_config(VmNicConfig(vnet_alias="fabric"))
+
+
+@pytest.mark.parametrize("vlan_tag", [12, "trunk"])
+def test_nic_on_plain_vnet_rejects_vlan_tag(vlan_tag):
+    with pytest.raises(ValidationError, match="not VLAN-aware"):
+        _vlan_config(VmNicConfig(vnet_alias="lan", vlan_tag=vlan_tag))
+
+
+def test_built_in_vm_without_nics_rejected_when_first_vnet_vlan_aware():
+    with pytest.raises(ValidationError, match="as a trunk"):
+        _vlan_config()
+
+
+def test_template_vm_without_nics_keeps_its_own_when_first_vnet_vlan_aware():
+    _vlan_config(vm_source=VmSourceConfig(existing_vm_template_tag="router"))
 
 
 _SOURCE = VmSourceConfig(built_in="ubuntu24.04")
