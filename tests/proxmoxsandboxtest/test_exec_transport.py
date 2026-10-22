@@ -8,7 +8,10 @@ import httpx
 import pytest
 
 from proxmoxsandbox._impl import agent_commands
-from proxmoxsandbox._impl.agent_commands import AgentCommands
+from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
+    GuestExecNotStartedError,
+)
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
@@ -16,23 +19,39 @@ from .guest_agent_fixture import execution_stage
 
 
 class Guest:
-    def __init__(self, *, launch_fault=None, upload_failures=0, status_failures=0):
+    def __init__(
+        self,
+        *,
+        launch_fault=None,
+        upload_failures=0,
+        upload_status=500,
+        status_failures=0,
+        api_down=False,
+    ):
         self.launch_fault = launch_fault
         self.upload_failures = upload_failures
+        self.upload_status = upload_status
+        self.api_down = api_down
         self.status_failures = status_failures
         self.prepares = []
         self.writes = []
         self.launches = []
         self.cleanups = []
+        self.unanswered = []
         self.status_reads = 0
 
     async def request(self, request):
         path = request.url.path
+        if self.api_down:
+            self.unanswered.append(path)
+            raise httpx.ConnectError("API host unreachable", request=request)
         if path.endswith("/file-write"):
             data = json.loads(request.content)
             self.writes.append(data)
             if len(self.writes) <= self.upload_failures:
-                return httpx.Response(500, text="guest-file-close failed - got timeout")
+                return httpx.Response(
+                    self.upload_status, text="guest-file-close failed - got timeout"
+                )
             return httpx.Response(200, json={"data": None})
         if path.endswith("/exec"):
             command = json.loads(request.content)["command"]
@@ -139,12 +158,40 @@ async def test_exec_uploads_then_launches_once(monkeypatch, os_type, upload_fail
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
 async def test_exec_never_launches_after_exhausted_upload(monkeypatch, os_type):
     guest = Guest(upload_failures=agent_commands._QGA_MAX_RETRIES)
-    with pytest.raises(httpx.HTTPStatusError, match="guest-file-close"):
+    with pytest.raises(GuestExecNotStartedError, match="guest-file-close") as raised:
         await guest.sandbox(monkeypatch, os_type=os_type).exec(["echo", "test"])
+    assert isinstance(raised.value.__cause__, httpx.HTTPStatusError)
+    assert raised.value.vm_id == 130
     assert len(guest.writes) == agent_commands._QGA_MAX_RETRIES
     assert guest.writes == [guest.writes[0]] * len(guest.writes)
     assert guest.launches == []
     assert len(guest.cleanups) == 1
+
+
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_unreachable_api_before_launch_is_sandbox_unavailable(
+    monkeypatch, os_type
+):
+    guest = Guest(api_down=True)
+    with pytest.raises(GuestExecNotStartedError, match="unreachable") as raised:
+        await guest.sandbox(monkeypatch, os_type=os_type).exec(["echo", "test"])
+    assert isinstance(raised.value.__cause__, httpx.ConnectError)
+    # Only the workspace preparation was attempted; nothing was staged or run.
+    assert len(guest.unanswered) == agent_commands._QGA_MAX_RETRIES
+    assert all(path.endswith("/exec") for path in guest.unanswered)
+    assert guest.writes == []
+    assert guest.launches == []
+    assert guest.cleanups == []
+
+
+@pytest.mark.parametrize("os_type", ["win11", "l26"])
+async def test_rejected_upload_is_not_reported_as_unavailable(monkeypatch, os_type):
+    guest = Guest(upload_failures=1, upload_status=400)
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        await guest.sandbox(monkeypatch, os_type=os_type).exec(["echo", "test"])
+    assert raised.value.response.status_code == 400
+    assert len(guest.writes) == 1
+    assert guest.launches == []
 
 
 @pytest.mark.parametrize("os_type", ["win11", "l26"])

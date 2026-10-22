@@ -17,7 +17,11 @@ from unittest.mock import patch
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
+from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
+    GuestExecIncompleteError,
+    GuestExecNotStartedError,
+)
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.guest_exec import GuestExecResultError
 from proxmoxsandbox._impl.infra_commands import InfraCommands
@@ -83,6 +87,7 @@ class Observation(BaseModel):
         "file",
         "exec",
         "rejected",
+        "unavailable",
         "timeout",
         "incomplete",
         "result_unavailable",
@@ -322,6 +327,14 @@ async def exercise(scenario: Scenario) -> Observation:
                 vm_id=exc.vm_id,
                 pid=exc.pid,
                 script_path=exc.script_path,
+                cancelled=replies.cancelled,
+                launched=replies.seen.get("launch", 0) > 0,
+            )
+        except GuestExecNotStartedError as exc:
+            return Observation(
+                kind="unavailable",
+                vm_id=exc.vm_id,
+                error_type=type(exc.__cause__).__name__,
                 cancelled=replies.cancelled,
                 launched=replies.seen.get("launch", 0) > 0,
             )

@@ -15,8 +15,8 @@ import httpx
 from inspect_ai.util import ExecResult, OutputLimitExceededError
 
 from proxmoxsandbox._impl.agent_commands import (
-    GuestAgentCommunicationTimeoutError,
     GuestExecIncompleteError,
+    GuestExecNotStartedError,
     HealthcheckTransportExhaustedError,
     healthcheck_transport_budget,
     is_transient_qga_error,
@@ -110,8 +110,8 @@ class HealthCheckRunner:
             # with its execution identity instead of trying again.
             raise
         except (
+            GuestExecNotStartedError,
             HealthcheckTransportExhaustedError,
-            GuestAgentCommunicationTimeoutError,
             httpx.TransportError,
         ) as e:
             raise HealthCheckFailed(

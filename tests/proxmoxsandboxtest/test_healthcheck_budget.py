@@ -11,6 +11,7 @@ import pytest
 from proxmoxsandbox._impl.agent_commands import (
     AgentCommands,
     GuestExecIncompleteError,
+    GuestExecNotStartedError,
     HealthcheckTransportExhaustedError,
 )
 from proxmoxsandbox._impl.guest_exec import GuestExecutor
@@ -52,6 +53,17 @@ def http_failure(message="guest-file-close failed - got timeout"):
     return httpx.HTTPStatusError(
         message, request=request, response=httpx.Response(500, request=request)
     )
+
+
+def _transport_exhaustion(error: BaseException) -> HealthcheckTransportExhaustedError:
+    """The exhausted budget behind a failure, however it was wrapped."""
+    cause: BaseException | None = error
+    while cause is not None and not isinstance(
+        cause, HealthcheckTransportExhaustedError
+    ):
+        cause = cause.__cause__
+    assert isinstance(cause, HealthcheckTransportExhaustedError), error
+    return cause
 
 
 def _is_cleanup(command):
@@ -193,9 +205,7 @@ def test_workspace_preparation_and_upload_share_one_transport_budget(
         if exhausted:
             with pytest.raises(HealthCheckFailed) as error:
                 loop.run_until_complete(check.run())
-            cause = error.value.__cause__
-            assert isinstance(cause, HealthcheckTransportExhaustedError)
-            assert cause.failures == 25
+            assert _transport_exhaustion(error.value).failures == 25
         else:
             loop.run_until_complete(check.run())
         assert loop.time() - start == 120
@@ -238,7 +248,7 @@ def test_persistent_upload_failure_has_one_25_request_budget(os_type, timeout):
             loop.run_until_complete(check.run())
         assert loop.time() - start == 120
 
-    assert isinstance(exc_info.value.__cause__, HealthcheckTransportExhaustedError)
+    assert _transport_exhaustion(exc_info.value).failures == 25
     assert guest.uploads == [start + 5 * attempt for attempt in range(25)]
     assert len(guest.upload_paths) == 1
     assert guest.launches == []
@@ -266,13 +276,7 @@ def test_successful_upload_does_not_reset_result_recovery_budget(os_type):
             loop.run_until_complete(guest.runner(loop, os_type=os_type).run())
         assert loop.time() - start == 120
 
-    error = exc_info.value
-    while error is not None and not isinstance(
-        error, HealthcheckTransportExhaustedError
-    ):
-        error = error.__cause__
-    assert isinstance(error, HealthcheckTransportExhaustedError)
-    assert error.failures == 25
+    assert _transport_exhaustion(exc_info.value).failures == 25
     assert len(guest.uploads) == 16
     assert len(guest.reads) == 10
     assert len(guest.launches) == 1
@@ -380,7 +384,7 @@ def test_failed_upload_cleanup_uses_only_remaining_execution_budget(
     agent = AgentCommands(guest, "pve", qga_max_retries=1)  # type: ignore[arg-type]
     with virtual_clock() as loop:
         start = loop.time()
-        with pytest.raises(httpx.HTTPStatusError, match="guest-file-close"):
+        with pytest.raises(GuestExecNotStartedError, match="guest-file-close"):
             loop.run_until_complete(
                 GuestExecutor(agent, 100, os_type).exec(["echo", "ready"], timeout=30)
             )
