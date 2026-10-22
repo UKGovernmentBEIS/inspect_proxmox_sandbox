@@ -54,7 +54,8 @@ async def test_small_script_single_write(os_type, tmp_start, platform, size):
     script_path = f"{tmp_start}script{platform.SCRIPT_SUFFIX}"
     script = "a" * size
 
-    parts, owned = await executor._stage_file(script_path, script.encode())
+    owned = []
+    parts = await executor._stage_file(script_path, script.encode(), owned)
 
     write.assert_awaited_once_with(
         vm_id=100, filepath=script_path, content=script.encode()
@@ -80,7 +81,8 @@ async def test_large_script_chunked_and_reassembled(os_type, tmp_start, platform
         f"{script_path}.part{i:0{width}d}" for i in range(expected_chunks)
     ]
 
-    parts, owned = await executor._stage_file(script_path, data)
+    owned = []
+    parts = await executor._stage_file(script_path, data, owned)
 
     written_paths = [c.kwargs["filepath"] for c in write.await_args_list]
     assert written_paths == expected_paths
@@ -104,7 +106,7 @@ async def test_chunked_upload_does_not_re_enter_exec(os_type, tmp_start, platfor
     executor.exec = AsyncMock()
 
     await executor._stage_file(
-        f"{tmp_start}script{platform.SCRIPT_SUFFIX}", b"a" * (130 * 1024)
+        f"{tmp_start}script{platform.SCRIPT_SUFFIX}", b"a" * (130 * 1024), []
     )
 
     assert write.await_count > 1

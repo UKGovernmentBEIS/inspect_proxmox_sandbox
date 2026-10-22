@@ -214,6 +214,7 @@ async def test_unresolved_execution_deadline_retains_identity(
     assert error.value.pid == 123
     assert error.value.script_path == guest.writes[0]["file"]
     assert error.value.script_path in str(error.value)
+    assert guest.cleanups == []
 
 
 @pytest.mark.parametrize("os_type", ["win11", "l26"])

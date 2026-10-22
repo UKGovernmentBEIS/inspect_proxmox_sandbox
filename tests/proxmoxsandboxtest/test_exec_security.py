@@ -2,12 +2,13 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from proxmoxsandbox._impl import guest_exec
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.guest_exec import GuestExecutor
-from proxmoxsandbox._impl.qga_responses import ExecStatus
+from proxmoxsandbox._impl.qga_responses import ExecStatus, GuestAgentTamperError
 
 
 @pytest.mark.parametrize("os_type", ["l26", "win11"])
@@ -25,6 +26,7 @@ async def test_failed_private_directory_setup_never_uploads_payload(os_type, sta
         await executor.exec(["echo", "payload"], input="private input", timeout=1)
 
     agent.write_file.assert_not_awaited()
+    agent.exec_command_once.assert_not_awaited()
     assert agent.exec_command.await_count == 1
     command = agent.exec_command.await_args.args[1]
     assert "private input" not in " ".join(command)
@@ -73,3 +75,54 @@ async def test_pending_preparation_cannot_be_treated_as_success(monkeypatch):
     assert agent.exec_command.await_count == 1
     assert agent.get_agent_exec_status.await_count == 2
     sleeper.assert_awaited_once_with(0.1)
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
+@pytest.mark.parametrize(
+    "cleanup_error",
+    [
+        httpx.ReadTimeout("lost cleanup response"),
+        GuestAgentTamperError(100, "exec", "invalid cleanup PID"),
+    ],
+)
+async def test_pre_launch_cleanup_cannot_mask_upload_failure(os_type, cleanup_error):
+    agent = MagicMock(spec=AgentCommands)
+    agent.exec_command = AsyncMock(return_value=123)
+    agent.get_agent_exec_status = AsyncMock(
+        return_value=ExecStatus(exited=1, exitcode=0)
+    )
+    failure = RuntimeError("upload failed after writing some bytes")
+    agent.write_file = AsyncMock(side_effect=failure)
+    agent.exec_command_once = AsyncMock(side_effect=cleanup_error)
+    executor = GuestExecutor(agent, 100, os_type)
+
+    with pytest.raises(RuntimeError) as raised:
+        await executor.exec(["echo", "payload"], timeout=1)
+
+    assert raised.value is failure
+    assert agent.exec_command.await_count == 1
+    staged = agent.write_file.await_args.kwargs["filepath"]
+    agent.exec_command_once.assert_awaited_once_with(
+        100, executor.platform.build_cleanup([staged])
+    )
+
+
+async def test_script_preparation_failure_cleans_already_staged_input():
+    agent = MagicMock(spec=AgentCommands)
+    agent.exec_command = AsyncMock(return_value=123)
+    agent.get_agent_exec_status = AsyncMock(
+        return_value=ExecStatus(exited=1, exitcode=0)
+    )
+    agent.write_file = AsyncMock()
+    agent.exec_command_once = AsyncMock(return_value=124)
+    executor = GuestExecutor(agent, 100, "win11")
+
+    with pytest.raises(NotImplementedError, match="impersonation"):
+        await executor.exec(["echo", "payload"], input="private", user="someone")
+
+    assert agent.write_file.await_count == 1
+    assert agent.exec_command.await_count == 1
+    staged = agent.write_file.await_args.kwargs["filepath"]
+    agent.exec_command_once.assert_awaited_once_with(
+        100, executor.platform.build_cleanup([staged])
+    )

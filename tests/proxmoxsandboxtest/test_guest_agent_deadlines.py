@@ -97,6 +97,31 @@ def test_large_input_upload_cannot_restart_the_command_budget():
     assert observed.kind == "timeout"
 
 
+@pytest.mark.parametrize("os_type", ["l26", "win11"])
+@pytest.mark.parametrize(
+    ("timeout", "untimed_wait", "expected"),
+    [(600, None, "exec"), (None, "600", "exec"), (5, None, "timeout")],
+)
+def test_slow_successful_uploads_share_the_overall_execution_allowance(
+    os_type, timeout, untimed_wait, expected
+):
+    observed = isolated(
+        Scenario(
+            operation="exec",
+            os_type=os_type,
+            timeout=timeout,
+            untimed_wait=untimed_wait,
+            command=["echo", "x" * (1024 * 1024)],
+            faults=[
+                Fault(stage="upload", mode="late_success", elapsed_seconds=8)
+                for _ in range(26)
+            ],
+        )
+    )
+    assert observed.kind == expected
+    assert observed.launched is (expected == "exec")
+
+
 def test_time_spent_on_earlier_upload_chunks_counts_toward_the_deadline():
     observed = isolated(
         Scenario(

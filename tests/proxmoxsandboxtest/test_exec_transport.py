@@ -144,6 +144,7 @@ async def test_exec_never_launches_after_exhausted_upload(monkeypatch, os_type):
     assert len(guest.writes) == agent_commands._QGA_MAX_RETRIES
     assert guest.writes == [guest.writes[0]] * len(guest.writes)
     assert guest.launches == []
+    assert len(guest.cleanups) == 1
 
 
 @pytest.mark.parametrize("os_type", ["win11", "l26"])
