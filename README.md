@@ -600,10 +600,6 @@ The built-in VMs (`ubuntu24.04`, `debian13`, `kali2025.4`) pin specific upstream
 
 The Kali built-in installs the `kali-linux-everything` metapackage on top of the buildpack set, so an eval can run offline.
 
-## Tech debt
-
-- Inconsistent use of task_wrapper and tenacity
-
 ## Developing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md)

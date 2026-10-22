@@ -40,7 +40,6 @@ from proxmoxsandbox._impl.iso_write import IsoWriter
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, is_ephemeral_zone
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._proxmox_pool import ProxmoxPoolABC, QueueBasedProxmoxPool
 from proxmoxsandbox.schema import (
     OsType,
@@ -64,7 +63,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
     infra_commands: InfraCommands
     agent_commands: AgentCommands
     qemu_commands: QemuCommands
-    task_wrapper: TaskWrapper
     all_ipam_mappings: Tuple[IpamMapping, ...]
     vm_id: int
     name: str
@@ -100,7 +98,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         self.infra_commands = infra_commands
         self.agent_commands = agent_commands
         self.qemu_commands = infra_commands.qemu_commands
-        self.task_wrapper = infra_commands.task_wrapper
         self.all_ipam_mappings = ipam_mappings
         self.vm_id = vm_id
         self.name = name
@@ -797,23 +794,15 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
     async def create_snapshot(self, snapshot_name: str) -> None:
         """Creates a snapshot of the VM."""
-
-        async def snapshotter() -> None:
-            await self.agent_commands.create_snapshot(
-                vm_id=self.vm_id, snapshot_name=snapshot_name
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
+        await self.agent_commands.create_snapshot(
+            vm_id=self.vm_id, snapshot_name=snapshot_name
+        )
 
     async def restore_snapshot(self, snapshot_name: str) -> None:
         """Restores a snapshot of the VM."""
-
-        async def snapshotter() -> None:
-            await self.agent_commands.rollback_to_snapshot(
-                vm_id=self.vm_id, snapshot_name=snapshot_name
-            )
-
-        await self.task_wrapper.do_action_and_wait_for_tasks(snapshotter)
+        await self.agent_commands.rollback_to_snapshot(
+            vm_id=self.vm_id, snapshot_name=snapshot_name
+        )
         await self.qemu_commands.await_vm(
             vm_id=self.vm_id,
             requires_guest_agent=True,

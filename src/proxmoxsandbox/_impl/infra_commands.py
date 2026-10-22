@@ -32,7 +32,6 @@ from proxmoxsandbox._impl.sdn_commands import (
     is_ephemeral_zone,
 )
 from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._impl.vm_scheduler import VmScheduler
 from proxmoxsandbox.schema import (
     HealthCheck,
@@ -64,7 +63,6 @@ class InfraCommands(abc.ABC):
     _instances: ClassVar[Dict[ProxmoxTarget, "InfraCommands"]] = {}
 
     async_proxmox: AsyncProxmoxAPI
-    task_wrapper: TaskWrapper
     sdn_commands: SdnCommands
     qemu_commands: QemuCommands
     built_in_vm: BuiltInVM
@@ -74,14 +72,12 @@ class InfraCommands(abc.ABC):
         self,
         async_proxmox: AsyncProxmoxAPI,
         node: str,
-        task_wrapper: TaskWrapper,
         sdn_commands: SdnCommands,
         qemu_commands: QemuCommands,
         built_in_vm: BuiltInVM,
     ):
         """Prefer InfraCommands.build() unless injecting collaborators for testing."""
         self.async_proxmox = async_proxmox
-        self.task_wrapper = task_wrapper
         self.sdn_commands = sdn_commands
         self.qemu_commands = qemu_commands
         self.built_in_vm = built_in_vm
@@ -121,17 +117,15 @@ class InfraCommands(abc.ABC):
         cls, async_proxmox: AsyncProxmoxAPI, node: str, image_storage: str
     ) -> "InfraCommands":
         """Build the full object graph bottom-up."""
-        task_wrapper = TaskWrapper(async_proxmox)
-        storage_commands = LocalStorageCommands(async_proxmox, node, task_wrapper)
+        storage_commands = LocalStorageCommands(async_proxmox, node)
         sdn_commands = SdnCommands(async_proxmox)
         qemu_commands = QemuCommands(
-            async_proxmox, node, image_storage, task_wrapper, storage_commands
+            async_proxmox, node, image_storage, storage_commands
         )
         built_in_vm = BuiltInVM(
             async_proxmox,
             node,
             image_storage,
-            task_wrapper,
             qemu_commands,
             sdn_commands,
             storage_commands,
@@ -139,7 +133,6 @@ class InfraCommands(abc.ABC):
         return cls(
             async_proxmox,
             node,
-            task_wrapper,
             sdn_commands,
             qemu_commands,
             built_in_vm,
@@ -187,8 +180,8 @@ class InfraCommands(abc.ABC):
         """Create every VM once its dependencies are ready; wait for all to be ready.
 
         Clone/configure/start stays strictly serial: VM IDs come from an
-        unreserved /cluster/nextid read, and TaskWrapper waits on cluster-wide
-        task state. Only the readiness waits for already-started VMs overlap.
+        unreserved /cluster/nextid read. Only the readiness waits for
+        already-started VMs overlap.
         Returns (vm_id, config) pairs in `vms_config` order.
         """
         by_name = {vm.name: vm for vm in vms_config}
