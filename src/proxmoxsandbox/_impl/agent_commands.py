@@ -1,7 +1,10 @@
 import asyncio
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from logging import getLogger
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
 import httpx
 from inspect_ai.util import (
@@ -19,7 +22,7 @@ from proxmoxsandbox._impl.qga_responses import (
     parse_guest,
 )
 
-# Transient failures talking to the QEMU guest agent (QGA), all retried:
+# Transient failures talking to the QEMU guest agent (QGA):
 #   * httpx transport errors - the Proxmox API host was briefly unreachable,
 #     timed out, or dropped the connection mid-request (ConnectError,
 #     ConnectTimeout, ReadTimeout, ReadError, RemoteProtocolError, ...).
@@ -29,13 +32,12 @@ from proxmoxsandbox._impl.qga_responses import (
 #     by another process", etc.) and Proxmox's non-standard 596/597
 #     "Broken pipe" returned when streaming large file-reads back.
 #
-# Every QGA call is retried on these - including exec-start: a retry can only
-# double-launch the command if the agent received it but the pid response was
-# lost (a narrow window, since exec-start returns immediately), and the wrapper
-# script's flock guard makes a double launch run the command once anyway. The
-# exec-status read is single-shot (the agent discards a finished process's
-# output once read), so get_agent_exec_status falls back to the on-disk results
-# if a retry finds the PID gone.
+# Uploads and reads retry these failures. Command launches can retry when the
+# guest wrapper's persistent claim prevents another execution; unguarded
+# commands must use exec_command_once. A finished exec-status record is
+# consumed on read, and an agent restart can also discard process records.
+# A gone PID therefore sends the caller to its retained result record, not
+# to another command launch.
 # Exception: a 500 for a missing file, an unreadable file (e.g. "Is a
 # directory"), or a gone PID is surfaced immediately (it will not change on
 # retry); callers turn those into empty content / a disk fallback / an error.
@@ -46,14 +48,68 @@ _QGA_RETRY_MAX_DELAY = 20.0  # seconds
 _QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
 
 
+class HealthcheckTransportExhaustedError(RuntimeError):
+    """A healthcheck exhausted its shared guest-agent retry budget."""
+
+    def __init__(self, failures: int):
+        self.failures = failures
+        super().__init__(
+            f"Guest-agent transport budget exhausted after {failures} failed requests"
+        )
+
+
+@dataclass
+class _HealthcheckTransportBudget:
+    interval: float
+    failures: int = 0
+
+
+_healthcheck_budget: ContextVar[_HealthcheckTransportBudget | None] = ContextVar(
+    "healthcheck_transport_budget", default=None
+)
+
+
+@contextmanager
+def healthcheck_transport_budget(interval: float) -> Iterator[None]:
+    """Share retries across one probe without changing ordinary exec policy."""
+    if _healthcheck_budget.get() is not None:
+        yield
+        return
+    token = _healthcheck_budget.set(_HealthcheckTransportBudget(interval))
+    try:
+        yield
+    finally:
+        _healthcheck_budget.reset(token)
+
+
+class GuestAgentCommunicationTimeoutError(TimeoutError):
+    """The provider exhausted its wait for guest-agent communication."""
+
+
+class GuestExecIncompleteError(RuntimeError):
+    """An attempted guest command has not been confirmed terminal.
+
+    This is not a TimeoutError: Inspect treats that as a completed tool call,
+    hiding the execution identity needed to investigate before retrying.
+    """
+
+    def __init__(self, vm_id: int, pid: int | None, script_path: str):
+        self.vm_id = vm_id
+        self.pid = pid
+        self.script_path = script_path
+        super().__init__(
+            f"Guest command completion is unknown on VM {vm_id}, pid {pid}, "
+            f"script {script_path}; inspect this execution before retrying"
+        )
+
+
 def _is_pid_gone(exc: httpx.HTTPStatusError) -> bool:
     """Whether a QGA error says the PID is unknown.
 
-    QGA only forgets a PID once the process has finished AND its exec-status
-    was read (the agent discards a finished process's output after one read),
-    so this reliably means "it completed". The agent renders the message as
-    e.g. "Agent error: PID ld does not exist" (the id is a stray %ld), so we
-    match on the stable "does not exist" rather than the pid.
+    A finished status read consumes the record, but an agent restart can also
+    forget a still-running child. The retained terminal record must decide
+    completion. The agent renders the message as e.g. "Agent error: PID ld
+    does not exist" (the id is a stray %ld), so match the stable text.
     """
     return "does not exist" in str(exc).casefold()
 
@@ -102,18 +158,34 @@ class AgentCommands:
     async def _retry_on_qga_error(self, label: str, coro_fn):
         """Retry a coroutine function on transient QGA / transport errors."""
         max_retries = self._qga_max_retries
+        budget = _healthcheck_budget.get()
 
         async def retry():
             for attempt in range(1, max_retries + 1):
+                if budget is not None and budget.failures >= _QGA_MAX_RETRIES:
+                    raise HealthcheckTransportExhaustedError(budget.failures)
                 try:
                     return await coro_fn()
                 except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                    if attempt == max_retries or not is_transient_qga_error(e):
+                    if not is_transient_qga_error(e):
                         raise
-                    delay = min(
-                        _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
-                        _QGA_RETRY_MAX_DELAY,
-                    )
+                    if budget is not None:
+                        budget.failures += 1
+                        if (
+                            budget.failures >= _QGA_MAX_RETRIES
+                            or attempt == max_retries
+                        ):
+                            raise HealthcheckTransportExhaustedError(
+                                budget.failures
+                            ) from e
+                        delay = budget.interval
+                    else:
+                        if attempt == max_retries:
+                            raise
+                        delay = min(
+                            _QGA_RETRY_BASE_DELAY * 2 ** (attempt - 1),
+                            _QGA_RETRY_MAX_DELAY,
+                        )
                     self.logger.warning(
                         "%s failed (attempt %s/%s), retrying in %.1fs: %s",
                         label,
@@ -132,13 +204,9 @@ class AgentCommands:
             ) from exc
 
     async def get_agent_exec_status(self, vm_id: int, pid: int) -> ExecStatus:
-        # The status read is single-shot (the agent discards a finished
-        # process's output after one successful read), so a retry whose first
-        # attempt's response was lost could find the PID already gone. That is
-        # safe here: the wrapper script writes stdout/stderr/returncode to disk
-        # before exit, so a gone PID just means "finished" - report exited and
-        # let exec() read the results from disk. This makes the call idempotent
-        # and freely retryable.
+        # A lost finished-status response or an agent restart can leave the PID
+        # untracked. The exited hint stops QGA polling; callers must still read
+        # the retained terminal record to confirm that the command finished.
         if type(pid) is not int or pid <= 0:
             # Belt and braces: exec_command only hands out validated pids.
             raise ValueError(f"refusing to query exec-status for pid {pid!r}")
@@ -151,8 +219,8 @@ class AgentCommands:
         except httpx.HTTPStatusError as e:
             if _is_pid_gone(e):
                 self.logger.warning(
-                    f"exec-status vm={vm_id} pid={pid}: PID gone, assuming the "
-                    f"process finished and reading its results from disk"
+                    f"exec-status vm={vm_id} pid={pid}: PID no longer tracked; "
+                    f"recovering from the retained result record"
                 )
                 return ExecStatus(exited=1)
             raise
@@ -183,7 +251,18 @@ class AgentCommands:
             )
 
     async def exec_command(self, vm_id: int, command: List[str]) -> int:
-        """Execute a command in the VM using QEMU agent; returns its pid.
+        """Retry an idempotent or persistently guarded command; return its pid.
+
+        A lost response may cause multiple launches, including after the first
+        command has completed. Use exec_command_once without such a guarantee.
+        """
+        return await self._retry_on_qga_error(
+            f"exec_command vm={vm_id}",
+            lambda: self.exec_command_once(vm_id, command),
+        )
+
+    async def exec_command_once(self, vm_id: int, command: List[str]) -> int:
+        """Attempt one command launch using QEMU agent; return its pid.
 
         Every element of `command` MUST be ASCII. A single non-ASCII byte in
         the QMP guest-exec arguments breaks Proxmox's agent bridge: the call
@@ -193,15 +272,9 @@ class AgentCommands:
         with trace_action(
             self.logger, self.TRACE_NAME, f"exec_command {vm_id=} {command=}"
         ):
-            # Retried like everything else. A retry only double-launches if the
-            # agent received the request but the pid response was lost; the
-            # wrapper script's flock guard makes that run the command once.
             path = f"/nodes/{self.node}/qemu/{vm_id}/agent/exec"
             data: ProxmoxJsonDataType = {"command": command}
-            raw = await self._retry_on_qga_error(
-                f"exec_command vm={vm_id}",
-                lambda: self.async_proxmox.request("POST", path, json=data),
-            )
+            raw = await self.async_proxmox.request("POST", path, json=data)
             return parse_guest(ExecReturn, vm_id, "exec", raw).pid
 
     async def read_file_capped(

@@ -15,35 +15,18 @@ from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
 from inspect_ai.util._sandbox.limits import override_max_exec_output_size
 from inspect_ai.util._sandbox.service import SERVICE_REQUEST_READ_OUTPUT_LIMIT
 
-from proxmoxsandbox import _proxmox_sandbox_environment as mod
-from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
-from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+from proxmoxsandbox._impl import guest_exec as mod
+from proxmoxsandbox._impl.guest_exec import GuestExecutor
 
 
-def _make_sandbox(*, truncated: bool = False) -> ProxmoxSandboxEnvironment:
+def _make_executor(*, truncated: bool = False) -> GuestExecutor:
     agent_commands = MagicMock()
     agent_commands.read_file_capped_or_blank = AsyncMock(return_value=(b"0", truncated))
-    return ProxmoxSandboxEnvironment(
-        infra_commands=MagicMock(),
-        agent_commands=agent_commands,
-        ipam_mappings=(),
-        vm_id=100,
-        name="test-sandbox",
-        all_vms={
-            100: VmConfig(
-                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
-                name="test-sandbox",
-            )
-        },
-        sdn_zone_id=None,
-        instance=None,
-        pool_id=None,
-        os_type="l26",
-    )
+    return GuestExecutor(agent_commands, vm_id=100, os_type="l26")
 
 
-def _count(env: ProxmoxSandboxEnvironment) -> int:
-    read = cast(AsyncMock, env.agent_commands.read_file_capped_or_blank)
+def _count(executor: GuestExecutor) -> int:
+    read = cast(AsyncMock, executor.agent_commands.read_file_capped_or_blank)
     assert read.await_args is not None, "the read helper was never awaited"
     return int(read.await_args.kwargs["count"])
 
@@ -58,41 +41,65 @@ def _count(env: ProxmoxSandboxEnvironment) -> int:
 async def test_exec_output_read_count_never_exceeds_pve_cap(
     override: int | None,
 ) -> None:
-    env = _make_sandbox()
+    executor = _make_executor()
     if override is None:
-        await env._read_exec_output("/tmp/out")
+        await executor._read_exec_output("/tmp/out")
     else:
         with override_max_exec_output_size(override):
-            await env._read_exec_output("/tmp/out")
+            await executor._read_exec_output("/tmp/out")
 
-    assert _count(env) <= mod._PVE_FILE_READ_MAX
+    assert _count(executor) <= mod._PVE_FILE_READ_MAX
 
 
 async def test_return_code_read_count_never_exceeds_pve_cap() -> None:
-    env = _make_sandbox()
+    executor = _make_executor()
     with override_max_exec_output_size(SERVICE_REQUEST_READ_OUTPUT_LIMIT):
-        await env._read_return_code("/tmp/")
+        await executor._read_return_code("/tmp/")
 
-    assert _count(env) <= mod._PVE_FILE_READ_MAX
+    assert _count(executor) <= mod._PVE_FILE_READ_MAX
 
 
 async def test_low_limit_is_still_honoured() -> None:
     """The clamp is a ceiling, not a floor — a limit under the cap wins."""
-    env = _make_sandbox()
+    executor = _make_executor()
     with override_max_exec_output_size(1024):
-        await env._read_exec_output("/tmp/out")
+        await executor._read_exec_output("/tmp/out")
 
-    assert _count(env) == 1024
+    assert _count(executor) == 1024
 
 
 async def test_truncation_reports_whichever_limit_bit() -> None:
-    env = _make_sandbox(truncated=True)
+    executor = _make_executor(truncated=True)
 
     with override_max_exec_output_size(SERVICE_REQUEST_READ_OUTPUT_LIMIT):
         with pytest.raises(OutputLimitExceededError) as over_cap:
-            await env._read_exec_output("/tmp/out")
+            await executor._read_exec_output("/tmp/out")
     assert mod._PVE_FILE_READ_MAX_STR in str(over_cap.value)
 
     with pytest.raises(OutputLimitExceededError) as under_cap:
-        await env._read_exec_output("/tmp/out")
+        await executor._read_exec_output("/tmp/out")
     assert SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR in str(under_cap.value)
+
+
+async def test_missing_terminal_record_is_unknown_without_a_local_retry() -> None:
+    executor = _make_executor()
+    read = cast(AsyncMock, executor.agent_commands.read_file_capped_or_blank)
+    read.return_value = (b"", False)
+
+    assert await executor._read_return_code("/tmp/execution_") is None
+
+    read.assert_awaited_once()
+    assert read.await_args is not None
+    assert read.await_args.kwargs["filepath"] == "/tmp/execution_script.returncode"
+
+
+@pytest.mark.parametrize(
+    "raw,truncated", [(b"0", True), (b"0\n1", False), (b"not-a-code", False)]
+)
+async def test_terminal_record_must_be_a_complete_integer(raw, truncated) -> None:
+    executor = _make_executor()
+    read = cast(AsyncMock, executor.agent_commands.read_file_capped_or_blank)
+    read.return_value = (raw, truncated)
+
+    with pytest.raises(ValueError, match="100"):
+        await executor._read_return_code("/tmp/execution_")

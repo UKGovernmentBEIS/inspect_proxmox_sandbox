@@ -276,7 +276,7 @@ async def test_healthcheck_gates_dependants():
     assert (vm_id, vm_config.healthcheck) == (100, spec)
 
 
-async def test_healthcheck_executor_runs_test_through_sandbox_exec():
+async def test_healthcheck_uses_shared_executor_without_a_sandbox_environment():
     infra = MagicMock()
     infra._healthcheck_executor = InfraCommands._healthcheck_executor.__get__(infra)
     spec = HealthCheck(test=("systemctl", "is-active", "nginx"), timeout=7)
@@ -288,16 +288,15 @@ async def test_healthcheck_executor_runs_test_through_sandbox_exec():
     )
     with (
         patch(
-            "proxmoxsandbox._proxmox_sandbox_environment.ProxmoxSandboxEnvironment",
+            "proxmoxsandbox._impl.infra_commands.GuestExecutor",
             return_value=env,
         ) as env_cls,
-        patch("proxmoxsandbox._impl.agent_commands.AgentCommands"),
+        patch("proxmoxsandbox._impl.infra_commands.AgentCommands") as agent_cls,
     ):
         execute = infra._healthcheck_executor(100, vm_config)
         result = await execute(spec)
 
     assert result.success
     env.exec.assert_awaited_once_with(["systemctl", "is-active", "nginx"], timeout=7)
-    kwargs = env_cls.call_args.kwargs
-    assert kwargs["vm_id"] == 100
-    assert kwargs["os_type"] == "win11"
+    env_cls.assert_called_once_with(agent_cls.return_value, 100, "win11")
+    agent_cls.assert_called_once_with(infra.async_proxmox, infra.node)

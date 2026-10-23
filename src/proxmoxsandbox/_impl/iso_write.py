@@ -46,6 +46,7 @@ _ISO_PAYLOAD_ISO9660 = "/PAYLOAD.;1"
 # dropped by Proxmox regardless of machine type, so the slot must exist at
 # boot for QEMU to enumerate the AHCI controller.
 _WRITE_SLOT = "sata5"
+_TASK_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _rand(n: int = 8) -> str:
@@ -89,6 +90,7 @@ class IsoWriter:
         self.agent_commands = agent_commands
         self.storage_commands = storage_commands
         self.node = node
+        self._pending_task: str | None = None
 
     async def write_file(self, vm_id: int, filepath: str, contents: bytes) -> None:
         """Write `contents` to `filepath` inside the guest VM.
@@ -121,27 +123,20 @@ class IsoWriter:
             t0 = time.monotonic()
             iso_name = f"wf-{vm_id}-{time.time_ns()}-{_rand()}.iso"
             iso_volid = f"{LOCAL_STORAGE}:iso/{iso_name}"
-            # Bypass storage_commands.upload_file_to_storage to skip the
-            # upload task wait. For a new random-named ISO, the upload POST
-            # returns when the file is on disk; we don't need to wait for
-            # Proxmox's content reindex task to complete before we can
-            # reference it as a volid.
+            # The upload response only acknowledges receipt of the body. Its
+            # task must finish successfully before the volume can be attached.
             await within_budget(
-                self.async_proxmox.upload_file(
-                    self.node, LOCAL_STORAGE, local_iso, "iso", filename=iso_name
-                ),
+                self._upload_iso(local_iso, iso_name),
                 600,
             )
             timings["upload"] = time.monotonic() - t0
 
-            # On a freshly-booted VM the kernel sometimes refuses every
-            # open() on /dev/sr* after the first media-change ("Can't open
-            # blockdev"). Detaching and re-attaching emits a fresh
-            # media-change event which the kernel then handles cleanly.
+            # Retry once with a fresh media change if the guest cannot read
+            # the newly attached disc.
             t0 = time.monotonic()
             for attempt in range(2):
                 attached = True
-                await self._attach(vm_id, iso_volid)
+                await within_budget(self._attach(vm_id, iso_volid), 30)
                 try:
                     await self._copy_in_guest(vm_id, filepath)
                     break
@@ -152,23 +147,28 @@ class IsoWriter:
                         f"iso_write copy failed (attempt {attempt + 1}/2) "
                         f"on vm {vm_id}; re-attaching: {ex}"
                     )
-                    await self._detach(vm_id)
+                    await within_budget(self._detach(vm_id), 30)
                     attached = False
             timings["attach_copy"] = time.monotonic() - t0
         finally:
             local_dir.cleanup()
             cleanup_failed = False
-            if attached:
+            if attached or self._pending_task is not None:
                 t0 = time.monotonic()
                 try:
                     await within_budget(
-                        self._detach(vm_id), CLEANUP_WAIT_SECONDS, independent=True
+                        self._finish_and_detach(vm_id, attached),
+                        CLEANUP_WAIT_SECONDS,
+                        independent=True,
                     )
                 except Exception as ex:
                     cleanup_failed = True
-                    logger.warning(f"detach on vm {vm_id} failed: {ex}")
+                    logger.warning(
+                        f"ISO cleanup on vm {vm_id} failed; retaining {iso_volid} "
+                        f"(pending task {self._pending_task}): {ex}"
+                    )
                 timings["detach"] = time.monotonic() - t0
-            if iso_volid is not None:
+            if iso_volid is not None and not cleanup_failed:
                 t0 = time.monotonic()
                 try:
                     await within_budget(
@@ -188,28 +188,56 @@ class IsoWriter:
         if cleanup_failed:
             raise IOError(f"ISO cleanup was incomplete on VM {vm_id}")
 
-    @tenacity.retry(
-        wait=tenacity.wait_exponential(min=0.5, exp_base=1.5),
-        stop=tenacity.stop_after_delay(30),
-    )
-    async def _attach(self, vm_id: int, iso_volid: str) -> None:
-        await self.async_proxmox.request(
-            "POST",
-            f"/nodes/{self.node}/qemu/{vm_id}/config",
-            json={_WRITE_SLOT: f"{iso_volid},media=cdrom"},
+    async def _upload_iso(self, local_iso: Path, iso_name: str) -> None:
+        upid = await self.async_proxmox.upload_file(
+            self.node, LOCAL_STORAGE, local_iso, "iso", filename=iso_name
         )
+        await self._wait_for_task(upid)
+
+    async def _wait_for_task(self, upid: str) -> None:
+        # Keep the accepted task identity if waiting is cancelled or fails.
+        # Cleanup must settle it before submitting another media change.
+        self._pending_task = upid
+        await self.async_proxmox.wait_for_task(
+            upid=upid, initial_poll_interval=_TASK_POLL_INTERVAL_SECONDS
+        )
+        self._pending_task = None
+        task = await self.async_proxmox.request(
+            "GET", f"/nodes/{self.node}/tasks/{upid}/status"
+        )
+        if task.get("exitstatus") != "OK":
+            raise IOError(f"ISO task {upid} failed: {task.get('exitstatus')}")
+
+    async def _finish_and_detach(self, vm_id: int, attached: bool) -> None:
+        if self._pending_task is not None:
+            await self.async_proxmox.wait_for_task(
+                upid=self._pending_task,
+                initial_poll_interval=_TASK_POLL_INTERVAL_SECONDS,
+            )
+            self._pending_task = None
+        if attached:
+            await self._detach(vm_id)
 
     @tenacity.retry(
         wait=tenacity.wait_exponential(min=0.5, exp_base=1.5),
         stop=tenacity.stop_after_delay(30),
     )
-    async def _detach(self, vm_id: int) -> None:
-        # Set back to empty; leaves the device in place for next write.
-        await self.async_proxmox.request(
+    async def _configure_cdrom(self, vm_id: int, media: str) -> str:
+        # Retry submission failures only, never an accepted or failed task.
+        return await self.async_proxmox.request(
             "POST",
             f"/nodes/{self.node}/qemu/{vm_id}/config",
-            json={_WRITE_SLOT: "none,media=cdrom"},
+            json={_WRITE_SLOT: f"{media},media=cdrom"},
         )
+
+    async def _attach(self, vm_id: int, iso_volid: str) -> None:
+        upid = await self._configure_cdrom(vm_id, iso_volid)
+        await self._wait_for_task(upid)
+
+    async def _detach(self, vm_id: int) -> None:
+        # Set back to empty; leaves the device in place for next write.
+        upid = await self._configure_cdrom(vm_id, "none")
+        await self._wait_for_task(upid)
 
     async def _delete_iso(self, iso_volid: str) -> None:
         try:
@@ -229,19 +257,21 @@ class IsoWriter:
         Runs as a single shell script via QGA exec to minimise round-trips
         and inherit shell-level error handling.
         """
-        mount_dir = f"/tmp/_wf_iso_{_rand()}_{time.time_ns()}"
+        mount_parent = f"/tmp/_wf_iso_{_rand()}_{time.time_ns()}"
+        mount_dir = f"{mount_parent}/mnt"
         target_q = shlex.quote(target)
+        parent_q = shlex.quote(mount_parent)
         mount_q = shlex.quote(mount_dir)
         payload_q = shlex.quote(_ISO_PAYLOAD_NAME)
 
-        # Wait for the kernel to notice the hot-plugged CDROM. 3s budget:
-        # if the mount succeeds, it's usually first try (~50ms). If it
-        # keeps failing, we're in the "Can't open blockdev" failure mode
-        # and waiting longer won't help — the caller re-attaches and
-        # tries again, which clears the failure.
+        # Give the guest three seconds to notice the disc. If it remains
+        # unavailable, the caller retries with a fresh media change.
+        # Reject pre-existing paths, and keep the private parent outside the
+        # mounted filesystem so another guest user cannot replace the payload.
         script = f"""set -e
+mkdir -m 700 -- {parent_q}
+mkdir -- {mount_q}
 mkdir -p -- "$(dirname -- {target_q})"
-mkdir -p {mount_q}
 dev=
 for i in $(seq 1 6); do
   for cand in /dev/sr0 /dev/sr1 /dev/sr2 /dev/sr3; do
@@ -263,19 +293,23 @@ if [ -z "$dev" ]; then
   lsblk 2>&1 1>&2 || true
   echo "--- diag: dmesg tail ---" 1>&2
   dmesg 2>/dev/null | tail -20 1>&2 || true
-  rmdir {mount_q} 2>/dev/null || true
+  rmdir {mount_q} {parent_q} 2>/dev/null || true
   exit 2
 fi
 cp -f {mount_q}/{payload_q} {target_q}
 umount {mount_q}
-rmdir {mount_q}
+rmdir {mount_q} {parent_q}
 """
         pid = await self.agent_commands.exec_command(
             vm_id=vm_id, command=["sh", "-c", script]
         )
 
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            wait=tenacity.wait_exponential(
+                multiplier=_TASK_POLL_INTERVAL_SECONDS,
+                min=_TASK_POLL_INTERVAL_SECONDS,
+                exp_base=1.3,
+            ),
             stop=tenacity.stop_after_delay(120),
             retry=tenacity.retry_if_result(lambda r: r is None),
         )

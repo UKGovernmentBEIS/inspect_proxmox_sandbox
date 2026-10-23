@@ -525,7 +525,7 @@ headless too — its template display setting is overridden to `none`.
 > shows an empty serial terminal even though the guest agent is working — that is
 > expected, and not a reason to re-expose the device.
 
-The `os_type` field determines how commands are executed inside the VM. Windows types (any value starting with `w`) use batch scripts instead of shell scripts. The QEMU guest agent channel on Windows is less reliable than on Linux, so transient errors are automatically retried.
+The `os_type` field determines how commands are executed inside the VM. Windows types (any value starting with `w`) use batch scripts instead of shell scripts. Both use the upload, launch and result-collection policy described below.
 
 ## Observing the VMs
 
@@ -584,20 +584,38 @@ When using `PROXMOX_CONFIG_FILE`, cleanup runs against every instance in the con
 
 The project follows [semantic versioning](https://semver.org/) and is aiming for a 1.0 release. Until then, backward-compatibility is not guaranteed.
 
-## Large `write_file` fast path
+## Large upload fast path
 
-For Linux guests, `write_file` payloads larger than 128 KiB are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot, sidestepping the QEMU guest-agent's ~60 KiB per-call write cap. Ordinary transfer failures fall back to chunked QGA. Cancellation or a malformed guest reply fails the current call and disables the CD-ROM method for later writes. Windows always uses chunked QGA.
+By default, Linux `write_file()` payloads and staged `exec()` scripts or input files larger than 40 KiB (after UTF-8 encoding for text) are written via an ISO9660 image hot-plugged into a dedicated `sata5` CD-ROM slot. Smaller writes fit in one QGA chunk; larger QGA writes need temporary chunks, assembly and cleanup. Ordinary transfer failures fall back to chunked QGA. Cancellation or a malformed guest reply fails the current call and disables the CD-ROM method for later writes. Windows and startup healthchecks continue to use QGA.
+
+The ISO is mounted inside an exclusively created private directory. Guest users who can read the raw CD device can still read the payload; ISO transfer does not guarantee confidentiality from code running in the guest.
 
 Two things worth knowing:
 
-- **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it — move that content to `sata0`–`sata4`, or disable the fast path.
-- **Disabling it.** Set `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES` above your largest payload to turn it off globally. A failed or cancelled transfer also disables this method for the affected VM.
+- **`sata5` is reserved.** The slot is cold-added to every `is_sandbox` VM at clone time. If your `existing_vm_template_tag` template already populates `sata5`, the cold-add overwrites it; move that content to `sata0`–`sata4`. Changing the write threshold does not remove this reservation.
+- **Choosing the threshold.** Set `iso_write_threshold_bytes` on `ProxmoxSandboxEnvironmentConfig` to the minimum encoded payload size in bytes. `None` (the default) inherits `ProxmoxSandboxEnvironment.ISO_WRITE_THRESHOLD_BYTES`, so global overrides still apply. Zero tries ISO for every supported write; a threshold above your largest payload keeps writes on QGA. A failed or cancelled transfer also disables the ISO method for the affected VM.
 
 ## Guest-agent replies and command waiting
 
-`exec()` shares a waiting allowance across uploads, retries and result collection: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup gets a separate two-minute allowance per step, and the guest command may keep running after the provider raises `TimeoutError`.
+`exec()` gives each command an execution ID on both Linux and Windows. A guest-side claim prevents repeated launch requests from running it again, including after it finishes. Uploads, launches and result reads can therefore recover from transient transport failures without starting a new command. The claim and terminal result remain until the VM is removed; per-command cleanup removes only scripts, input and output.
 
-Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
+Completion comes from the command's terminal result, not a retry's PID. If it cannot be confirmed, `GuestExecIncompleteError` ends the sample with the VM, PID if known and script path. If completion is confirmed but output cannot be retrieved, `GuestExecResultError` retains that identity and exit code. Neither error permits automatic replay. Recovery assumes the guest records remain intact; it does not cover snapshot rollback, deleted records or power-loss durability.
+
+Linux enforces command timeouts inside the guest. Windows currently only limits the completion wait, so expiry raises `GuestExecIncompleteError`: the guest command may still be running. Windows guest-side timeout enforcement is not implemented.
+
+Uploads, retries and result collection share a waiting allowance: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Sample resource cleanup gets a separate two-minute allowance per step.
+
+Each healthcheck execution has one budget of 25 failed transport requests across upload, launch, status and result reads, with retries spaced by its `interval`. Exhaustion fails startup instead of starting another transport budget. Confirmed unhealthy results still use the healthcheck's service retry policy.
+
+### Execution permissions and trust
+
+QGA must run as root on Linux or LocalSystem on Windows. Before uploading any execution data, the provider creates and verifies a private directory: service-owned `0700` on Linux, or a protected SYSTEM-only inheritable DACL on Windows. Existing objects with unexpected permissions, owners or links are rejected, not repaired. Windows preparation uses the built-in Windows PowerShell and .NET Framework. The OS temporary directory and its ancestors must retain their normal protected ownership and deletion permissions.
+
+Scripts, input, output and recovery records are stored inside that directory. Large Linux execution uploads use the ISO fast path described above, with private QGA staging as the fallback. A Linux command with `user=` receives its intended input through an already-open descriptor; it does not gain access to the directory. No privileges or capabilities are granted. These controls do not hide secrets the caller explicitly puts in a payload's process arguments, or restrict files the payload itself creates.
+
+Root, SYSTEM and accounts with equivalent privileges can still alter every guest record and response. Execution IDs prevent accidental replay; they do not authenticate a hostile guest's output or prove that its command stopped. Guest output stays data: the provider does not evaluate it as host code, open it as a host path or use it to choose a network destination. Callers must not treat guest output as trusted instructions or expose privileged host tools on that basis.
+
+Guest HTTP responses are size-limited before JSON parsing, then checked for the expected types, bounded process IDs, return codes and file content. HTTP diagnostics escape terminal control characters; returned command output remains unchanged text. Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent a guest from denying service.
 
 ## Feature Roadmap
 

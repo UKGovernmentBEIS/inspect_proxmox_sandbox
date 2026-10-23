@@ -251,15 +251,21 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     Attempts run through the same command wrapper as sandbox().exec(). A failed
     attempt is a non-zero exit, a guest-side timeout, a `test` that is not
     executable, or output over the exec size limit; each consumes one of
-    `retries`. Attempts that cannot reach the guest agent at all do not count
-    toward `retries`, but 25 in a row fail the VM, so a guest whose agent dies
-    is reported after roughly 25 * (interval + a few seconds). Once passed, the
-    healthcheck is not re-run for the rest of the sample.
+    `retries`. Transport failures that leave no unresolved command do not count
+    toward `retries`. One budget of 25 failed transport requests spans each
+    execution, with recovery spaced by `interval`; exhaustion fails startup.
+    Once passed, the healthcheck is not re-run for the rest of the sample.
+
+    A Windows check that outlives its completion wait ends sample setup,
+    regardless of `retries` or `start_period`, because the timeout does not stop
+    the guest process. Unknown completion on either OS aborts startup with the
+    VM, PID if known and script path, instead of starting an overlapping probe.
 
     Attributes:
         test: Command to run inside the guest.
         interval: Seconds between attempts.
-        timeout: Per-attempt limit in whole seconds, enforced inside the guest.
+        timeout: Per-attempt limit in whole seconds. Linux enforces it in the
+            guest; Windows only limits the completion wait.
         retries: Consecutive failures tolerated before the sample fails.
         start_period: Grace window in seconds after the first attempt during which
             failures do not count towards retries.
@@ -269,7 +275,7 @@ class HealthCheck(BaseModel, frozen=True, extra="forbid", allow_inf_nan=False):
     interval: float = Field(default=5, gt=0)
     # int, unlike the other durations: it is handed to exec(), whose signature
     # Inspect's SandboxEnvironment fixes as `timeout: int | None`, and which
-    # enforces it in-guest as `timeout -k 5s {timeout}s`.
+    # enforces it in Linux guests as `timeout -k 5s {timeout}s`.
     timeout: int = Field(default=30, gt=0)
     retries: int = Field(default=60, gt=0)
     start_period: float = Field(default=0, ge=0)
@@ -517,6 +523,8 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
             PROXMOX_CONFIG_FILE or defaults to "default" for single-instance mode)
         sdn_config: Software-defined networking configuration
         vms_config: Configurations for virtual machines
+        iso_write_threshold_bytes: Minimum encoded payload size for ISO writes;
+            None inherits the provider default, and zero tries every supported write
     """
 
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
@@ -529,6 +537,7 @@ class ProxmoxSandboxEnvironmentConfig(BaseModel):
     vms_config: Tuple[VmConfig, ...] = (
         VmConfig(vm_source_config=VmSourceConfig(built_in="ubuntu24.04")),
     )
+    iso_write_threshold_bytes: int | None = Field(default=None, ge=0)
 
     def vm_names(self) -> Tuple[str, ...]:
         """Names in vms_config order."""

@@ -1,5 +1,6 @@
 import re
 import time
+import unicodedata
 from logging import getLogger
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple, Union
@@ -12,6 +13,7 @@ from inspect_ai.util import (
 from pydantic import BaseModel
 
 from proxmoxsandbox._impl.qga_responses import (
+    MAX_EXEC_DATA_CHARS,
     FileRead,
     decode_file_read,
     parse_guest,
@@ -24,12 +26,42 @@ ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 # Error text is matched on short stable substrings and quoted in logs and
 # exceptions; cap both the HTTP reason and body independently.
 _MAX_ERROR_TEXT_CHARS = 8192
+_MAX_ERROR_RESPONSE_BYTES = 4 * _MAX_ERROR_TEXT_CHARS
+_GUEST_RESPONSE_ENVELOPE_BYTES = 64 * 1024
+_MAX_GUEST_FILE_BYTES = 16 * 1024**2
+_GUEST_API_PATH = re.compile(
+    r"/nodes/[^/]+/qemu/(?P<vm_id>[0-9]+)/agent/(?P<operation>[^/?]+)(?:\?.*)?"
+)
+
+
+def _guest_response_limit(operation: str, *, count: int | None = None) -> int:
+    if operation == "exec-status":
+        # Each of QGA's two 16 MiB byte streams can expand sixfold when PVE
+        # serialises control bytes as JSON escapes.
+        payload = 2 * MAX_EXEC_DATA_CHARS * 6
+    elif operation == "file-read":
+        # Independently padded base64 chunks need at most four characters per
+        # byte. PVE's JSON serialiser may additionally escape '/' as '\\/'.
+        # Legacy decode=1 reads fetch up to 16 MiB regardless of our count;
+        # each Latin-1 codepoint can need six bytes as a JSON escape.
+        payload = 8 * count if count is not None else 6 * _MAX_GUEST_FILE_BYTES
+    else:
+        payload = 0
+    return payload + _GUEST_RESPONSE_ENVELOPE_BYTES
 
 
 def _bounded_error_text(text: str) -> str:
-    if len(text) > _MAX_ERROR_TEXT_CHARS:
-        return f"{text[:_MAX_ERROR_TEXT_CHARS]}... ({len(text)} chars)"
-    return text
+    # Guest errors reach terminal logs as well as exception messages. Keep
+    # their control characters printable without changing result/file data.
+    escaped = "".join(
+        char.encode("unicode_escape").decode("ascii")
+        if unicodedata.category(char) in ("Cc", "Cf")
+        else char
+        for char in text[:_MAX_ERROR_TEXT_CHARS]
+    )
+    if len(text) > _MAX_ERROR_TEXT_CHARS or len(escaped) > _MAX_ERROR_TEXT_CHARS:
+        return f"{escaped[:_MAX_ERROR_TEXT_CHARS]}... (truncated)"
+    return escaped
 
 
 def _http_status_error(response: httpx.Response) -> httpx.HTTPStatusError:
@@ -39,7 +71,50 @@ def _http_status_error(response: httpx.Response) -> httpx.HTTPStatusError:
     message = f"HTTP response error: {response.status_code} {reason}"
     if response.text:
         message += f": {_bounded_error_text(response.text)}"
+    if response.extensions.get("guest_body_truncated"):
+        message += " (HTTP response body truncated)"
     return httpx.HTTPStatusError(message, request=response.request, response=response)
+
+
+async def _read_guest_response(
+    response: httpx.Response, vm_id: int, limit: int
+) -> httpx.Response:
+    # A byte limit after decompression is too late to contain a compressed
+    # response. Guest endpoints request identity and reject other encodings.
+    encoding = response.headers.get("Content-Encoding", "").strip().lower()
+    if encoding not in ("", "identity"):
+        raise tamper(vm_id, "HTTP", "unexpected content encoding", encoding)
+
+    if response.is_error:
+        limit = _MAX_ERROR_RESPONSE_BYTES
+    content = bytearray()
+    truncated = False
+    async for chunk in response.aiter_bytes():
+        remaining = limit - len(content)
+        if len(chunk) > remaining:
+            if not response.is_error:
+                raise tamper(vm_id, "HTTP", "response exceeds the byte allowance")
+            content.extend(chunk[:remaining])
+            truncated = True
+            break
+        content.extend(chunk)
+
+    # Materialise only the checked body. The caller closes the original
+    # stream, including when an error body ends after its diagnostic prefix.
+    headers = httpx.Headers(response.headers)
+    headers.pop("Content-Encoding", None)
+    headers.pop("Transfer-Encoding", None)
+    headers["Content-Length"] = str(len(content))
+    extensions = dict(response.extensions)
+    if truncated:
+        extensions["guest_body_truncated"] = True
+    return httpx.Response(
+        response.status_code,
+        headers=headers,
+        content=bytes(content),
+        request=response.request,
+        extensions=extensions,
+    )
 
 
 class ProxmoxVersionInfo(BaseModel):
@@ -173,22 +248,35 @@ class AsyncProxmoxAPI:
             if self.csrf_token is None:
                 raise ValueError("CSRF token was not set by login")
 
-            headers = self._prepare_headers(method, content_type)
-
-            response = await client.request(
-                method,
-                f"{self.api_base_url}{path}",
-                headers=headers,
-                json=json,
-                content=body_content,
-            )
-            # If we get a 401, our ticket might have expired (2 hour lifetime)
-            # Try to login once and retry the request
-            if response.status_code == 401:
-                await self._login(client)
+            async def send() -> httpx.Response:
                 headers = self._prepare_headers(method, content_type)
-
-                response = await client.request(
+                guest = _GUEST_API_PATH.fullmatch(path)
+                if guest is not None:
+                    # Headers is case-insensitive, so extra_headers cannot
+                    # leave a second Accept-Encoding value alongside this one.
+                    guest_headers = httpx.Headers(headers)
+                    guest_headers["Accept-Encoding"] = "identity"
+                    operation = guest["operation"]
+                    limit = _guest_response_limit(
+                        operation,
+                        count=(
+                            _MAX_GUEST_FILE_BYTES
+                            if operation == "file-read" and self.release_at_least(9, 2)
+                            else None
+                        ),
+                    )
+                    async with client.stream(
+                        method,
+                        f"{self.api_base_url}{path}",
+                        headers=guest_headers,
+                        json=json,
+                        content=body_content,
+                        follow_redirects=False,
+                    ) as response:
+                        return await _read_guest_response(
+                            response, int(guest["vm_id"]), limit
+                        )
+                return await client.request(
                     method,
                     f"{self.api_base_url}{path}",
                     headers=headers,
@@ -196,7 +284,16 @@ class AsyncProxmoxAPI:
                     content=body_content,
                 )
 
-            if response.is_error and raise_errors:
+            response = await send()
+            # If we get a 401, our ticket might have expired (2 hour lifetime)
+            # Try to login once and retry the request
+            if response.status_code == 401:
+                await self._login(client)
+                response = await send()
+
+            if response.is_error and (
+                raise_errors or response.extensions.get("guest_body_truncated")
+            ):
                 raise _http_status_error(response)
             else:
                 if response.is_error:
@@ -255,22 +352,31 @@ class AsyncProxmoxAPI:
             # before we decide which file-read variant to use.
             await self._ping_qemu_agent(node, vm_id)
             modern = self.release_at_least(9, 2)
-            response = await client.get(
-                f"{self.api_base_url}{path}",
-                headers={
+            headers = httpx.Headers(
+                {
                     **self.extra_headers,
                     "Cookie": f"PVEAuthCookie={self.ticket}",
-                    # Opt out of pveproxy response compression: it truncates
-                    # large incompressible bodies mid-transfer, surfacing as an
-                    # upstream "597 Broken pipe".
-                    "Accept-Encoding": "identity",
-                },
+                }
+            )
+            # Opt out of pveproxy compression, which can fail with 597 Broken
+            # pipe and would otherwise decompress before the byte limit.
+            headers["Accept-Encoding"] = "identity"
+            async with client.stream(
+                "GET",
+                f"{self.api_base_url}{path}",
+                headers=headers,
                 params=(
                     {"file": filepath, "count": count, "decode": 0}
                     if modern
                     else {"file": filepath}
                 ),
-            )
+                follow_redirects=False,
+            ) as streamed:
+                response = await _read_guest_response(
+                    streamed,
+                    vm_id,
+                    _guest_response_limit("file-read", count=count if modern else None),
+                )
             if response.is_error:
                 raise _http_status_error(response)
             data = response.json()["data"]
@@ -360,13 +466,18 @@ class AsyncProxmoxAPI:
         self,
         *,
         upid: str,
+        initial_poll_interval: float = 1.0,
     ) -> None:
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")
         node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
 
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            wait=tenacity.wait_exponential(
+                multiplier=initial_poll_interval,
+                min=initial_poll_interval,
+                exp_base=1.3,
+            ),
             stop=tenacity.stop_after_delay(1200),
             retry=tenacity.retry_if_result(lambda x: x is False),
         )
