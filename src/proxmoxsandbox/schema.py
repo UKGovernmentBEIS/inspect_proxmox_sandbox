@@ -78,9 +78,9 @@ class VnetConfig(BaseModel, frozen=True):
     """
 
     alias: Optional[
-        # original regex (?^i:[\(\)-_.\w\d\s]{0,256}) but that's not especially
-        # Python-compatible
-        Annotated[str, Field(pattern=r"[()-_.[a-z][A-Z][0-9]\s]{0,256}")]
+        # Proxmox's rule, qr/[\(\)-_.\w\d\s]{0,256}/i anchored. \w is spelled out
+        # because pydantic's regex engine can't compile the unicode class x256.
+        Annotated[str, Field(pattern=r"^[()-_.a-zA-Z0-9\s]{0,256}$")]
     ] = None
     subnets: Tuple[SubnetConfig, ...] = ()
     vlan_aware: bool = False
@@ -388,7 +388,7 @@ class VmConfig(BaseModel, frozen=True):
     @field_validator("name")
     @classmethod
     def _validate_name_is_dns_name(cls, name: str) -> str:
-        if not PVE_DNS_NAME_RE.match(name):
+        if not PVE_DNS_NAME_RE.fullmatch(name):
             raise ValueError(
                 f"VM name {name!r} is not a valid DNS name (Proxmox requires "
                 + "dot-separated labels of letters, digits and hyphens, not "

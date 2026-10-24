@@ -50,6 +50,14 @@ def is_ephemeral_zone(zone_id: str) -> bool:
 STATIC_SDN_START = "inspvm"
 
 
+class SdnTeardownError(Exception):
+    """Some zones survived a teardown attempt; each was already logged."""
+
+    def __init__(self, zone_ids: Collection[str]):
+        self.zone_ids = sorted(zone_ids)
+        super().__init__(f"failed to tear down SDN zones {self.zone_ids}")
+
+
 class IpamMapping(BaseModel):
     vnet_id: str
     zone_id: str
@@ -119,18 +127,23 @@ class SdnCommands(abc.ABC):
             except ValueError:
                 pass
 
+    def deregister_sdn_resources_for_zones(self, zone_ids: Collection[str]) -> None:
+        """Forget the given zones and every tracked IPAM mapping inside them."""
+        self._tracked_sdn_zone_ids -= set(zone_ids)
+        self._tracked_ipam_mappings = [
+            m for m in self._tracked_ipam_mappings if m.zone_id not in zone_ids
+        ]
+
     async def task_cleanup(self) -> None:
         self.logger.debug(
             f"sdn_commands task_cleanup; "
             f"sdns={self._tracked_sdn_zone_ids}, "
             f"ipam_mappings={len(self._tracked_ipam_mappings)}"
         )
-        for zone_id in list(self._tracked_sdn_zone_ids):
-            await self.tear_down_sdn_zones_and_vnets(
-                {zone_id}, self._tracked_ipam_mappings
-            )
-            self._tracked_sdn_zone_ids.discard(zone_id)
-            self._tracked_ipam_mappings.clear()
+        deleted = await self.tear_down_sdn_zones_and_vnets(
+            set(self._tracked_sdn_zone_ids), self._tracked_ipam_mappings
+        )
+        self.deregister_sdn_resources_for_zones(deleted)
 
     def find_existing_cidr_overlaps(
         self, list1: List[str], list2: List[str]
@@ -287,6 +300,12 @@ class SdnCommands(abc.ABC):
         ):
             raise ValueError("Invalid zone ID")
 
+        # Register before the first request so a failure anywhere below (zone,
+        # VNET, subnet, apply) leaves the zone tracked. The static zone is
+        # meant to outlive the task.
+        if is_ephemeral_zone(sdn_zone_id):
+            self.register_sdn_zone(sdn_zone_id)
+
         with trace_action(self.logger, self.TRACE_NAME, f"create sdn  {sdn_zone_id=}"):
             zone_create_json: ProxmoxJsonDataType = {
                 "type": "simple",
@@ -409,12 +428,20 @@ class SdnCommands(abc.ABC):
 
     async def tear_down_sdn_zone_and_vnet(
         self, sdn_zone_id: str, ipam_mappings: Sequence[IpamMapping]
-    ) -> None:
-        await self.tear_down_sdn_zones_and_vnets([sdn_zone_id], ipam_mappings)
+    ) -> bool:
+        """Return True iff the zone is gone afterwards."""
+        deleted = await self.tear_down_sdn_zones_and_vnets([sdn_zone_id], ipam_mappings)
+        return sdn_zone_id in deleted
 
     async def tear_down_sdn_zones_and_vnets(
         self, sdn_zone_ids: Collection[str], ipam_mappings: Sequence[IpamMapping]
-    ) -> None:
+    ) -> set[str]:
+        """Delete the zones and everything in them; return the zones now gone.
+
+        A zone whose deletion fails is logged and left out of the result so the
+        caller can keep tracking it. One bad zone does not stop the others.
+        """
+        deleted: set[str] = set()
         with trace_action(self.logger, self.TRACE_NAME, f"delete SDNs {sdn_zone_ids}"):
             # We need to delete allocated ips first before we can remove
             # subnets or vnets or zones.
@@ -443,14 +470,19 @@ class SdnCommands(abc.ABC):
                     await self.async_proxmox.request(
                         "DELETE", f"/cluster/sdn/zones/{sdn_zone_id}"
                     )
+                    deleted.add(sdn_zone_id)
                 except httpx.HTTPStatusError as e:
-                    # Proxmox has been observed to return 500 (not 404) when a
-                    # zone or vnet does not exist; treat that as already gone
+                    # Proxmox returns 500 (not 404) for a missing zone. Only the
+                    # zone counts: a vnet that went missing mid-teardown leaves
+                    # the zone behind.
                     already_gone = (
                         e.response.status_code == 500
-                        and "does not exist" in e.response.text
+                        and f"sdn zone '{sdn_zone_id}' does not exist"
+                        in e.response.text
                     )
-                    if not already_gone:
+                    if already_gone:
+                        deleted.add(sdn_zone_id)
+                    else:
                         self.logger.warning(
                             f"failed to tear down SDN zone {sdn_zone_id}: {e}"
                         )
@@ -460,6 +492,7 @@ class SdnCommands(abc.ABC):
                     )
 
         await self.do_update_all_sdn()
+        return deleted
 
     async def read_all_vnets(self):
         return await self.async_proxmox.request("GET", "/cluster/sdn/vnets")

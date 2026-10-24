@@ -26,6 +26,7 @@ from proxmoxsandbox._impl.qemu_commands import QemuCommands, vm_label
 from proxmoxsandbox._impl.sdn_commands import (
     IpamMapping,
     SdnCommands,
+    SdnTeardownError,
     VnetAliases,
     is_ephemeral_zone,
 )
@@ -147,8 +148,6 @@ class InfraCommands(abc.ABC):
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, config.sdn_config
         )
-        if sdn_zone_id:
-            self.sdn_commands.register_sdn_zone(sdn_zone_id)
 
         known_builtins = await self.built_in_vm.known_builtins()
 
@@ -281,9 +280,11 @@ class InfraCommands(abc.ABC):
         for vm_id, vm_config in vms.items():
             await self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
         if sdn_zone_id is not None:
-            await self.sdn_commands.tear_down_sdn_zone_and_vnet(
+            gone = await self.sdn_commands.tear_down_sdn_zone_and_vnet(
                 sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings
             )
+            if not gone:
+                raise SdnTeardownError({sdn_zone_id})
 
     async def create_ipam_mappings(
         self,
@@ -450,6 +451,13 @@ class InfraCommands(abc.ABC):
             await self.qemu_commands.destroy_vm(
                 vm_id=vm["vmid"], name=vm.get("name", "<unnamed>")
             )
-        await self.sdn_commands.tear_down_sdn_zones_and_vnets(
+        deleted_zones = await self.sdn_commands.tear_down_sdn_zones_and_vnets(
             zones_to_delete, noticed_ipam_mappings
         )
+        # Forget only what is gone: a zone that survived stays tracked so
+        # task_cleanup gets another go at it.
+        self.qemu_commands.deregister_vms([vm["vmid"] for vm in noticed_vms])
+        self.sdn_commands.deregister_sdn_resources_for_zones(deleted_zones)
+        failed_zones = set(zones_to_delete) - deleted_zones
+        if failed_zones:
+            raise SdnTeardownError(failed_zones)

@@ -33,6 +33,9 @@
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 - Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
 - VMs boot concurrently rather than one after another
+- Fix: with `--no-sandbox-cleanup`, a failed `sample_init` now leaves its partial VMs and SDN up for inspection instead of destroying them
+- Fix: a `sample_init` whose pre-clean of the instance fails now errors instead of creating VMs next to the leftovers; SDN zones are tracked from before creation and stay tracked (and are retried) when a teardown fails
+- `VnetConfig.alias` is now validated against Proxmox's rule (up to 256 of `()-_.`, word and space characters); previously any string passed and Proxmox rejected it mid-`sample_init`
 
 ## 0.11.0 - 2026-06-01
 

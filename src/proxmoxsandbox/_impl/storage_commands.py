@@ -52,8 +52,10 @@ class LocalStorageCommands(abc.ABC):
                 f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content?content={content_type}",
             )
             for existing_file in existing_content:
+                # volid is storage:content/filename; anchor on the separator so
+                # x-foo.iso is not taken for foo.iso
                 if "volid" in existing_file and existing_file["volid"].endswith(
-                    filename
+                    f"/{filename}"
                 ):
                     size_match = existing_file["size"] == size_check
                     self.logger.debug(
