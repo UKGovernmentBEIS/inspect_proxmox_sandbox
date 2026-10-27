@@ -1,9 +1,9 @@
-"""_upload_exec_script chunks oversize wrapper scripts under the file-write cap.
+"""Chunked guest writes: _upload_exec_script and write_file above the cap.
 
 A single agent/file-write caps base64 `content` at 61440 chars, so a large
-command (its wrapper script > ~45 KiB raw) must be split across multiple writes
-and reassembled inside the launched command. These tests drive that logic with
-mocked QGA collaborators — no live VM.
+command's wrapper script and any write_file payload over 40 KiB must be split
+across multiple writes and reassembled inside the guest. These tests drive that
+logic with mocked QGA collaborators — no live VM.
 """
 
 import shutil
