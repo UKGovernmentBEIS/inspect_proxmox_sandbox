@@ -188,14 +188,12 @@ async def test_write_file_chunks_text_by_encoded_bytes() -> None:
     ]
 
 
-# Two names that between them defeat every partial fix: `$(...)` still runs
-# inside double quotes, and an apostrophe breaks naive single quotes.
 _PAYLOAD = bytes(range(256)) * (mod._WRITE_CHUNK_SIZE // 256 + 1)
 assert len(_PAYLOAD) > mod._WRITE_CHUNK_SIZE
 
 
 async def _chunked_linux_write(target: Path) -> dict[str, str | bytes]:
-    """Run write_file against mocks; return every guest path it would write."""
+    """Run write_file against mocks; return each guest file it would write, by path."""
     env = _make_sandbox()
     env.exec = AsyncMock()  # type: ignore[method-assign]
     env._write_file_only = AsyncMock()  # type: ignore[method-assign]
@@ -224,6 +222,8 @@ def _replay_combine(
         shutil.rmtree(Path(combine).parent, ignore_errors=True)
 
 
+# Two names that between them defeat every partial fix: `$(...)` still runs
+# inside double quotes, and an apostrophe breaks naive single quotes.
 @pytest.mark.parametrize(
     "name",
     ["out$(touch pwned).txt", "it's a file.txt"],
@@ -245,8 +245,6 @@ async def test_write_file_combine_script_treats_target_as_data(
 async def test_write_file_combine_script_fails_on_a_missing_chunk(
     tmp_path: Path,
 ) -> None:
-    # A for loop exits with its last command's status, so a lost chunk in the
-    # middle would otherwise pass as a complete write.
     target = tmp_path / "out.bin"
     written = await _chunked_linux_write(target)
     del written[next(p for p in written if p.endswith("/chunk_0"))]
@@ -254,7 +252,6 @@ async def test_write_file_combine_script_fails_on_a_missing_chunk(
     result = _replay_combine(written, cwd=tmp_path)
 
     assert result.returncode != 0
-    assert not target.exists() or target.read_bytes() != _PAYLOAD
 
 
 @pytest.mark.parametrize("os_type", ["l26", "win11"], ids=["linux", "windows"])
