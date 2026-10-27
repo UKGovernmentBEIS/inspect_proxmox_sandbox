@@ -1211,7 +1211,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 # The destination and chunk dir are caller-chosen paths pasted
                 # into a script sh runs in the guest, so they must be quoted or a
-                # name like `a$(id).txt` runs as a command.
+                # name like `a$(id).txt` runs as a command. The loop's exit code
+                # is only the last cat's, so the byte count is what says every
+                # chunk landed.
                 seq_fmt = f"%0{padding_width}.0f"
                 combine_script = (
                     f"target={shlex.quote(file)}\n"
@@ -1220,6 +1222,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     f'for i in $(seq -f "{seq_fmt}" 0 {len(chunks) - 1}); do\n'
                     f'  cat "$chunks/chunk_$i" >> "$target"\n'
                     f"done\n"
+                    f'[ "$(wc -c < "$target")" -eq {len(content_bytes)} ]\n'
                 )
                 combine_script_path = f"{temp_dir}/combine.sh"
                 combine_cmd = ["sh", combine_script_path]

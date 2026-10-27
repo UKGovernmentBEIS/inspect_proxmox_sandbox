@@ -1,9 +1,10 @@
 """Chunked guest writes: _upload_exec_script and write_file above the cap.
 
 A single agent/file-write caps base64 `content` at 61440 chars, so a large
-command's wrapper script and any write_file payload over 40 KiB must be split
-across multiple writes and reassembled inside the guest. These tests drive that
-logic with mocked QGA collaborators — no live VM.
+command's wrapper script, and any write_file payload over 40 KiB that does not
+take the ISO path, must be split across multiple writes and reassembled inside
+the guest. These tests drive that logic with mocked QGA collaborators — no live
+VM.
 """
 
 import shutil
@@ -189,6 +190,40 @@ async def test_write_file_chunks_text_by_encoded_bytes() -> None:
 
 # Two names that between them defeat every partial fix: `$(...)` still runs
 # inside double quotes, and an apostrophe breaks naive single quotes.
+_PAYLOAD = bytes(range(256)) * (mod._WRITE_CHUNK_SIZE // 256 + 1)
+assert len(_PAYLOAD) > mod._WRITE_CHUNK_SIZE
+
+
+async def _chunked_linux_write(target: Path) -> dict[str, str | bytes]:
+    """Run write_file against mocks; return every guest path it would write."""
+    env = _make_sandbox()
+    env.exec = AsyncMock()  # type: ignore[method-assign]
+    env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    await env.write_file(str(target), _PAYLOAD)
+    return {c.args[0]: c.args[1] for c in env._write_file_only.await_args_list}
+
+
+def _replay_combine(
+    written: dict[str, str | bytes], cwd: Path
+) -> subprocess.CompletedProcess[bytes]:
+    """Write the captured guest files locally and run combine.sh under sh.
+
+    The chunk files land where the script expects them, so the only thing under
+    test is the script itself.
+    """
+    combine = next(p for p in written if p.endswith("/combine.sh"))
+    try:
+        for path, content in written.items():
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(
+                content.encode() if isinstance(content, str) else content
+            )
+        return subprocess.run(["sh", combine], cwd=cwd, capture_output=True)
+    finally:
+        shutil.rmtree(Path(combine).parent, ignore_errors=True)
+
+
 @pytest.mark.parametrize(
     "name",
     ["out$(touch pwned).txt", "it's a file.txt"],
@@ -197,36 +232,29 @@ async def test_write_file_chunks_text_by_encoded_bytes() -> None:
 async def test_write_file_combine_script_treats_target_as_data(
     tmp_path: Path, name: str
 ) -> None:
-    # write_file reassembles a chunked Linux write by running combine.sh in the
-    # guest. Replay that script under the local sh, with the chunk files the
-    # mock captured in the place the script expects, so the only thing under
-    # test is whether the destination path is data or code to the shell.
-    env = _make_sandbox()
-    env.exec = AsyncMock()  # type: ignore[method-assign]
-    env._write_file_only = AsyncMock()  # type: ignore[method-assign]
-    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
-
     target = tmp_path / name
-    data = bytes(range(256)) * (mod._WRITE_CHUNK_SIZE // 256 + 1)
-    assert len(data) > mod._WRITE_CHUNK_SIZE
+    written = await _chunked_linux_write(target)
 
-    await env.write_file(str(target), data)
-
-    written = {c.args[0]: c.args[1] for c in env._write_file_only.await_args_list}
-    combine = next(p for p in written if p.endswith("/combine.sh"))
-    try:
-        for path, content in written.items():
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            Path(path).write_bytes(
-                content.encode() if isinstance(content, str) else content
-            )
-        result = subprocess.run(["sh", combine], cwd=tmp_path, capture_output=True)
-    finally:
-        shutil.rmtree(Path(combine).parent, ignore_errors=True)
+    result = _replay_combine(written, cwd=tmp_path)
 
     assert not (tmp_path / "pwned").exists(), "the file name ran as a command"
     assert result.returncode == 0, result.stderr.decode()
-    assert target.read_bytes() == data
+    assert target.read_bytes() == _PAYLOAD
+
+
+async def test_write_file_combine_script_fails_on_a_missing_chunk(
+    tmp_path: Path,
+) -> None:
+    # A for loop exits with its last command's status, so a lost chunk in the
+    # middle would otherwise pass as a complete write.
+    target = tmp_path / "out.bin"
+    written = await _chunked_linux_write(target)
+    del written[next(p for p in written if p.endswith("/chunk_0"))]
+
+    result = _replay_combine(written, cwd=tmp_path)
+
+    assert result.returncode != 0
+    assert not target.exists() or target.read_bytes() != _PAYLOAD
 
 
 @pytest.mark.parametrize("os_type", ["l26", "win11"], ids=["linux", "windows"])
@@ -249,4 +277,5 @@ async def test_write_file_raises_when_combine_script_fails(os_type: OsType) -> N
 
     # The temp dir is still removed when the combine fails.
     last_cmd = env.exec.await_args_list[-1].kwargs["cmd"]
-    assert last_cmd[0] in ("rm", "cmd.exe") and "split_out.bin" in last_cmd[-1]
+    assert last_cmd[:2] == ["rm", "-rf"] or last_cmd[-1].startswith("rmdir /s /q")
+    assert "split_out.bin" in last_cmd[-1]
