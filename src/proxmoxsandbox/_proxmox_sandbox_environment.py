@@ -1207,8 +1207,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                             f'copy /b "{file}"+"{chunk_file}" "{file}"\r\n'
                         )
                 combine_script_path = f"{temp_dir}\\combine.bat"
-                await self._write_file_only(combine_script_path, combine_script)
-                await self.exec(cmd=["cmd.exe", "/c", combine_script_path])
+                combine_cmd = ["cmd.exe", "/c", combine_script_path]
             else:
                 # The destination and chunk dir are caller-chosen paths pasted
                 # into a script sh runs in the guest, so they must be quoted or a
@@ -1223,8 +1222,15 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     f"done\n"
                 )
                 combine_script_path = f"{temp_dir}/combine.sh"
-                await self._write_file_only(combine_script_path, combine_script)
-                await self.exec(cmd=["sh", combine_script_path])
+                combine_cmd = ["sh", combine_script_path]
+
+            await self._write_file_only(combine_script_path, combine_script)
+            result = await self.exec(cmd=combine_cmd)
+            if not result.success:
+                raise IOError(
+                    f"write_file: combining chunks into {file} failed "
+                    f"(returncode={result.returncode}): stderr={result.stderr!r}"
+                )
 
         finally:
             cleanup = (

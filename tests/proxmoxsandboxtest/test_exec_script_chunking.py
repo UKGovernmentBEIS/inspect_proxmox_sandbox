@@ -12,13 +12,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from inspect_ai.util import ExecResult
 
 from proxmoxsandbox import _proxmox_sandbox_environment as mod
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
-from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+from proxmoxsandbox.schema import OsType, VmConfig, VmSourceConfig
 
 
-def _make_sandbox() -> ProxmoxSandboxEnvironment:
+def _make_sandbox(os_type: OsType = "l26") -> ProxmoxSandboxEnvironment:
     return ProxmoxSandboxEnvironment(
         infra_commands=MagicMock(),
         agent_commands=MagicMock(),
@@ -34,7 +35,7 @@ def _make_sandbox() -> ProxmoxSandboxEnvironment:
         sdn_zone_id=None,
         instance=None,
         pool_id=None,
-        os_type="l26",
+        os_type=os_type,
     )
 
 
@@ -226,3 +227,26 @@ async def test_write_file_combine_script_treats_target_as_data(
     assert not (tmp_path / "pwned").exists(), "the file name ran as a command"
     assert result.returncode == 0, result.stderr.decode()
     assert target.read_bytes() == data
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"], ids=["linux", "windows"])
+async def test_write_file_raises_when_combine_script_fails(os_type: OsType) -> None:
+    # The combine script is the step that produces the destination file, so its
+    # exit code is the write's outcome; mkdir and cleanup results are not.
+    env = _make_sandbox(os_type)
+    env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    async def fake_exec(cmd: list[str], **_: object) -> ExecResult[str]:
+        if "combine" in cmd[-1]:
+            return ExecResult(False, 1, "", "cat: write error: No space left on device")
+        return ExecResult(True, 0, "", "")
+
+    env.exec = AsyncMock(side_effect=fake_exec)  # type: ignore[method-assign]
+
+    with pytest.raises(IOError, match="No space left on device"):
+        await env.write_file("/tmp/out.bin", b"x" * (mod._WRITE_CHUNK_SIZE + 1))
+
+    # The temp dir is still removed when the combine fails.
+    last_cmd = env.exec.await_args_list[-1].kwargs["cmd"]
+    assert last_cmd[0] in ("rm", "cmd.exe") and "split_out.bin" in last_cmd[-1]
