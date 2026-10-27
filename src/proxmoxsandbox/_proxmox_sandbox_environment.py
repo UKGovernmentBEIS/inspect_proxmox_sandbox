@@ -1210,11 +1210,16 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 await self._write_file_only(combine_script_path, combine_script)
                 await self.exec(cmd=["cmd.exe", "/c", combine_script_path])
             else:
+                # The destination and chunk dir are caller-chosen paths pasted
+                # into a script sh runs in the guest, so they must be quoted or a
+                # name like `a$(id).txt` runs as a command.
                 seq_fmt = f"%0{padding_width}.0f"
                 combine_script = (
-                    f"rm -f {file}\n"
+                    f"target={shlex.quote(file)}\n"
+                    f"chunks={shlex.quote(temp_dir)}\n"
+                    f'rm -f -- "$target"\n'
                     f'for i in $(seq -f "{seq_fmt}" 0 {len(chunks) - 1}); do\n'
-                    f'  cat "{temp_dir}/chunk_$i" >> {file}\n'
+                    f'  cat "$chunks/chunk_$i" >> "$target"\n'
                     f"done\n"
                 )
                 combine_script_path = f"{temp_dir}/combine.sh"

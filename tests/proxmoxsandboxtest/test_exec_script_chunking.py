@@ -6,6 +6,9 @@ and reassembled inside the launched command. These tests drive that logic with
 mocked QGA collaborators — no live VM.
 """
 
+import shutil
+import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -181,3 +184,45 @@ async def test_write_file_chunks_text_by_encoded_bytes() -> None:
         data[: mod._WRITE_CHUNK_SIZE],
         data[mod._WRITE_CHUNK_SIZE :],
     ]
+
+
+# Two names that between them defeat every partial fix: `$(...)` still runs
+# inside double quotes, and an apostrophe breaks naive single quotes.
+@pytest.mark.parametrize(
+    "name",
+    ["out$(touch pwned).txt", "it's a file.txt"],
+    ids=["command-substitution", "single-quote"],
+)
+async def test_write_file_combine_script_treats_target_as_data(
+    tmp_path: Path, name: str
+) -> None:
+    # write_file reassembles a chunked Linux write by running combine.sh in the
+    # guest. Replay that script under the local sh, with the chunk files the
+    # mock captured in the place the script expects, so the only thing under
+    # test is whether the destination path is data or code to the shell.
+    env = _make_sandbox()
+    env.exec = AsyncMock()  # type: ignore[method-assign]
+    env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    target = tmp_path / name
+    data = bytes(range(256)) * (mod._WRITE_CHUNK_SIZE // 256 + 1)
+    assert len(data) > mod._WRITE_CHUNK_SIZE
+
+    await env.write_file(str(target), data)
+
+    written = {c.args[0]: c.args[1] for c in env._write_file_only.await_args_list}
+    combine = next(p for p in written if p.endswith("/combine.sh"))
+    for path, content in written.items():
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(
+            content.encode() if isinstance(content, str) else content
+        )
+    try:
+        result = subprocess.run(["sh", combine], cwd=tmp_path, capture_output=True)
+    finally:
+        shutil.rmtree(Path(combine).parent)
+
+    assert not (tmp_path / "pwned").exists(), "the file name ran as a command"
+    assert result.returncode == 0, result.stderr.decode()
+    assert target.read_bytes() == data
