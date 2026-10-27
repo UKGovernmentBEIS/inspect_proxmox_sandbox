@@ -214,15 +214,15 @@ async def test_write_file_combine_script_treats_target_as_data(
 
     written = {c.args[0]: c.args[1] for c in env._write_file_only.await_args_list}
     combine = next(p for p in written if p.endswith("/combine.sh"))
-    for path, content in written.items():
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_bytes(
-            content.encode() if isinstance(content, str) else content
-        )
     try:
+        for path, content in written.items():
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(
+                content.encode() if isinstance(content, str) else content
+            )
         result = subprocess.run(["sh", combine], cwd=tmp_path, capture_output=True)
     finally:
-        shutil.rmtree(Path(combine).parent)
+        shutil.rmtree(Path(combine).parent, ignore_errors=True)
 
     assert not (tmp_path / "pwned").exists(), "the file name ran as a command"
     assert result.returncode == 0, result.stderr.decode()
