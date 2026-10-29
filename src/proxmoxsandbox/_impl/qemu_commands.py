@@ -14,7 +14,7 @@ from proxmoxsandbox._impl.async_proxmox import (
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
-from proxmoxsandbox.schema import VmConfig
+from proxmoxsandbox.schema import VmConfig, check_nic_vlan
 
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
@@ -525,6 +525,7 @@ class QemuCommands(abc.ABC):
         )
         # If we have nics configured, we need to look up existing VNETs
         existing_vnet_mapping = {}
+        existing_vlan_aware: Dict[str, bool] = {}
         try:
             # Fetch all existing VNETs from Proxmox
             all_vnets = await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
@@ -534,6 +535,7 @@ class QemuCommands(abc.ABC):
                     if "alias" in vnet and vnet["alias"]:
                         # Map alias to the actual VNET ID
                         existing_vnet_mapping[vnet["alias"]] = vnet["vnet"]
+                        existing_vlan_aware[vnet["alias"]] = bool(vnet.get("vlanaware"))
         except Exception as e:
             self.logger.error(f"Error fetching existing VNETs: {e}")
 
@@ -567,6 +569,7 @@ class QemuCommands(abc.ABC):
                 # Then check if it exists in existing VNETs
                 elif nic.vnet_alias in existing_vnet_mapping:
                     bridge_name = existing_vnet_mapping[nic.vnet_alias]
+                    check_nic_vlan(nic, existing_vlan_aware[nic.vnet_alias])
                 else:
                     # If we can't find it anywhere,
                     # log what we found and raise an error
@@ -583,6 +586,10 @@ class QemuCommands(abc.ABC):
                 netx = f"{nic_prefix},bridge={bridge_name}"
                 if nic.mac:
                     netx += f",macaddr={str(nic.mac).upper()}"
+                # A trunk is Proxmox's default for an untagged NIC on a
+                # VLAN-aware bridge.
+                if isinstance(nic.vlan_tag, int):
+                    netx += f",tag={nic.vlan_tag}"
                 if vm_config.firewall:
                     netx += ",firewall=1"
                 network_update_json[f"net{i}"] = netx

@@ -1172,19 +1172,33 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                             f'copy /b "{file}"+"{chunk_file}" "{file}"\r\n'
                         )
                 combine_script_path = f"{temp_dir}\\combine.bat"
-                await self._write_file_only(combine_script_path, combine_script)
-                await self.exec(cmd=["cmd.exe", "/c", combine_script_path])
+                combine_cmd = ["cmd.exe", "/c", combine_script_path]
             else:
+                # The destination and chunk dir are caller-chosen paths pasted
+                # into a script sh runs in the guest, so they must be quoted or a
+                # name like `a$(id).txt` runs as a command. The loop's exit code
+                # is only the last cat's, so the byte count is what says every
+                # chunk landed.
                 seq_fmt = f"%0{padding_width}.0f"
                 combine_script = (
-                    f"rm -f {file}\n"
+                    f"target={shlex.quote(file)}\n"
+                    f"chunks={shlex.quote(temp_dir)}\n"
+                    f'rm -f -- "$target"\n'
                     f'for i in $(seq -f "{seq_fmt}" 0 {len(chunks) - 1}); do\n'
-                    f'  cat "{temp_dir}/chunk_$i" >> {file}\n'
+                    f'  cat "$chunks/chunk_$i" >> "$target"\n'
                     f"done\n"
+                    f'[ "$(wc -c < "$target")" -eq {len(content_bytes)} ]\n'
                 )
                 combine_script_path = f"{temp_dir}/combine.sh"
-                await self._write_file_only(combine_script_path, combine_script)
-                await self.exec(cmd=["sh", combine_script_path])
+                combine_cmd = ["sh", combine_script_path]
+
+            await self._write_file_only(combine_script_path, combine_script)
+            result = await self.exec(cmd=combine_cmd)
+            if not result.success:
+                raise IOError(
+                    f"write_file: combining chunks into {file} failed "
+                    f"(returncode={result.returncode}): stderr={result.stderr!r}"
+                )
 
         finally:
             cleanup = (
