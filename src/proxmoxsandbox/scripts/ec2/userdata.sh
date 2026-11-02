@@ -28,6 +28,48 @@ dpkg -i /tmp/amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent
 systemctl start amazon-ssm-agent
 
+# A reboot that cuts short an SSM Distributor install (e.g. GuardDuty, Inspector)
+# either wedges dpkg or, on the next boot, is taken for an install that rebooted on
+# purpose and recorded as done when it never was. So wait for SSM to go quiet
+# (sessions excepted) before every reboot.
+cat > /usr/local/sbin/wait-ssm-idle << 'WAITSSM'
+#!/bin/bash
+quiet=0
+for _ in $(seq 120); do
+    busy=$(grep -L '"DocumentType": "StartSession"' /var/lib/amazon/ssm/i-*/document/state/{pending,current}/* 2>/dev/null)
+    if [ -n "$busy" ]; then quiet=0; else quiet=$((quiet + 1)); fi
+    [ "$quiet" -ge 12 ] && exit 0
+    sleep 5
+done
+echo "SSM still busy after 10 min: $busy"
+WAITSSM
+# Backstop for an image taken mid-install: on the first boot under a new instance ID,
+# drop other instances' SSM state and any Distributor package not recorded as
+# Installed (state 8), so the agent installs it afresh.
+cat > /usr/local/sbin/ssm-reset-inherited << 'SSMRESET'
+#!/bin/bash
+cd /var/lib/amazon/ssm || exit 0
+iid=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/instance-id) || exit 0
+[ "$(cat .owner 2>/dev/null)" = "$iid" ] && exit 0
+for d in i-*; do [ "$d" = "$iid" ] || rm -rf "$d"; done
+for f in packages/*/installstate; do grep -q '"state":8,' "$f" || rm -rf "${f%/*}"; done
+echo "$iid" > .owner
+SSMRESET
+chmod 755 /usr/local/sbin/wait-ssm-idle /usr/local/sbin/ssm-reset-inherited
+/usr/local/sbin/ssm-reset-inherited
+cat > /etc/systemd/system/ssm-reset-inherited.service << 'UNIT'
+[Unit]
+Wants=network-online.target
+After=network-online.target
+Before=amazon-ssm-agent.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ssm-reset-inherited
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl enable ssm-reset-inherited.service
+
 cat > /usr/local/bin/eic_authorized_keys << 'EICSCRIPT'
 #!/bin/bash
 exec /usr/local/bin/call-ec2-hypervisor "latest/meta-data/managed-ssh-keys/active-keys/${1}/"
@@ -64,27 +106,7 @@ DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y
 echo "grub-pc grub-pc/install_devices string /dev/nvme0n1" | debconf-set-selections
 DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-default-kernel
 
-# Rebooting mid-install wedges amazon-guardduty-agent at dpkg state `iF` (its postinst
-# `systemctl start` fails with reboot.target queued, and configure.sh is not idempotent),
-# which makes every later apt-get in stage 2 exit non-zero.
-echo "Waiting up to 3 min for amazon-guardduty-agent to install before reboot..."
-state=""
-for i in $(seq 1 36); do
-    state=$(dpkg-query -f '${Status}' -W amazon-guardduty-agent 2>/dev/null || true)
-    if [ "$state" = "install ok installed" ]; then
-        break
-    fi
-    # Short-circuit: after 30s, if there's no sign GuardDuty Runtime Monitoring
-    # is pushing the agent, stop waiting (saves ~2.5 min in accounts where it
-    # isn't enabled).
-    if [ "$i" -ge 6 ] && \
-       [ ! -d /var/lib/amazon/ssm/packages/AmazonGuardDuty-RuntimeMonitoringSsmPlugin ] && \
-       ! grep -qF AmazonGuardDuty /var/log/amazon/ssm/amazon-ssm-agent.log 2>/dev/null; then
-        break
-    fi
-    sleep 5
-done
-echo "  amazon-guardduty-agent state: ${state:-not present}; proceeding"
+/usr/local/sbin/wait-ssm-idle
 
 cat > /etc/systemd/system/proxmox-install-stage2.service << 'UNIT'
 [Unit]
@@ -787,6 +809,7 @@ echo "PROXMOX INSTALL COMPLETE: $(pveversion)"
 
 # Final reboot: pvenetcommit.service will promote interfaces.new -> interfaces
 # and ifreload will bring up vmbr0 cleanly before networking.service runs.
+/usr/local/sbin/wait-ssm-idle
 echo "Stage 2 complete. Rebooting to apply network config..."
 systemctl reboot
 STAGE2
