@@ -312,38 +312,21 @@ sysctl -w net.ipv4.ip_forward=1
 
 pvesm set local --content images,rootdir,vztmpl,backup,iso,snippets,import
 
-# When an AMI is launched with a new IP, EC2 changes the hostname to ip-x-x-x-x,
-# breaking Proxmox node identity, SSL certs, and pveproxy. These services fix
-# that on every boot. The password fixup additionally detects fresh launches
-# (by EC2 instance-id) and regenerates the root password so credentials don't
-# leak across instances launched from the same AMI.
-NODE_NAME="proxmox"
-
-cat > /usr/local/bin/proxmox-ami-fixup-hostname.sh << 'FIXUP_HOSTNAME'
+# Per-launch state (the node's /etc/hosts entry, root password, SSL certs) must not be
+# inherited from the build run by instances launched from the AMI. The hostname is baked
+# and cloud-init told to preserve it; hosts entry and password are set once per instance
+# from cloud-init's bootcmd (drop-in at the end of this stage), which runs before
+# sysinit.target and so before pve-cluster and pveproxy. Only the certs need a unit: they are regenerated
+# between pve-cluster and pveproxy.
+cat > /usr/local/bin/proxmox-ami-fixup-hosts.sh << 'FIXUP_HOSTS'
 #!/bin/bash
 set -euo pipefail
 PRIVATE_IP=$(hostname -I | awk '{print $1}')
-hostnamectl set-hostname proxmox
-sed -i "/proxmox/d" /etc/hosts
+[ -n "$PRIVATE_IP" ] || { echo "ERROR: no address on the management NIC yet" >&2; exit 1; }
+sed -i '/ proxmox\.localdomain proxmox$/d' /etc/hosts
 echo "$PRIVATE_IP proxmox.localdomain proxmox" >> /etc/hosts
-FIXUP_HOSTNAME
-chmod +x /usr/local/bin/proxmox-ami-fixup-hostname.sh
-
-cat > /etc/systemd/system/proxmox-ami-fixup-hostname.service << 'FIXUP_HOSTNAME_UNIT'
-[Unit]
-Description=Fix hostname and /etc/hosts for AMI-launched Proxmox
-Before=pve-cluster.service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/proxmox-ami-fixup-hostname.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-FIXUP_HOSTNAME_UNIT
+FIXUP_HOSTS
+chmod +x /usr/local/bin/proxmox-ami-fixup-hosts.sh
 
 cat > /usr/local/bin/proxmox-ami-fixup-certs.sh << 'FIXUP_CERTS'
 #!/bin/bash
@@ -367,40 +350,17 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_CERTS_UNIT
 
-# Keyed on the EC2 instance-id, so every launch from an AMI gets its own password rather
-# than sharing the one set during the build run.
+# Run once per instance from cloud-init bootcmd (drop-in at the end of this stage), so
+# every launch from the AMI gets its own password rather than the build run's.
 cat > /usr/local/bin/proxmox-ami-fixup-password.sh << 'FIXUP_PASSWORD'
 #!/bin/bash
 set -euo pipefail
-CURRENT_ID=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/instance-id)
-SAVED_ID=$(cat /root/.last-instance-id 2>/dev/null || true)
-if [ "$CURRENT_ID" = "$SAVED_ID" ] && [ -s /root/root-password ]; then
-    exit 0
-fi
-( umask 077
-  PASSWORD=$(openssl rand -base64 18)
-  echo "root:$PASSWORD" | chpasswd
-  echo "$PASSWORD" > /root/root-password
-  echo "$CURRENT_ID" > /root/.last-instance-id
-)
+umask 077
+PASSWORD=$(openssl rand -base64 18)
+echo "root:$PASSWORD" | chpasswd
+echo "$PASSWORD" > /root/root-password
 FIXUP_PASSWORD
 chmod +x /usr/local/bin/proxmox-ami-fixup-password.sh
-
-cat > /etc/systemd/system/proxmox-ami-fixup-password.service << 'FIXUP_PASSWORD_UNIT'
-[Unit]
-Description=Regenerate root password when EC2 instance-id changes
-After=network-online.target
-Wants=network-online.target
-Before=pveproxy.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/proxmox-ami-fixup-password.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-FIXUP_PASSWORD_UNIT
 
 # At boot, not baked in: the NIC name (enp39s0, ens5, ...) depends on instance family.
 cat > /usr/local/bin/proxmox-ami-fixup-nat.sh << 'FIXUP_NAT'
@@ -650,9 +610,7 @@ chmod +x /usr/local/bin/proxmox-ami-fixup-firewall.sh
 cat > /etc/systemd/system/proxmox-ami-fixup-firewall.service << 'FIXUP_FIREWALL_UNIT'
 [Unit]
 Description=Enable Proxmox host firewall isolation with current management NIC
-# After the hostname fixup so rules are created under the final node name, not
-# the transient EC2 ip-x-x-x-x hostname.
-After=proxmox-ami-fixup-hostname.service pve-cluster.service network-online.target
+After=pve-cluster.service network-online.target
 Wants=network-online.target
 
 [Service]
@@ -665,10 +623,8 @@ WantedBy=multi-user.target
 FIXUP_FIREWALL_UNIT
 
 systemctl daemon-reload
-systemctl enable proxmox-ami-fixup-hostname.service
 systemctl enable proxmox-ami-fixup-certs.service
 systemctl enable proxmox-ami-fixup-nat.service
-systemctl enable proxmox-ami-fixup-password.service
 systemctl enable proxmox-ami-fixup-firewall.service
 systemctl enable inspect-proxmox-block-cloud-metadata.service
 systemctl enable inspect-proxmox-egress-lockdown.service
@@ -676,7 +632,8 @@ systemctl enable inspect-proxmox-egress-lockdown.timer
 
 # pvestatd -> localhost CloudWatch agent -> CloudWatch OTLP, SigV4-signed with the instance
 # role (403s harmlessly without cloudwatch:PutMetricData). The build only stages files; the
-# agent is configured and started at first boot, so the endpoint is never tested here.
+# agent is configured and started on each instance's first boot, so the endpoint is never
+# tested here.
 # cumulativetodelta is required: PVE emits cumulative sums without StartTimeUnixNano.
 # The instance Name comes from IMDS via OTEL_RESOURCE_ATTRIBUTES and resourcedetection's env
 # detector (the launcher must enable InstanceMetadataTags). Do NOT use the ec2 detector's
@@ -732,9 +689,12 @@ echo '{"agent":{}}' > /opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
 # the endpoint, which isn't running at build time. Persists in pmxcfs (baked in).
 printf 'opentelemetry: cloudwatch-otel\n\tserver 127.0.0.1\n\tport 4318\n\totel-protocol http\n\totel-path /v1/metrics\n\totel-compression gzip\n' >> /etc/pve/status.cfg
 
-# Every boot, so ${env:AWS_REGION} and Name follow an AMI relaunch. fetch-config(base) +
-# append-config is idempotent, so re-running doesn't duplicate the pipeline.
-cat > /usr/local/bin/cloudwatch-otel-apply.sh << 'OTELAPPLY'
+# ${env:AWS_REGION} and Name are per-launch, so cloud-init runs this once per instance
+# (scripts-per-instance, in its final stage). -s enables and starts the agent, which then
+# starts itself on later boots. The build instance's own per-instance stage ran before
+# this file existed, so the build instance never emits metrics.
+mkdir -p /var/lib/cloud/scripts/per-instance
+cat > /var/lib/cloud/scripts/per-instance/cloudwatch-otel-apply << 'OTELAPPLY'
 #!/bin/bash
 set -euo pipefail
 REGION=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region)
@@ -749,7 +709,7 @@ ctl=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
 "$ctl" -a fetch-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/cw-base.json
 "$ctl" -a append-config -c file:/opt/aws/amazon-cloudwatch-agent/etc/otel-metrics.yaml -s
 OTELAPPLY
-chmod +x /usr/local/bin/cloudwatch-otel-apply.sh
+chmod +x /var/lib/cloud/scripts/per-instance/cloudwatch-otel-apply
 
 # The agent service reads AWS_REGION (written above) so otelcol resolves ${env:AWS_REGION}.
 mkdir -p /etc/systemd/system/amazon-cloudwatch-agent.service.d
@@ -757,23 +717,27 @@ cat > /etc/systemd/system/amazon-cloudwatch-agent.service.d/otel-region.conf << 
 [Service]
 EnvironmentFile=/etc/default/amazon-cloudwatch-agent-otel
 OTELDROPIN
-
-cat > /etc/systemd/system/cloudwatch-otel-apply.service << 'OTELAPPLYUNIT'
-[Unit]
-Description=Configure and start the CloudWatch agent OTel pipeline
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/cloudwatch-otel-apply.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-OTELAPPLYUNIT
 systemctl daemon-reload
-systemctl enable cloudwatch-otel-apply.service
+
+# Sorts after everything the base image ships in cloud.cfg.d. A launcher's cloud-config
+# still outranks it, so keys set there (hostname and manage_etc_hosts: our launcher sets
+# both) are neutralised rather than overridden: preserve_hostname makes
+# set_hostname/update_hostname no-ops, and update_etc_hosts is dropped from the module
+# list because it runs after bootcmd in the same stage and rewrites /etc/hosts wholesale,
+# removing the node entry. The list comes from the installed cloud-init, not hardcoded.
+INIT_MODULES=$(python3 -c '
+import json, yaml
+mods = yaml.safe_load(open("/etc/cloud/cloud.cfg"))["cloud_init_modules"]
+print(json.dumps([m for m in mods if str(m).replace("-", "_") != "update_etc_hosts"]))')
+cat > /etc/cloud/cloud.cfg.d/99-inspect-proxmox.cfg << CLOUD_CFG
+#cloud-config
+preserve_hostname: true
+cloud_init_modules: $INIT_MODULES
+bootcmd:
+  - cloud-init-per instance inspect-proxmox-hosts /usr/local/bin/proxmox-ami-fixup-hosts.sh
+  - cloud-init-per instance inspect-proxmox-password /usr/local/bin/proxmox-ami-fixup-password.sh
+CLOUD_CFG
+cat /etc/cloud/cloud.cfg.d/99-inspect-proxmox.cfg
 
 pveum user list --output-format json | jq -r '.[].userid' |
 while IFS= read -r userid; do
