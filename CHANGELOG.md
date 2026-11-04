@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.12.1
+
+- Fix: the bundled provisioning scripts skipped the `pve-qemu-kvm` rebuild whenever the stock package's version sorted at or above the rebuild's, so hosts provisioned once `pve-qemu-kvm` 11.1.x reached the `pve-no-subscription` repository (after 2026-11-02; hosts built on 2026-11-02 still got 11.0.3-4 and the rebuild) run stock QEMU, unheld, without the AHCI fixes or the IDE bounds check. The rebuild now runs unless that exact version is installed, and is rebased onto stock 11.1.3-1 plus the two AHCI fixes and the IDE PIO transfer window bounds check on migration load (upstream QEMU `d7f16bad8f`, `a2fbf1785b`, `1332990194`), building `11.1.3-1+aisi1`. New hosts carry contract `aisi4`. To check a host built earlier, run `dpkg-query -W pve-qemu-kvm`: anything other than a `+aisi` version is stock. To fix it, rerun the rebuild with the `patch-pve-qemu.sh` block from the provisioning script (it installs the package and holds it), or rebuild the host. Running VMs keep the old QEMU binary until they are stopped and started again.
+
 ## 0.12.0
 
 - Fix: `write_file` on Linux quotes the destination path in the script that reassembles a chunked write (contents over 40 KiB), so a path containing shell metacharacters (`$(...)`, `;`, quotes, spaces) is written as a file instead of being run as a command in the guest
