@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- EC2 scripts: `check-host-isolation.sh` and `check-guest-isolation.sh` move out of `experimental/` and are supported scripts; the host script now verifies the launch-time IMDS settings (`HttpTokens=required`, `HttpPutResponseHopLimit=1`) from the host
+
 ## 0.12.0
 
 - Fix: `write_file` on Linux quotes the destination path in the script that reassembles a chunked write (contents over 40 KiB), so a path containing shell metacharacters (`$(...)`, `;`, quotes, spaces) is written as a file instead of being run as a command in the guest

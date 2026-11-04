@@ -1,12 +1,12 @@
 #!/bin/bash
 # Run *inside a Linux sandbox guest* (guest agent, `qm terminal`, or paste into a console).
-# Probes the effect of the isolation baked by ../userdata.sh: what the guest can actually
+# Probes the effect of the isolation baked by userdata.sh: what the guest can actually
 # reach. check-host-isolation.sh checks the mechanism on the host; run both, and take this
 # script's arguments from the line that one prints.
 # One PASS/FAIL/SKIP line per probe. Every probe runs; the exit status is nonzero if any
 # failed, and the trailing summary line says how many.
 #
-# Assumes a guest on a host isolated per the parent README's "Properly isolating the
+# Assumes a guest on a host isolated per the README's "Properly isolating the
 # host": everything below must be blocked. Elsewhere the egress probes fail by design, because
 # the guest can reach the internet — and so do the port-53 and DNS probes, because without the
 # lockdown marker the node firewall accepts port 53 and the SDN resolver recurses.
