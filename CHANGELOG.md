@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: a guest file read that Proxmox itself rejects as a malformed guest-agent reply (qemu-server 9.2.11+: "agent file-read: got invalid count" or "mismatch between returned count and buffer length") raises `GuestAgentTamperError` straight away, instead of being retried as a transient error for up to 10 minutes and then raising `httpx.HTTPStatusError`
+
 ## 0.12.0
 
 - Fix: `write_file` on Linux quotes the destination path in the script that reassembles a chunked write (contents over 40 KiB), so a path containing shell metacharacters (`$(...)`, `;`, quotes, spaces) is written as a file instead of being run as a command in the guest
