@@ -134,6 +134,14 @@ manually:
 uv run mypy
 ```
 
+## Versioning
+
+Bump `version` in `pyproject.toml`, and move the `CHANGELOG.md` "Unreleased" entries
+under a heading for the new version, in any PR that changes the sandbox's security
+properties (guest isolation, network or host controls, VM defaults). Downstream checks
+require a minimum provider version, so a fix can only be required once a version
+contains it.
+
 ## Design Notes
 
 All communication with Proxmox is via the AsyncProxmoxAPI class.
