@@ -48,6 +48,8 @@ first=$(iptables -w -t raw -S PREROUTING |
 iptables -w -t raw -C INSP-SANDBOX-HOST-LOCAL -m addrtype --dst-type LOCAL -j DROP
 iptables -w -t raw -S PREROUTING | grep -q -- '-d 169.254.0.0/16 -j DROP'
 iptables -w -S FORWARD | grep -q -- '-s 169.254.0.0/16 -j DROP'
+# Set by pve-firewall; stops forwarding from vnets with no host address.
+[ "$(sysctl -n net.ipv4.conf.all.rp_filter)" != 0 ]
 # IMDSv2 required: a GET with no session token is refused. Holds on any EC2 host
 # launched per scripts/ec2/README.md, lockdown or not. A host with no metadata
 # service at all (the local virtualized test host) gets 000 and is not asserted.

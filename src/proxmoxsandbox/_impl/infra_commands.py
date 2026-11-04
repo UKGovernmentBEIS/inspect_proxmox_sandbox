@@ -26,11 +26,11 @@ from proxmoxsandbox._impl.qemu_commands import QemuCommands, vm_label
 from proxmoxsandbox._impl.sdn_commands import (
     IpamMapping,
     SdnCommands,
+    SdnTeardownError,
     VnetAliases,
     is_ephemeral_zone,
 )
 from proxmoxsandbox._impl.storage_commands import LocalStorageCommands
-from proxmoxsandbox._impl.task_wrapper import TaskWrapper
 from proxmoxsandbox._impl.vm_scheduler import VmScheduler
 from proxmoxsandbox.schema import (
     HealthCheck,
@@ -62,7 +62,6 @@ class InfraCommands(abc.ABC):
     _instances: ClassVar[Dict[ProxmoxTarget, "InfraCommands"]] = {}
 
     async_proxmox: AsyncProxmoxAPI
-    task_wrapper: TaskWrapper
     sdn_commands: SdnCommands
     qemu_commands: QemuCommands
     built_in_vm: BuiltInVM
@@ -72,14 +71,12 @@ class InfraCommands(abc.ABC):
         self,
         async_proxmox: AsyncProxmoxAPI,
         node: str,
-        task_wrapper: TaskWrapper,
         sdn_commands: SdnCommands,
         qemu_commands: QemuCommands,
         built_in_vm: BuiltInVM,
     ):
         """Prefer InfraCommands.build() unless injecting collaborators for testing."""
         self.async_proxmox = async_proxmox
-        self.task_wrapper = task_wrapper
         self.sdn_commands = sdn_commands
         self.qemu_commands = qemu_commands
         self.built_in_vm = built_in_vm
@@ -119,17 +116,15 @@ class InfraCommands(abc.ABC):
         cls, async_proxmox: AsyncProxmoxAPI, node: str, image_storage: str
     ) -> "InfraCommands":
         """Build the full object graph bottom-up."""
-        task_wrapper = TaskWrapper(async_proxmox)
-        storage_commands = LocalStorageCommands(async_proxmox, node, task_wrapper)
+        storage_commands = LocalStorageCommands(async_proxmox, node)
         sdn_commands = SdnCommands(async_proxmox)
         qemu_commands = QemuCommands(
-            async_proxmox, node, image_storage, task_wrapper, storage_commands
+            async_proxmox, node, image_storage, storage_commands
         )
         built_in_vm = BuiltInVM(
             async_proxmox,
             node,
             image_storage,
-            task_wrapper,
             qemu_commands,
             sdn_commands,
             storage_commands,
@@ -137,7 +132,6 @@ class InfraCommands(abc.ABC):
         return cls(
             async_proxmox,
             node,
-            task_wrapper,
             sdn_commands,
             qemu_commands,
             built_in_vm,
@@ -154,8 +148,6 @@ class InfraCommands(abc.ABC):
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start, config.sdn_config
         )
-        if sdn_zone_id:
-            self.sdn_commands.register_sdn_zone(sdn_zone_id)
 
         known_builtins = await self.built_in_vm.known_builtins()
 
@@ -185,8 +177,8 @@ class InfraCommands(abc.ABC):
         """Create every VM once its dependencies are ready; wait for all to be ready.
 
         Clone/configure/start stays strictly serial: VM IDs come from an
-        unreserved /cluster/nextid read, and TaskWrapper waits on cluster-wide
-        task state. Only the readiness waits for already-started VMs overlap.
+        unreserved /cluster/nextid read. Only the readiness waits for
+        already-started VMs overlap.
         Returns (vm_id, config) pairs in `vms_config` order.
         """
         by_name = {vm.name: vm for vm in vms_config}
@@ -288,9 +280,11 @@ class InfraCommands(abc.ABC):
         for vm_id, vm_config in vms.items():
             await self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
         if sdn_zone_id is not None:
-            await self.sdn_commands.tear_down_sdn_zone_and_vnet(
+            gone = await self.sdn_commands.tear_down_sdn_zone_and_vnet(
                 sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings
             )
+            if not gone:
+                raise SdnTeardownError({sdn_zone_id})
 
     async def create_ipam_mappings(
         self,
@@ -457,6 +451,13 @@ class InfraCommands(abc.ABC):
             await self.qemu_commands.destroy_vm(
                 vm_id=vm["vmid"], name=vm.get("name", "<unnamed>")
             )
-        await self.sdn_commands.tear_down_sdn_zones_and_vnets(
+        deleted_zones = await self.sdn_commands.tear_down_sdn_zones_and_vnets(
             zones_to_delete, noticed_ipam_mappings
         )
+        # Forget only what is gone: a zone that survived stays tracked so
+        # task_cleanup gets another go at it.
+        self.qemu_commands.deregister_vms([vm["vmid"] for vm in noticed_vms])
+        self.sdn_commands.deregister_sdn_resources_for_zones(deleted_zones)
+        failed_zones = set(zones_to_delete) - deleted_zones
+        if failed_zones:
+            raise SdnTeardownError(failed_zones)

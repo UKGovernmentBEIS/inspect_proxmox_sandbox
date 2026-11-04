@@ -21,6 +21,8 @@
 # Both are site-specific and never hardcoded here; check-host-isolation.sh prints the line
 # to paste.
 set -uo pipefail
+# Error text from the probes is matched against English, so pin the messages.
+export LC_ALL=C
 
 host_addrs=()
 unreachable=()
@@ -53,50 +55,41 @@ want() { # want EXPECTED NAME ACTUAL
 }
 skip() { echo "SKIP  $1 ($2)"; }
 
-# A rejection (TCP RST, or an ICMP unreachable) says something on the path answered instead of
-# swallowing the packet — the target, or any router in between, which is why it is not evidence
-# the target was reached. "Network is unreachable" is the guest's own stack declining to send,
-# every IPv6 target on a guest with IPv6 off included, so it counts as a block. 124 is
+# Only a completed connect is reachable. How the rest fail is the mechanism's business, not
+# this script's: a RST or ICMP error can come from any firewall on the path. 124 is
 # timeout(1)'s exit for the kill.
+# A probe that could not run must not read as a block: 126/127 is a missing tool, and
+# "No such file or directory" against /dev/tcp is a bash built without net redirections.
+# bash puts the reason on its first stderr line and a less useful one on the second.
+state() { # rc stderr
+    local reason=${2%%$'\n'*}
+    reason=${reason##*: }
+    case "$1:$2" in
+        0:*) echo reachable ;;
+        124:*) echo "blocked(timeout after 3s)" ;;
+        12[67]:* | *"No such file or directory"*) echo "error($reason)" ;;
+        *) echo "blocked($reason)" ;;
+    esac
+}
 tcp_state() {
     local err
     err=$(timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>&1)
-    case "$?:$err" in
-        0:*) echo reachable ;;
-        124:*) echo "blocked(timeout after 3s)" ;;
-        *"Network is unreachable"* | *"not supported"*) echo "blocked(no route from the guest)" ;;
-        *) echo "rejected(${err##*: })" ;;
-    esac
+    state $? "$err"
 }
-http_state() {
-    local code
-    code=$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null)
-    # An empty status is curl failing to run rather than a block, so it must not read as one.
-    case "$code" in
-        000) echo "blocked(no response)" ;;
-        "") echo "error(curl printed no status)" ;;
-        *) echo "reachable($code)" ;;
-    esac
+# Any reply is reachable, a DNS REFUSED included. Silence only means blocked if the service
+# would have answered, so the payload has to be one it always replies to.
+# Judged on exit status only, since stray stderr mustn't hide a reply; head exits 1 on an ICMP error.
+udp_state() { # host port payload (printf escapes)
+    local err
+    # shellcheck disable=SC2016  # expanded by the inner bash
+    err=$(timeout 3 bash -c 'exec 3<>"/dev/udp/$1/$2" && printf "$3" >&3 && head -c 1 <&3 >/dev/null' \
+        _ "$1" "$2" "$3" 2>&1)
+    state $? "$err"
 }
-# dig only retries over TCP on a truncated reply, never on silence, so the transport has to
-# be selected explicitly to cover both.
-dig_rcode() { # server type name [dig args...] -> rcode, empty if nothing answered
-    local server=$1 type=$2 name=$3
-    shift 3
-    dig @"$server" +time=3 +tries=1 -t "$type" "$name" "$@" 2>/dev/null |
-        awk -F'status: ' '/status:/ {split($2, a, ","); print a[1]; exit}'
-}
-# Any rcode other than NOERROR/NXDOMAIN counts as blocked: a REFUSED or SERVFAIL is a live
-# resolver that cannot recurse, which carries no data even though it is not silence.
-dns_state() { # server type name
-    local rcode
-    rcode=$(dig_rcode "$@")
-    case "$rcode" in
-        NOERROR|NXDOMAIN) echo "reachable($rcode)" ;;
-        "") echo "blocked(no response)" ;;
-        *) echo "blocked($rcode)" ;;
-    esac
-}
+# An A query for deb.debian.org
+dns_query='\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03deb\x06debian\x03org\x00\x00\x01\x00\x01'
+# An SNTP client request: LI 0, version 3, mode 3, then 47 zero bytes
+ntp_query="\\x1b$(printf '\\x00%.0s' {1..47})"
 
 gw=$(ip route show default | awk '{print $3; exit}')
 addr=$(ip -4 addr show scope global | awk '/inet /{print $2; exit}')
@@ -119,36 +112,33 @@ fi
 
 echo
 echo "# the host itself"
+# LLMNR is probed over TCP only: systemd-resolved ignores unicast UDP queries, even for its own
+# name, so silence on 5355/udp would pass with a responder listening.
 for host in "${hosts[@]}"; do
-    for spec in 8006:pveproxy 22:ssh 85:pvedaemon 111:rpcbind 25:smtp 3128:spiceproxy 4318:otlp-collector 5900:vnc 5901:vnc; do
+    for spec in 8006:pveproxy 22:ssh 85:pvedaemon 111:rpcbind 25:smtp 3128:spiceproxy 4318:otlp-collector 5900:vnc 5901:vnc 53:dns 5355:llmnr; do
         port=${spec%%:*}
         want blocked "host $host:$port (${spec#*:})" "$(tcp_state "$host" "$port")"
     done
-    want blocked "Proxmox API https://$host:8006/api2/json/version" "$(http_state "https://$host:8006/api2/json/version")"
-    # The host closes the resolver's port with REJECT so guests fail immediately instead
-    # of hanging on every lookup. Silence here means the rule is a DROP; reachable means
-    # dnsmasq is still serving this address.
-    want rejected "host $host:53 (dns)" "$(tcp_state "$host" 53)"
+    want blocked "host $host:53/udp (dns)" "$(udp_state "$host" 53 "$dns_query")"
+    want blocked "host $host:123/udp (ntp)" "$(udp_state "$host" 123 "$ntp_query")"
 done
-# Not judged, and blocked on an isolated host: the node firewall accepts only DHCP from guests.
-# So this is not the witness that the probes above found shut ports rather than a dead network
-# — the port-53 rejection is, because a cut path cannot produce one.
-echo "INFO  ICMP to the gateway [$(ping -c1 -W2 "$gw" >/dev/null 2>&1 && echo reachable || echo blocked)]"
 
 echo
 echo "# cloud metadata and link-local"
 # IMDS addresses: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html#instance-metadata-v2-how-it-works
 # Resolver addresses: https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html
-want blocked "IMDSv1 GET http://169.254.169.254/latest/meta-data/instance-id" \
-    "$(http_state http://169.254.169.254/latest/meta-data/instance-id)"
-want blocked "IMDSv2 token PUT http://169.254.169.254/latest/api/token" \
-    "$(http_state -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' http://169.254.169.254/latest/api/token)"
-want blocked "IMDS over IPv6 http://[fd00:ec2::254]/latest/meta-data/" \
-    "$(http_state 'http://[fd00:ec2::254]/latest/meta-data/')"
+want blocked "IMDS 169.254.169.254:80" "$(tcp_state 169.254.169.254 80)"
+want blocked "IMDS [fd00:ec2::254]:80" "$(tcp_state fd00:ec2::254 80)"
 # The resolver also answers on a VPC-specific address, which the guest has no way to derive.
 for resolver_addr in 169.254.169.253 fd00:ec2::253; do
-    want blocked "VPC resolver $resolver_addr:53 over TCP" "$(tcp_state "$resolver_addr" 53)"
+    label="VPC resolver $resolver_addr"
+    [[ $resolver_addr == *:* ]] && label="VPC resolver [$resolver_addr]"
+    want blocked "$label:53" "$(tcp_state "$resolver_addr" 53)"
+    want blocked "$label:53/udp" "$(udp_state "$resolver_addr" 53 "$dns_query")"
 done
+# Time Sync addresses: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configure-ec2-ntp.html
+want blocked "Time Sync 169.254.169.123:123/udp" "$(udp_state 169.254.169.123 123 "$ntp_query")"
+want blocked "Time Sync [fd00:ec2::123]:123/udp" "$(udp_state fd00:ec2::123 123 "$ntp_query")"
 want blocked "link-local router 169.254.1.1:80" "$(tcp_state 169.254.1.1 80)"
 
 echo
@@ -160,46 +150,21 @@ v6route=$(ip -6 route show default 2>/dev/null | head -1)
 # makes these two checks able to fail.
 want absent "no global IPv6 address" "${v6addr:-absent}"
 want absent "no IPv6 default route" "${v6route:-absent}"
-want blocked "IPv6 egress https://[2606:4700:4700::1111]/" "$(http_state 'https://[2606:4700:4700::1111]/')"
+want blocked "IPv6 egress [2606:4700:4700::1111]:443" "$(tcp_state 2606:4700:4700::1111 443)"
 
 echo
 echo "# internet egress"
-for target in 1.1.1.1:443 8.8.8.8:53; do
-    want blocked "TCP ${target/:/ port }" "$(tcp_state "${target%:*}" "${target##*:}")"
+for ip in 1.1.1.1 8.8.8.8; do
+    for port in 53 853 443; do
+        want blocked "TCP $ip:$port" "$(tcp_state "$ip" "$port")"
+    done
+    want blocked "UDP $ip:53" "$(udp_state "$ip" 53 "$dns_query")"
 done
-names=(deb.debian.org download.proxmox.com pypi.org)
-for name in "${names[@]}"; do
-    want blocked "package registry https://$name/" "$(http_state "https://$name/")"
+# time.cloudflare.com
+want blocked "NTP 162.159.200.1:123/udp" "$(udp_state 162.159.200.1 123 "$ntp_query")"
+for name in deb.debian.org download.proxmox.com pypi.org; do
+    want blocked "package registry $name:443" "$(tcp_state "$name" 443)"
 done
-
-echo
-echo "# DNS"
-if ! command -v dig >/dev/null 2>&1; then
-    skip "DNS probes" "no dig; install dnsutils/bind-utils in the guest template"
-else
-    # UDP to the link-local addresses, which the TCP probes above cannot cover.
-    for resolver_addr in 169.254.169.253 fd00:ec2::253; do
-        want blocked "VPC resolver $resolver_addr:53 over UDP" \
-            "$(dns_state "$resolver_addr" A "${names[0]}")"
-    done
-    # Under the lockdown the host rejects port 53, so the SDN resolver answers nothing at
-    # all — not even REFUSED. dig never falls back to TCP on silence, so that transport needs
-    # a probe of its own.
-    for name in "${names[@]}"; do
-        want blocked "recursion via $gw for $name" "$(dns_state "$gw" A "$name")"
-    done
-    want blocked "recursion via $gw for ${names[0]} over TCP" \
-        "$(dns_state "$gw" A "${names[0]}" +tcp)"
-    # A long random label under a name the resolver will recurse for is the classic
-    # exfil-over-DNS channel; the TXT reply is the return path.
-    label=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    want blocked "DNS exfil TXT $label.${names[0]}" "$(dns_state "$gw" TXT "$label.${names[0]}")"
-    for resolver_ip in 1.1.1.1 8.8.8.8; do
-        for port in 53 853 443; do
-            want blocked "direct resolver $resolver_ip:$port" "$(tcp_state "$resolver_ip" "$port")"
-        done
-    done
-fi
 
 echo
 echo "# operator-supplied addresses"
