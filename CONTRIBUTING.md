@@ -142,6 +142,21 @@ properties (guest isolation, network or host controls, VM defaults). Downstream 
 require a minimum provider version, so a fix can only be required once a version
 contains it.
 
+## Releasing
+
+Releases are published to [PyPI](https://pypi.org/project/inspect-proxmox-sandbox/)
+by hand with uv's [build](https://docs.astral.sh/uv/guides/package/#building-your-package)
+and [publish](https://docs.astral.sh/uv/guides/package/#publishing-your-package) commands.
+The steps specific to this repo are:
+
+- Bump `version` in `pyproject.toml` and run `uv lock`.
+- Rename the `CHANGELOG.md` "Unreleased" heading to `## <version> - <YYYY-MM-DD>` and add
+  a new empty "Unreleased" heading above it.
+- After merging, tag the merge commit `vX.Y.Z` and push the tag.
+- Build from the tag, and check the contents of `dist/*` (`tar -tzf`, `unzip -l`) before
+  publishing. The sdist should contain only `src/`, `README.md`, `CHANGELOG.md` and
+  `LICENSE`, and the wheel only `proxmoxsandbox/`, including `scripts/` and `py.typed`.
+
 ## Design Notes
 
 All communication with Proxmox is via the AsyncProxmoxAPI class.
