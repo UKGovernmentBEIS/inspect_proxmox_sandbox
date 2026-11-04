@@ -2,7 +2,8 @@
 name = "inspect-proxmox-sandbox"
 version = "0.12.0"
 description = "A Proxmox Sandbox Environment for Inspect"
-readme = "README.md"
+dynamic = ["readme"]
+license = "MIT"
 authors = [
     {name = "UK AI Security Institute"}
 ]
@@ -19,6 +20,10 @@ dependencies = [
     "websockets>=14",
 ]
 
+[project.urls]
+Repository = "https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox"
+Changelog = "https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/blob/main/CHANGELOG.md"
+
 [project.entry-points."inspect_ai"]
 "proxmox-sandbox" = "proxmoxsandbox._proxmox_sandbox_environment"
 
@@ -31,11 +36,24 @@ markers = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-fancy-pypi-readme"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?://|#|mailto:)(?:\./)?([^)]+)\)'
+replacement = '](https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox/blob/main/\1)'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/proxmoxsandbox"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [tool.hatch.metadata]
 allow-direct-references = true

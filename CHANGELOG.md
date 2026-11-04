@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-## 0.12.0
+- The sdist contains only `src/`, `README.md`, `CHANGELOG.md` and `LICENSE`, and relative links in the README point to GitHub on the PyPI page
+
+## 0.12.0 - 2026-11-04
 
 - Fix: `write_file` on Linux quotes the destination path in the script that reassembles a chunked write (contents over 40 KiB), so a path containing shell metacharacters (`$(...)`, `;`, quotes, spaces) is written as a file instead of being run as a command in the guest
 - `write_file` raises `IOError` when the in-guest script that reassembles a chunked write exits non-zero, instead of returning as if the write had succeeded
