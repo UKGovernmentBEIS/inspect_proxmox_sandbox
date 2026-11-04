@@ -55,6 +55,23 @@ def tamper(
     return GuestAgentTamperError(vm_id, what, detail)
 
 
+# qemu-server >= 9.2.11 checks each guest-file-read reply itself and fails the
+# request with a 500 carrying one of these; older versions pass the reply
+# through to decode_file_read. The rejection is deterministic, so retrying it
+# as a transient QGA error only delays it.
+_PVE_FILE_READ_REJECTIONS = (
+    "agent file-read: got invalid count",
+    "agent file-read: mismatch between returned count and buffer length",
+)
+
+
+def pve_rejected_file_read(status_code: int, error_text: str) -> bool:
+    """Whether Proxmox refused a file-read because the agent's reply was malformed."""
+    return status_code == 500 and any(
+        marker in error_text for marker in _PVE_FILE_READ_REJECTIONS
+    )
+
+
 _M = TypeVar("_M", bound=BaseModel)
 
 

@@ -16,7 +16,8 @@ from proxmoxsandbox._impl.agent_commands import (
     _is_pid_gone,
     is_transient_qga_error,
 )
-from proxmoxsandbox._impl.qga_responses import ExecStatus
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.qga_responses import ExecStatus, GuestAgentTamperError
 
 
 def _http_error(status_code: int, message: str = "") -> httpx.HTTPStatusError:
@@ -186,6 +187,68 @@ async def test_missing_file_not_retried(agent_commands):
     with pytest.raises(httpx.HTTPStatusError):
         await agent_commands._retry_on_qga_error("read", missing)
     assert calls["n"] == 1
+
+
+def _file_read_api(
+    monkeypatch, file_read_errors: list[str]
+) -> tuple[AgentCommands, dict]:
+    """AgentCommands over a mock PVE 9.2 whose file-reads 500 these, then succeed."""
+    calls = {"file-read": 0}
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        route = request.url.path.rsplit("/", 1)[-1]
+        if route == "ticket":
+            data: object = {"ticket": "t", "CSRFPreventionToken": "c"}
+        elif route == "version":
+            data = {"release": "9.2", "repoid": "x", "version": "9.2.25"}
+        elif route == "ping":
+            data = None
+        elif route == "file-read":
+            calls["file-read"] += 1
+            if calls["file-read"] <= len(file_read_errors):
+                return httpx.Response(
+                    500, text=file_read_errors[calls["file-read"] - 1]
+                )
+            data = {"content": "aGk=", "truncated": 1}
+        else:
+            raise AssertionError(f"unexpected request {route}")
+        return httpx.Response(200, json={"data": data})
+
+    def client(**kwargs):
+        kwargs.pop("verify", None)
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    api = AsyncProxmoxAPI("proxmox.test:8006", "user", "password")
+    return AgentCommands(api, "proxmox"), calls
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "agent file-read: got invalid count '16777216'",
+        "agent file-read: mismatch between returned count and buffer length",
+    ],
+)
+async def test_proxmox_rejected_file_reply_is_tampering_not_retried(
+    monkeypatch, message
+):
+    ac, calls = _file_read_api(monkeypatch, [message])
+    with pytest.raises(GuestAgentTamperError):
+        await ac.read_file_capped(vm_id=101, filepath="/tmp/x", count=2)
+    assert calls["file-read"] == 1
+
+
+async def test_transient_file_read_error_is_still_retried(monkeypatch):
+    ac, calls = _file_read_api(
+        monkeypatch, ["guest-file-read failed - got timeout"] * 2
+    )
+    assert await ac.read_file_capped(vm_id=101, filepath="/tmp/x", count=2) == (
+        b"hi",
+        True,
+    )
+    assert calls["file-read"] == 3
 
 
 # --- get_agent_exec_status PID-gone disk fallback --------------------------
