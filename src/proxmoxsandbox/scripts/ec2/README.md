@@ -24,11 +24,10 @@ cheaper alternative to bare-metal instance types. The intended workflow is
 Each instance gets a 1024 GB gp3 EBS root volume (Proxmox needs space for VM
 images). Plan for that in your cost / quota budget.
 
-> **Region footgun**: every script in this directory falls back to
-> `eu-west-2` if `REGION` is unset (or not exported across script
-> boundaries). If you work in another region, `export REGION=...` once at
-> the top of your shell and keep it for the whole flow — silent
-> wrong-region errors are easy to misdiagnose.
+> **Region footgun**: every AWS-facing script here falls back to `eu-west-2`
+> if `REGION` is unset or not exported. If you work in another region,
+> `export REGION=...` once and keep it for the whole flow — wrong-region
+> errors are silent and easy to misdiagnose.
 
 ## One-time: build the AMI
 
@@ -44,9 +43,7 @@ export INSTANCE_NAME=proxmox                  # Name tag for the instance
 # export INSTANCE_PROFILE=...                 # required unless DHMC is enabled in this account/region
 # export LAUNCH_EXTRA_TAGS='{Key=team,Value=infra}'   # AWS CLI shorthand; single-quote to prevent brace expansion
 
-# Launches m8i.2xlarge, runs the full Proxmox install via user-data, and tails
-# the install log on the host until it reports complete (~5-15 min). Prints
-# the instance ID and root password when done.
+# Takes ~5-15 min; prints the instance ID and root password when done.
 ./launch.sh
 ```
 
@@ -123,26 +120,23 @@ outbound traffic via iptables MASQUERADE. VM gateway: `10.10.10.1`. DNS:
 because EC2 only routes to IPs on attached ENIs.
 
 Sandbox forwarding to the EC2 metadata endpoints (`169.254.169.254` and
-`fd00:ec2::254`) is blocked on the Proxmox host. Processes running directly on
-the host retain IMDS access. `HttpPutResponseHopLimit=1` is a backstop.
+`fd00:ec2::254`) is blocked on the host; processes on the host itself keep
+IMDS access. See "Host firewall isolation" in the top-level README.
+`HttpPutResponseHopLimit=1` is a backstop.
 
 ## Metrics (CloudWatch)
 
 The instance ships a localhost CloudWatch agent that forwards Proxmox's `pvestatd`
 metrics to CloudWatch using OpenTelemetry.
 
-**IAM**: the instance role needs `cloudwatch:PutMetricData` for metrics to be
-accepted. Without it the agent still runs, but the endpoint returns 403 —
-harmless, you just get no metrics.
+**IAM**: the instance role needs `cloudwatch:PutMetricData`. Without it the
+agent still runs but the endpoint returns 403 — harmless, you just get no
+metrics.
 
-**Per-instance `Name` dimension**: every datapoint is labelled with the EC2
-instance-id. It is additionally labelled with the instance `Name` tag **only if
-the launcher enables instance metadata tags**. Like the hostname and root
-password (see fixup services below), this is a per-launch attribute set at
-`run-instances` time — it is **not** baked into the AMI. Pass
-`InstanceMetadataTags=enabled` in `--metadata-options` (as `launch.sh` does for
-the build instance, and as the everyday-launch example above does) or you get
-instance-id only.
+**`Name` dimension**: every datapoint is labelled with the EC2 instance-id, and
+with the instance `Name` tag only if the launch passes
+`InstanceMetadataTags=enabled` in `--metadata-options` (as the launch example
+above does). This is a per-launch attribute, not baked into the AMI.
 
 ## Properly isolating the host
 
@@ -154,17 +148,9 @@ to close that half.
 `experimental/check-host-isolation.sh` asserts everything below; on a host with ordinary
 internet access it fails by design.
 
-**Host layer.** Arm the egress lockdown: `touch
-/etc/inspect-proxmox-egress-lockdown` and start
-`inspect-proxmox-egress-lockdown.service` (see CONTRIBUTING.md). It drops forwarded
-traffic across the management NIC in both directions, strips SDN dnsmasq's upstream
-resolver, and rejects port 53 in the host's iptables `INPUT` chain: guests still get
-their DHCP leases, but there is no resolver left for them to query. Nothing needs one —
-the only names a guest could still have resolved were the other guests in its own
-sample's lease table, across every vnet in the zone. REJECT rather than DROP because
-dnsmasq hands itself out as the DHCP-supplied resolver and `SubnetConfig` cannot point
-guests elsewhere, so a drop would hang every lookup in the guest until its own resolver
-timed out.
+**Host layer.** Arm the egress lockdown: `touch /etc/inspect-proxmox-egress-lockdown`
+and start `inspect-proxmox-egress-lockdown.service` (see CONTRIBUTING.md). What it
+blocks is described under "Optional egress lockdown" in the top-level README.
 
 **VPC layer**, five pieces:
 
@@ -174,7 +160,7 @@ timed out.
    somewhere with no such route.
 
 2. **Interface endpoints with private DNS enabled** for `com.amazonaws.<region>.ssm`,
-   `.ssmmessages` and `.ec2messages` — Session Manager is now the only way in — plus
+   `.ssmmessages` and `.ec2messages` — Session Manager is the only way in — plus
    `.monitoring` if you want the CloudWatch metrics above. Their security group needs
    inbound 443 from the host's.
 
@@ -207,26 +193,19 @@ input `check-host-isolation.sh` needs: see `--unreachable` in its usage header.
 
 ## EC2-specific bits handled by `userdata.sh`
 
-- SSM agent (not in Debian 13 by default) — installed in stage 1.
+- SSM agent (not in Debian 13 by default).
 - EC2 Instance Connect (no Debian 13 package) — sshd configured manually with
   an `AuthorizedKeysCommand` that fetches keys from IMDS.
-- `grub-pc` install device preseeded for NVMe.
-- `postfix` mailer type / mailname preseeded before `proxmox-ve` installs.
 - IPAM patch so static-DHCP-by-MAC works
   (see <https://forum.proxmox.com/threads/ipam-reserving-dhcp-leases-via-mac-addresses.174704/>).
-- `/run/dnsmasq/resolv.conf` shim for SDN dnsmasq DNS forwarding.
-- AMI fixup services for hostname + SSL cert + root password regeneration on every boot.
-- A boot-time firewall rule blocking sandbox forwarding to EC2 instance metadata.
-- CloudWatch OTLP metrics collector for `pvestatd` metrics — see "Metrics (CloudWatch)" above.
+- `/run/dnsmasq/resolv.conf` shim so SDN dnsmasq can forward DNS upstream.
 - A `.aisi<N>` contract stamp on the version `pveversion` prints and the API serves, so a
   caller can tell what a host provides before asserting it. Bumped when a host-side file
-  something off-host asserts changes. A `pve-manager` upgrade replaces the stamped file, so an
-  apt hook re-applies it after every dpkg run. Only the API's `version` field and
-  `pveversion`'s text carry it; pvecfg.pm's `sub version()` is left alone because Proxmox
-  compares it internally.
+  something off-host asserts changes. Only the API's `version` field and `pveversion`'s
+  text carry it; pvecfg.pm's `sub version()` is left alone because Proxmox compares it
+  internally.
 
 ## Other scripts
 
-`experimental/` — optional helpers for interacting with a running host
-(SSH-via-SSM tunnel for the Proxmox web UI, run-command-on-host, a test-VM
-bring-up). See `experimental/README.md`. Not needed for the build/launch flow.
+`experimental/` — optional helpers for interacting with a running host. See
+`experimental/README.md`. Not needed for the build/launch flow.
