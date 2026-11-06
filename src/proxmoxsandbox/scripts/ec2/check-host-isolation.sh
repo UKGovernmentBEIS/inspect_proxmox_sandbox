@@ -148,6 +148,7 @@ fi
 echo
 echo "# units (stale-AMI guard)"
 check "host firewall unit: proxmox-ami-fixup-firewall.service" unit_ok proxmox-ami-fixup-firewall.service
+check "root password regenerated per launch: proxmox-ami-fixup-password.service" unit_ok proxmox-ami-fixup-password.service
 check "pve-firewall enabled and running" pvefw_running
 check "IMDS / link-local forwarding block: inspect-proxmox-block-cloud-metadata.service" unit_ok inspect-proxmox-block-cloud-metadata.service
 check "guest NAT/FORWARD rules: proxmox-ami-fixup-nat.service" unit_ok proxmox-ami-fixup-nat.service
@@ -165,6 +166,28 @@ check "contract re-stamped after apt runs: /etc/apt/apt.conf.d/80inspect-proxmox
 check "halt unit fires only on the lockdown's own verdict: SuccessExitStatus, StartLimitIntervalUSec" \
     unit_prop_is inspect-proxmox-egress-lockdown.service SuccessExitStatus TERM \
     StartLimitIntervalUSec 0
+password_is_this_launchs() {
+    local want got
+    want=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/instance-id 2>/dev/null)
+    got=$(cat /root/.last-instance-id 2>/dev/null)
+    [ -n "$want" ] && [ "$got" = "$want" ] && return 0
+    echo "/root/.last-instance-id is ${got:-<missing>}, this instance is ${want:-<unknown>}"
+    return 1
+}
+# Never print the password. Read from the file rather than passed as an argument, so it is
+# not in ps either.
+password_file_is_roots() {
+    local f=/root/root-password mode
+    [ -s "$f" ] || { echo "$f missing or empty"; return 1; }
+    mode=$(stat -c %a "$f")
+    [ "$mode" = 600 ] || { echo "$f has mode $mode, want 600"; return 1; }
+    # shellcheck disable=SC2016  # perl's variables
+    perl -e 'open(my $f, "<", $ARGV[0]) or exit 2; chomp(my $p = <$f>);
+        my $h = (getpwnam("root"))[1]; exit(defined $h && crypt($p, $h) eq $h ? 0 : 1)' "$f" ||
+        { echo "$f does not hold root's current password"; return 1; }
+}
+check "root password set on this launch: /root/.last-instance-id is this instance-id" password_is_this_launchs
+check "root password file: /root/root-password non-empty, mode 600, root's current password" password_file_is_roots
 
 echo
 echo "# forwarding rules and kernel state"
@@ -503,6 +526,12 @@ for ip in $endpoint_addrs; do
 done
 for target in "${unreachable[@]}"; do
     args="$args --unreachable $target"
+done
+# The VPC resolver answers on each VPC CIDR's base plus two as well as 169.254.169.253, which
+# the guest script probes without being told.
+for cidr in $vpc_cidrs; do
+    r=$((($(ip2int "${cidr%/*}") & $(prefix_mask "${cidr#*/}")) + 2))
+    args="$args --vpc-resolver $((r >> 24 & 255)).$((r >> 16 & 255)).$((r >> 8 & 255)).$((r & 255))"
 done
 if [ -n "$args" ]; then
     echo "# paste into the guest run (addresses are per-host and per-VPC; do not commit them):"
