@@ -23,7 +23,7 @@ poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
 
 This plugin assumes you already have one or more Proxmox instances set up, and that you have admin access to them.
 
-Proxmox 9 or later is required; 9.2 or later is recommended for improvements in read_file.
+Proxmox 9.1 or later is required (VMs are created with the `nested-virt` CPU flag, added in qemu-server 9.0.27); 9.2 or later is recommended for improvements in read_file.
 
 Your Proxmox instance(s) must allow additional storage types in `local` from the default.
 You can run this on your Proxmox node to configure them:
@@ -262,7 +262,8 @@ sandbox=SandboxEnvironmentSpec(
                 uefi_boot=True, # optional, default is False. Generally only needed for Windows VMs.
                 disk_controller="scsi", # optional, default will be SCSI. Can also use "ide" for older VM images.
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
-                cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
+                cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"), applied to every VM including clones of existing templates. Must not contain "flags=". Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
+                nested_virt=False, # optional, default False. True exposes the host's vmx/svm flag so the guest can run its own VMs; see "Nested virtualisation" below.
                 vga="none", # optional, default "none" (no emulated display, mitigates the QEMU #4215 escape path). "std" re-adds the vulnerable device — read the warning under "Windows VMs" before using it.
                 tablet=False, # optional, default False. True adds a USB tablet so the noVNC mouse tracks accurately; only useful with vga="std".
                 firewall=True, # optional, default is False. Enables the NIC firewall flag; VM-level filtering needs separate configuration.
@@ -482,6 +483,16 @@ the same, you should manually delete it from the Proxmox server.
 
 These template VMs are *not* cleaned up because that needs to happen outside
 the lifecycle of an Inspect eval. You need to do this manually at the moment.
+
+## Nested virtualisation
+
+Guests get `cpu: <cpu>,flags=-nested-virt` by default, so they don't see the
+host's `vmx`/`svm` flag, cannot run KVM themselves, and cannot reach the host
+kernel's nested-virtualisation code. Set `VmConfig(nested_virt=True)` for a
+guest that runs its own VMs, including Windows guests that use Credential Guard
+or other virtualisation-based security (VBS). The provider sets `cpu` on every
+clone, so this applies to built-in, OVA and `existing_vm_template_tag` VMs alike,
+whatever `cpu` the template was created with.
 
 ## Windows VMs
 

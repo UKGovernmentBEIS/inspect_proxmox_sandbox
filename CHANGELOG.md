@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.13.0
+
+- **Breaking:** guest VMs no longer get nested virtualisation: the provider sets `cpu` to `<model>,flags=-nested-virt` (default model `host`), so guests don't see `vmx`/`svm`. Evals that run VMs inside a guest, including Windows guests using Credential Guard (VBS), must set `VmConfig(nested_virt=True)`. Requires Proxmox VE 9.1 or later (qemu-server 9.0.27).
+- **Breaking:** `VmConfig.cpu` now applies to every VM. It was previously only used when importing an OVA for the first time; clones of built-in, cached OVA and `existing_vm_template_tag` templates kept the template's `cpu`. An `existing_vm_template_tag` VM with `cpu` unset now gets `host`. A `cpu` containing `flags=` is rejected.
+- Built-in templates are created with `cpu: host,flags=-nested-virt`
 - Fix: a guest file read that Proxmox itself rejects as a malformed guest-agent reply (qemu-server 9.2.11+: "agent file-read: got invalid count" or "mismatch between returned count and buffer length") raises `GuestAgentTamperError` straight away, instead of being retried as a transient error for up to 10 minutes and then raising `httpx.HTTPStatusError`
 
 ## 0.12.1
