@@ -192,6 +192,17 @@ runcmd:
   - [ systemctl, mask, systemd-networkd-wait-online.service ]
 # systemd-networkd-wait-online.service causes startup delays
 # and makes it annoying to debug network issues
+# "quiet" trims clone boot (measured on ubuntu24.04, 2 vCPU nested KVM:
+# kernel+initrd 3.7 s -> 2.8 s, userspace to guest agent 1.4 s -> 1.0 s):
+# under nested virtualisation every printk byte to the serial console is a
+# trap, and the boot log is ~50 KB. Warnings and errors still reach the
+# console; the journal has everything.
+  - - sh
+    - -c
+    - |
+      mkdir -p /etc/default/grub.d
+      echo 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS0 quiet"' > /etc/default/grub.d/90-inspect.cfg
+      update-grub
 """  # noqa: E501
 
     # Not in packages: the Kali image has no qemu-guest-agent, so one apt transaction
