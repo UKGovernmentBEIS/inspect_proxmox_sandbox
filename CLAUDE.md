@@ -89,5 +89,5 @@ The QEMU guest agent channel on Windows drops ~5-7% of calls. `agent_commands.py
 ## Performance Considerations
 
 - **VM Template Caching**: Templates are cached per Proxmox instance after first download — first run is slow
-- **Connection Pooling**: `AsyncProxmoxAPI` keeps one pooled `httpx` client per event loop; QGA round trips, not TLS handshakes, dominate exec latency
+- **Connection Pooling**: `AsyncProxmoxAPI` creates a new `httpx` client per request; measured at ~2.5 ms per request, it is not where exec latency goes. Each guest-agent API call costs ~200 ms inside Proxmox (a fresh socket to qemu-ga plus a pre-check ping), so the lever is the number of agent round trips per operation
 - **Concurrency**: Set `max_sandboxes` to number of available instances for optimal throughput; the pool's `default_concurrency()` does this automatically

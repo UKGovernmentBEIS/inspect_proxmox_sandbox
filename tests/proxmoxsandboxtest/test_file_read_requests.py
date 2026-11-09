@@ -1,0 +1,63 @@
+"""A guest file read is one agent request, plus login when there is no ticket."""
+
+import httpx
+import pytest
+
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+
+
+class _Peer:
+    def __init__(self):
+        self.paths: list[str] = []
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.paths.append(path)
+        if path.endswith("/access/ticket"):
+            return httpx.Response(
+                200, json={"data": {"ticket": "t", "CSRFPreventionToken": "c"}}
+            )
+        if path.endswith("/version"):
+            return httpx.Response(
+                200, json={"data": {"release": "9.2", "repoid": "x", "version": "9.2"}}
+            )
+        if path.endswith("/agent/file-read"):
+            return httpx.Response(
+                200, json={"data": {"content": "aGk=", "truncated": False}}
+            )
+        return httpx.Response(404, json={"data": None})
+
+
+@pytest.fixture
+def peer(monkeypatch) -> _Peer:
+    peer = _Peer()
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        kwargs.pop("verify", None)
+        return real_client(transport=httpx.MockTransport(peer.handle), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_with_mock_transport)
+    return peer
+
+
+def _api() -> AsyncProxmoxAPI:
+    return AsyncProxmoxAPI("proxmox.test:8006", "user@pam", "password")
+
+
+async def test_first_file_read_logs_in_then_reads(peer: _Peer):
+    api = _api()
+    assert await api.read_file_capped("n", 1, "/f", 16) == (b"hi", False)
+    assert [p.rsplit("/", 1)[-1] for p in peer.paths] == [
+        "ticket",
+        "version",
+        "file-read",
+    ]
+
+
+async def test_later_file_reads_are_a_single_request(peer: _Peer):
+    api = _api()
+    await api.read_file_capped("n", 1, "/f", 16)
+    peer.paths.clear()
+    assert await api.read_file_capped("n", 1, "/f", 16) == (b"hi", False)
+    assert [p.rsplit("/", 1)[-1] for p in peer.paths] == ["file-read"]

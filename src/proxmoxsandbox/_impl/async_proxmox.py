@@ -245,11 +245,6 @@ class AsyncProxmoxAPI:
             return True
         return (time.monotonic() - self.ticket_date) >= self.TICKET_REFRESH_THRESHOLD
 
-    # this more naturally belongs in qemu_commands
-    # but it's copied here because of read_file
-    async def _ping_qemu_agent(self, node: str, vm_id: int):
-        await self.request("POST", f"/nodes/{node}/qemu/{vm_id}/agent/ping")
-
     _warned_legacy_file_read: bool = False
 
     async def read_file_capped(
@@ -270,9 +265,11 @@ class AsyncProxmoxAPI:
             verify=self.verify_tls,
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
-            # ping first: it logs in if needed, so the version is discovered
-            # before we decide which file-read variant to use.
-            await self._ping_qemu_agent(node, vm_id)
+            # Login discovers the version, which picks the file-read variant.
+            # Each guest-agent call costs ~200 ms inside Proxmox, so this
+            # deliberately does not ping the agent first.
+            if not self.ticket or self._ticket_near_expiry():
+                await self._login(client)
             modern = self.release_at_least(9, 2)
             response = await client.get(
                 f"{self.api_base_url}{path}",
