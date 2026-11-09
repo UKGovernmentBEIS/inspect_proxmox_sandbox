@@ -388,9 +388,16 @@ class SdnCommands(abc.ABC):
         relevant_subnet_cidrs = []
         for relevant_vnet in relevant_vnets:
             vnet = relevant_vnet["vnet"]
-            vnet_subnets = await self.async_proxmox.request(
-                "GET", f"/cluster/sdn/vnets/{vnet}/subnets"
-            )
+            try:
+                vnet_subnets = await self.async_proxmox.request(
+                    "GET", f"/cluster/sdn/vnets/{vnet}/subnets"
+                )
+            except httpx.HTTPStatusError as e:
+                # Another process tearing down its zone between our listing
+                # and this read; its CIDRs are no longer in use.
+                if e.response.status_code == 500 and "does not exist" in str(e):
+                    continue
+                raise
             cidrs = list(subnet["cidr"] for subnet in vnet_subnets)
             relevant_subnet_cidrs += cidrs
         return relevant_subnet_cidrs

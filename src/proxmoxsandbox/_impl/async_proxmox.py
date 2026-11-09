@@ -52,6 +52,15 @@ def _http_status_error(response: httpx.Response) -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(message, request=response.request, response=response)
 
 
+class ProxmoxTaskError(RuntimeError):
+    """A Proxmox task finished with a status other than OK."""
+
+    def __init__(self, upid: str, exitstatus: str):
+        self.upid = upid
+        self.exitstatus = exitstatus
+        super().__init__(f"Proxmox task {upid} failed: {exitstatus}")
+
+
 class ProxmoxVersionInfo(BaseModel):
     release: str
     repoid: str
@@ -378,8 +387,10 @@ class AsyncProxmoxAPI:
     ) -> dict[str, Any]:
         """Poll until the task has finished; returns its final status record.
 
-        Does not raise on a failed task: callers that care read `exitstatus`
-        ("OK", "WARNINGS: n" or an error message) from the result.
+        Raises ProxmoxTaskError unless the task's exitstatus is OK (or
+        "WARNINGS: n"): a start whose QEMU exited or a clone that broke would
+        otherwise go unnoticed until a later step timed out waiting for the
+        VM state the task should have produced.
         """
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")
@@ -398,4 +409,7 @@ class AsyncProxmoxAPI:
 
         status = await _wait_for_task()
         assert status is not None  # tenacity raises RetryError rather than return None
+        exitstatus = str(status["exitstatus"])
+        if exitstatus != "OK" and not exitstatus.startswith("WARNINGS"):
+            raise ProxmoxTaskError(upid, exitstatus)
         return status

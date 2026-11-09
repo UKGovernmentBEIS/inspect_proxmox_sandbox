@@ -1,8 +1,9 @@
 import abc
+import asyncio
 import re
 import tarfile
 from logging import getLogger
-from typing import Collection, Dict, List, Literal, Set, Tuple
+from typing import Awaitable, Callable, Collection, Dict, List, Literal, Set, Tuple
 
 import httpx
 import tenacity
@@ -13,6 +14,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     POLL_WAIT,
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
+    ProxmoxTaskError,
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
@@ -25,6 +27,17 @@ _AGENT_TIMEOUT = 300.0
 # gap between pings only needs to be short.
 _POLL_MAX_WAIT = POLL_MAX_WAIT
 _POLL_WAIT = POLL_WAIT
+# /cluster/nextid does not reserve the ID it returns, so another process
+# (a second eval, a parallel test worker) can create that VM between our read
+# and our create. Each collision costs one round trip; a long run of them
+# means something is wrong, not unlucky.
+_VM_ID_ATTEMPTS = 5
+# A start that overlaps another process's SDN apply can fail: the apply
+# rewrites the running SDN config and restarts every zone's dnsmasq, and
+# pve-bridge reads both. That window is a few seconds long. Under load
+# pvedaemon also occasionally fails to fork the task at all ("got no worker
+# upid - start worker failed", HTTP 500); nothing has started then either.
+_START_ATTEMPTS = 3
 
 
 def vm_label(*, name: str, vm_id: int) -> str:
@@ -191,10 +204,14 @@ class QemuCommands(abc.ABC):
             upid = await self.async_proxmox.request(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
-            # The stop task ends when the QEMU process has gone; the status
-            # poll below then usually passes first time. It stays because
-            # wait_for_task does not check the task's exit status.
-            await self.async_proxmox.wait_for_task(upid=upid)
+            # The stop task ends when the QEMU process has gone, so the status
+            # poll below usually passes first time. A failed stop task (e.g.
+            # the VM does not exist) is left for the poll and the delete to
+            # report, since callers match on their errors.
+            try:
+                await self.async_proxmox.wait_for_task(upid=upid)
+            except ProxmoxTaskError as e:
+                self.logger.debug(f"stop task for VM {label} failed: {e}")
 
         # Only retry "still running". Stopping a missing VM still returns a
         # UPID, so a 500 here would otherwise be retried for 300s and come out
@@ -218,23 +235,11 @@ class QemuCommands(abc.ABC):
             upid = await self.async_proxmox.request(
                 "DELETE", f"/nodes/{self.node}/qemu/{vm_id}"
             )
+            # The destroy task completing is the evidence the VM is gone.
+            # Polling for the ID to disappear is not: /cluster/nextid reuses
+            # freed IDs, so another process can have a new VM under this ID
+            # within seconds.
             await self.async_proxmox.wait_for_task(upid=upid)
-
-        @tenacity.retry(
-            wait=POLL_WAIT,
-            stop=tenacity.stop_after_delay(30),
-        )
-        async def vm_deleted() -> None:
-            current = await self.async_proxmox.request(
-                method="GET",
-                path=f"/nodes/{self.node}/qemu/{vm_id}/status/current",
-                raise_errors=False,
-            )
-            if "vmid" in current:
-                raise ValueError(f"vm {label} still exists")
-
-        with trace_action(self.logger, self.TRACE_NAME, f"await VM {label} deleted"):
-            await vm_deleted()
 
     async def list_vms(self):
         with trace_action(self.logger, self.TRACE_NAME, "list all VMs"):
@@ -260,15 +265,71 @@ class QemuCommands(abc.ABC):
         # PVE returns this as a JSON string; tracking and list_vms use ints
         return int(await self.async_proxmox.request("GET", "/cluster/nextid"))
 
+    @staticmethod
+    def _is_vm_id_collision(exc: BaseException) -> bool:
+        # Both create (`unable to create VM 105 - VM 105 already exists on
+        # node 'pve'`) and clone (`unable to create VM 105: config file already
+        # exists`) reject a taken ID synchronously, before any task is forked.
+        return (
+            isinstance(exc, httpx.HTTPStatusError)
+            and exc.response.status_code == 500
+            and "already exists" in exc.response.text
+        )
+
+    async def _create_with_fresh_vm_id(
+        self, create: Callable[[int], Awaitable[None]]
+    ) -> int:
+        """Run `create` with a newly allocated VM ID, retrying on an ID collision.
+
+        `create` must not have made anything on the host when it raises the
+        collision: Proxmox rejects a taken ID before creating the config, so
+        there is nothing to clean up and the next attempt uses the next free ID.
+        """
+        for attempt in range(1, _VM_ID_ATTEMPTS + 1):
+            vm_id = await self.find_next_available_vm_id()
+            try:
+                await create(vm_id)
+            except httpx.HTTPStatusError as e:
+                if attempt < _VM_ID_ATTEMPTS and self._is_vm_id_collision(e):
+                    self.logger.info(
+                        f"VM ID {vm_id} was taken before we could use it "
+                        f"(attempt {attempt}/{_VM_ID_ATTEMPTS}); retrying"
+                    )
+                    continue
+                raise
+            return vm_id
+        raise AssertionError("unreachable")
+
     async def start(
         self,
         vm_id: int,
     ) -> None:
-        upid = await self.async_proxmox.request(
-            "POST",
-            f"/nodes/{self.node}/qemu/{vm_id}/status/start",
+        for attempt in range(1, _START_ATTEMPTS + 1):
+            try:
+                upid = await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{vm_id}/status/start",
+                )
+                await self.async_proxmox.wait_for_task(upid=upid)
+                return
+            except (ProxmoxTaskError, httpx.HTTPStatusError) as e:
+                if attempt == _START_ATTEMPTS or not self._is_retryable_start(e):
+                    raise
+                self.logger.warning(
+                    f"VM {vm_id} start failed ({e}); "
+                    f"retrying ({attempt}/{_START_ATTEMPTS})"
+                )
+                await asyncio.sleep(2 * attempt)
+
+    @staticmethod
+    def _is_retryable_start(exc: Exception) -> bool:
+        if isinstance(exc, ProxmoxTaskError):
+            return True
+        return (
+            isinstance(exc, httpx.HTTPStatusError)
+            and exc.response.status_code == 500
+            and "start worker failed" in exc.response.text
         )
-        await self.async_proxmox.wait_for_task(upid=upid)
 
     def _convert_sdn_vnet_aliases(
         self, sdn_vnet_aliases: VnetAliases
@@ -457,19 +518,22 @@ class QemuCommands(abc.ABC):
                         f"{self.image_storage}:0,import-from={LOCAL_STORAGE}:import/{vm_config.vm_source_config.ova.name}/{vmdk},format=qcow2,cache=writeback"
                     )
 
-                new_vm_template_id = await self.find_next_available_vm_id()
-                json_for_create["vmid"] = new_vm_template_id
+                async def create_from_ova(vm_id: int) -> None:
+                    with trace_action(
+                        self.logger,
+                        self.TRACE_NAME,
+                        f"create VM from OVA new_vm_template_id={vm_id}",
+                    ):
+                        upid = await self.async_proxmox.request(
+                            "POST",
+                            f"/nodes/{self.node}/qemu",
+                            json={**json_for_create, "vmid": vm_id},
+                        )
+                        await self.async_proxmox.wait_for_task(upid=upid)
 
-                with trace_action(
-                    self.logger,
-                    self.TRACE_NAME,
-                    f"create VM from OVA {new_vm_template_id=}",
-                ):
-                    upid = await self.async_proxmox.request(
-                        "POST", f"/nodes/{self.node}/qemu", json=json_for_create
-                    )
-
-                    await self.async_proxmox.wait_for_task(upid=upid)
+                new_vm_template_id = await self._create_with_fresh_vm_id(
+                    create_from_ova
+                )
 
                 await self.configure_network_and_tags(
                     vm_config=vm_config,
@@ -624,17 +688,19 @@ class QemuCommands(abc.ABC):
         preserve_tags: bool,
     ) -> int:
         """Clone, configure and start a VM; it is tracked for cleanup once cloned."""
-        new_vm_id = await self.find_next_available_vm_id()
 
-        with trace_action(
-            self.logger, self.TRACE_NAME, f"clone VM {vm_id_to_clone} -> {new_vm_id}"
-        ):
-            upid = await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{vm_id_to_clone}/clone",
-                json={"newid": new_vm_id, "full": 0, "name": vm_config.name},
-            )
-            await self.async_proxmox.wait_for_task(upid=upid)
+        async def clone(vm_id: int) -> None:
+            with trace_action(
+                self.logger, self.TRACE_NAME, f"clone VM {vm_id_to_clone} -> {vm_id}"
+            ):
+                upid = await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{vm_id_to_clone}/clone",
+                    json={"newid": vm_id, "full": 0, "name": vm_config.name},
+                )
+                await self.async_proxmox.wait_for_task(upid=upid)
+
+        new_vm_id = await self._create_with_fresh_vm_id(clone)
 
         # Registered before configure/start so a failure there still gets it
         # destroyed by task_cleanup.
