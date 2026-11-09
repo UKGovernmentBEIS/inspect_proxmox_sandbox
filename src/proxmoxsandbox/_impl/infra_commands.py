@@ -277,8 +277,14 @@ class InfraCommands(abc.ABC):
         ipam_mappings: Sequence[IpamMapping],
         vms: dict[int, VmConfig],
     ):
-        for vm_id, vm_config in vms.items():
-            await self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
+        # VM deletion has no shared ID counter to race on (unlike creation),
+        # so the stop/delete waits can overlap.
+        await asyncio.gather(
+            *(
+                self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
+                for vm_id, vm_config in vms.items()
+            )
+        )
         if sdn_zone_id is not None:
             gone = await self.sdn_commands.tear_down_sdn_zone_and_vnet(
                 sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings

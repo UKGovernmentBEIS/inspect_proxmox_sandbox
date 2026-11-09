@@ -697,8 +697,9 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             poll_timeout = _exec_untimed_wait()
 
         @tenacity.retry(
+            # multiplier, not min, sets the first gap (see POLL_WAIT)
             wait=tenacity.wait_exponential(
-                min=0.1, max=_EXEC_POLL_MAX_INTERVAL_SECONDS, exp_base=1.3
+                multiplier=0.1, max=_EXEC_POLL_MAX_INTERVAL_SECONDS, exp_base=1.3
             ),
             stop=tenacity.stop_after_delay(poll_timeout + _EXEC_POLL_GRACE_SECONDS),
             retry=tenacity.retry_if_result(lambda x: x is None),

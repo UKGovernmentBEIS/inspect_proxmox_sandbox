@@ -22,10 +22,18 @@ from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
+# Backoff for polling Proxmox until a task finishes or a VM changes state.
+# tenacity's wait_exponential starts at `multiplier` (its `min` is only a
+# floor), so the first gap here is 0.1 s: clone, config, start and stop tasks
+# usually finish within a few hundred ms. The cap keeps long waits (SDN
+# reloads, slow guests) polling every couple of seconds rather than drifting
+# to 30 s gaps.
+POLL_MAX_WAIT = 2.0
+POLL_WAIT = tenacity.wait_exponential(multiplier=0.1, max=POLL_MAX_WAIT, exp_base=1.3)
+
 # Error text is matched on short stable substrings and quoted in logs and
 # exceptions; cap both the HTTP reason and body independently.
 _MAX_ERROR_TEXT_CHARS = 8192
-_TASK_POLL_MAX_WAIT = 5.0
 
 
 def _bounded_error_text(text: str) -> str:
@@ -378,11 +386,7 @@ class AsyncProxmoxAPI:
         node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
 
         @tenacity.retry(
-            # Uncapped, the gap between polls grows to ~30% of the time already
-            # waited, so a 10 min disk import could sit finished for 3 min.
-            wait=tenacity.wait_exponential(
-                min=0.1, max=_TASK_POLL_MAX_WAIT, exp_base=1.3
-            ),
+            wait=POLL_WAIT,
             stop=tenacity.stop_after_delay(1200),
             retry=tenacity.retry_if_result(lambda x: x is None),
         )

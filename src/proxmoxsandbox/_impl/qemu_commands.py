@@ -9,6 +9,8 @@ import tenacity
 from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.async_proxmox import (
+    POLL_MAX_WAIT,
+    POLL_WAIT,
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
 )
@@ -19,10 +21,10 @@ from proxmoxsandbox.schema import VmConfig, check_nic_vlan
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
-# Uncapped, the backoff reaches 30-50 s gaps after ~70 s; slow (Windows) guests
-# paid that on top of their boot time.
-_POLL_MAX_WAIT = 5.0
-_POLL_WAIT = tenacity.wait_exponential(min=0.1, max=_POLL_MAX_WAIT, exp_base=1.3)
+# A ping to an agent that is not up yet blocks ~3 s inside Proxmox, so the
+# gap between pings only needs to be short.
+_POLL_MAX_WAIT = POLL_MAX_WAIT
+_POLL_WAIT = POLL_WAIT
 
 
 def vm_label(*, name: str, vm_id: int) -> str:
@@ -186,15 +188,19 @@ class QemuCommands(abc.ABC):
     async def destroy_vm(self, *, vm_id: int, name: str) -> None:
         label = vm_label(name=name, vm_id=vm_id)
         with trace_action(self.logger, self.TRACE_NAME, f"stop VM {label}"):
-            await self.async_proxmox.request(
+            upid = await self.async_proxmox.request(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
+            # The stop task ends when the QEMU process has gone; the status
+            # poll below then usually passes first time. It stays because
+            # wait_for_task does not check the task's exit status.
+            await self.async_proxmox.wait_for_task(upid=upid)
 
         # Only retry "still running". Stopping a missing VM still returns a
         # UPID, so a 500 here would otherwise be retried for 300s and come out
         # as a RetryError that hides the "does not exist" callers look for.
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            wait=POLL_WAIT,
             stop=tenacity.stop_after_delay(300),
             retry=tenacity.retry_if_exception_type(ValueError),
         )
@@ -209,12 +215,13 @@ class QemuCommands(abc.ABC):
             await is_not_running()
 
         with trace_action(self.logger, self.TRACE_NAME, f"delete VM {label}"):
-            await self.async_proxmox.request(
+            upid = await self.async_proxmox.request(
                 "DELETE", f"/nodes/{self.node}/qemu/{vm_id}"
             )
+            await self.async_proxmox.wait_for_task(upid=upid)
 
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            wait=POLL_WAIT,
             stop=tenacity.stop_after_delay(30),
         )
         async def vm_deleted() -> None:

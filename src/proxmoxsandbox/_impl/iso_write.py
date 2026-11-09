@@ -28,7 +28,7 @@ import tenacity
 from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
-from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.async_proxmox import POLL_WAIT, AsyncProxmoxAPI
 from proxmoxsandbox._impl.deadline import CLEANUP_WAIT_SECONDS, within_budget
 from proxmoxsandbox._impl.qga_responses import ExecStatus
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
@@ -275,7 +275,7 @@ rmdir {mount_q}
         )
 
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            wait=POLL_WAIT,
             stop=tenacity.stop_after_delay(120),
             retry=tenacity.retry_if_result(lambda r: r is None),
         )
