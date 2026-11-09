@@ -142,28 +142,14 @@ properties (guest isolation, network or host controls, VM defaults). Downstream 
 require a minimum provider version, so a fix can only be required once a version
 contains it.
 
-## The pve-qemu-kvm rebuild
+## Patched pve-qemu-kvm
 
-Both provisioning scripts embed the same `patch-pve-qemu.sh` (a test keeps the two
-copies identical). It builds Proxmox's stock `pve-qemu-kvm` at `STOCK_VERSION`
-(source commit `PVE_QEMU_BASE_COMMIT`), adds the QEMU commits in `QEMU_FIXES` as
-extra patches, installs the result as `PATCHED_VERSION` and holds it. It skips
-only when exactly `PATCHED_VERSION` is installed.
-
-The "Check pve-qemu-kvm rebuild against Proxmox" workflow runs daily. When
-`pve-test` or `pve-no-subscription` has a version other than `STOCK_VERSION`, it
-opens an issue listing which `QEMU_FIXES` that version carries, which says
-whether to rebase or drop the rebuild. Run `.github/scripts/check-pve-qemu.sh`
-to get the same report locally.
-
-To add a fix, append its QEMU commit to `QEMU_FIXES` and raise the `+aisiN`
-suffix of `PATCHED_VERSION`. To rebase, set `STOCK_VERSION` and
-`PVE_QEMU_BASE_COMMIT` (the `.deb`'s `/usr/share/doc/pve-qemu-kvm/SOURCE` names
-the commit), remove the fixes the new release carries, raise `+aisiN`, and build
-a host to check the patches still apply. Once a stock release carries every fix,
-delete the block from both scripts. Any change here changes the sandbox's
-security properties: bump the version (see "Versioning") and the host contract
-`C=aisiN`.
+Both provisioning scripts embed the same `patch-pve-qemu.sh`, which builds stock
+`STOCK_VERSION` plus the commits in `QEMU_FIXES`. On any change to it, raise the
+`+aisiN` in `PATCHED_VERSION`, bump the version (see "Versioning") and the host
+contract `C=aisiN`, and build a host to check the patches apply. A daily workflow
+(`.github/scripts/check-pve-qemu.sh`) opens an issue when Proxmox publishes a release
+the patch should move to.
 
 ## Design Notes
 
