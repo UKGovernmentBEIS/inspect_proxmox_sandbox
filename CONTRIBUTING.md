@@ -60,6 +60,21 @@ uv run pytest
 
 The tests require your Proxmox node to have at least 3 vCPUs available.
 
+### Built-in template rebuilds
+
+`test_built_in_vm.py` deletes the `ubuntu24.04` and `debian13` templates (and
+their source images) and rebuilds them, concurrently, from the upstream cloud
+images; the rest of the suite then uses the rebuilt templates. It does not
+rebuild `kali2025.4` by default, because installing `kali-linux-everything`
+takes 25+ minutes. To include it:
+
+```bash
+PROXMOX_TEST_REBUILD_KALI=1 uv run pytest tests/proxmoxsandboxtest/test_built_in_vm.py
+```
+
+A host with no Kali template still gets one built, by the same code, the first
+time a test asks for it (`test_proxmox_sandbox_environment_e2e.py::test_built_in`).
+
 ### Windows VM Tests
 
 By default, tests run against Linux VMs using the built-in `ubuntu24.04` image.
