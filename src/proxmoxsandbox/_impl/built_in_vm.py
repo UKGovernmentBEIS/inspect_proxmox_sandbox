@@ -519,57 +519,71 @@ runcmd:
         with trace_action(
             self.logger,
             TRACE_NAME,
-            f"create VM from import {next_available_vm_id=}",
+            f"build template {built_in=} {next_available_vm_id=}",
         ):
-            upid = await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu",
-                json={
-                    "vmid": next_available_vm_id,
-                    "name": name,
-                    "node": self.node,
-                    "cpu": "host",
-                    "memory": 8192,
-                    "cores": 2,
-                    "ostype": "l26",
-                    "scsi0": f"{self.image_storage}:0,"
-                    + f"import-from={LOCAL_STORAGE}:{import_source},"
-                    + "format=qcow2,cache=writeback",
-                    "scsihw": "virtio-scsi-single",
-                    "net0": f"virtio,bridge={STATIC_VNET_ID}",
-                    "serial0": "socket",
-                    "vga": "none",
-                    "tablet": 0,
-                    "start": False,
-                    "agent": "enabled=1",
-                },
-            )
-            await self.async_proxmox.wait_for_task(upid=upid)
-
-            if disk_gib is not None:
-                # cloud-init's growpart/resizefs pick this up on first boot
+            with trace_action(
+                self.logger,
+                TRACE_NAME,
+                f"create VM from import {next_available_vm_id=}",
+            ):
                 upid = await self.async_proxmox.request(
-                    "PUT",
-                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
-                    json={"disk": "scsi0", "size": f"{disk_gib}G"},
+                    "POST",
+                    f"/nodes/{self.node}/qemu",
+                    json={
+                        "vmid": next_available_vm_id,
+                        "name": name,
+                        "node": self.node,
+                        "cpu": "host",
+                        "memory": 8192,
+                        "cores": 2,
+                        "ostype": "l26",
+                        "scsi0": f"{self.image_storage}:0,"
+                        + f"import-from={LOCAL_STORAGE}:{import_source},"
+                        + "format=qcow2,cache=writeback",
+                        "scsihw": "virtio-scsi-single",
+                        "net0": f"virtio,bridge={STATIC_VNET_ID}",
+                        "serial0": "socket",
+                        "vga": "none",
+                        "tablet": 0,
+                        "start": False,
+                        "agent": "enabled=1",
+                    },
                 )
                 await self.async_proxmox.wait_for_task(upid=upid)
 
-            await self.create_and_upload_cloudinit_iso(
-                vm_id=next_available_vm_id,
-                user_data=user_data,
-            )
+            if disk_gib is not None:
+                # cloud-init's growpart/resizefs pick this up on first boot
+                with trace_action(
+                    self.logger, TRACE_NAME, f"resize disk {next_available_vm_id=}"
+                ):
+                    upid = await self.async_proxmox.request(
+                        "PUT",
+                        f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
+                        json={"disk": "scsi0", "size": f"{disk_gib}G"},
+                    )
+                    await self.async_proxmox.wait_for_task(upid=upid)
 
-            upid = await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
-                json={
-                    "tags": f"inspect,builtin-{built_in}",
-                },
-            )
-            await self.async_proxmox.wait_for_task(upid=upid)
+            with trace_action(
+                self.logger, TRACE_NAME, f"cloud-init ISO {next_available_vm_id=}"
+            ):
+                await self.create_and_upload_cloudinit_iso(
+                    vm_id=next_available_vm_id,
+                    user_data=user_data,
+                )
 
-            await self.qemu_commands.start(vm_id=next_available_vm_id)
+                upid = await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
+                    json={
+                        "tags": f"inspect,builtin-{built_in}",
+                    },
+                )
+                await self.async_proxmox.wait_for_task(upid=upid)
+
+            with trace_action(
+                self.logger, TRACE_NAME, f"start VM {next_available_vm_id=}"
+            ):
+                await self.qemu_commands.start(vm_id=next_available_vm_id)
             await self.qemu_commands.await_vm(
                 vm_id=next_available_vm_id, requires_guest_agent=True, name=name
             )
@@ -605,7 +619,10 @@ runcmd:
                 else:
                     return False
 
-            await wait_for_cloud_init()
+            with trace_action(
+                self.logger, TRACE_NAME, f"wait for cloud-init {next_available_vm_id=}"
+            ):
+                await wait_for_cloud_init()
 
             await self.async_proxmox.request(
                 "POST",
@@ -619,28 +636,31 @@ runcmd:
                 status_for_wait="stopped",
             )
 
-            upid = await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
-            )
-            # The config's template flag flips before the disks are renamed to
-            # base images; a clone in that window fails with "Linked clone
-            # feature is not supported", so wait for the task itself.
-            await self.async_proxmox.wait_for_task(upid=upid)
-
-            @tenacity.retry(
-                wait=POLL_WAIT,
-                stop=tenacity.stop_after_delay(VM_TIMEOUT),
-                retry=tenacity.retry_if_result(lambda x: x is False),
-            )
-            async def is_template() -> bool:
-                current_config = await self.async_proxmox.request(
-                    "GET",
-                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
+            with trace_action(
+                self.logger, TRACE_NAME, f"convert to template {next_available_vm_id=}"
+            ):
+                upid = await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
                 )
-                return current_config.get("template") == 1
+                # The config's template flag flips before the disks are renamed
+                # to base images; a clone in that window fails with "Linked
+                # clone feature is not supported", so wait for the task itself.
+                await self.async_proxmox.wait_for_task(upid=upid)
 
-            await is_template()
+                @tenacity.retry(
+                    wait=POLL_WAIT,
+                    stop=tenacity.stop_after_delay(VM_TIMEOUT),
+                    retry=tenacity.retry_if_result(lambda x: x is False),
+                )
+                async def is_template() -> bool:
+                    current_config = await self.async_proxmox.request(
+                        "GET",
+                        f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
+                    )
+                    return current_config.get("template") == 1
+
+                await is_template()
 
             @tenacity.retry(
                 wait=tenacity.wait_exponential(min=1, exp_base=1.3),
