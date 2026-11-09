@@ -12,6 +12,7 @@ import httpx
 import pytest
 from inspect_ai.util._sandbox.limits import override_max_exec_output_size
 
+from proxmoxsandbox import _proxmox_sandbox_environment as sandbox_environment
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._proxmox_sandbox_environment import (
@@ -367,16 +368,19 @@ async def test_exec_without_timeout_is_bounded(hostile_env, monkeypatch):
     ids=["stalls_exec_status"],
     indirect=True,
 )
-async def test_exec_with_timeout_is_bounded_when_agent_stalls(hostile_env):
+async def test_exec_with_timeout_is_bounded_when_agent_stalls(hostile_env, monkeypatch):
     """exec(timeout=5) must return in bounded time when every status poll hangs.
 
     PVE times each guest command out after 5s, and the provider retries those
-    as transient; without a deadline that is ~10 minutes per poll.
+    as transient; without a deadline that is ~10 minutes per poll. The agent
+    budget is shrunk from 180 s so the test shows the bound is the budget, not
+    the retries, without sitting through the full budget.
     """
+    monkeypatch.setattr(sandbox_environment, "_EXEC_AGENT_BUDGET_SECONDS", 30)
     started = time.monotonic()
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(hostile_env.exec(["true"], timeout=5), 300)
-    assert time.monotonic() - started < 240
+    assert time.monotonic() - started < 120
 
 
 @pytest.mark.parametrize(
