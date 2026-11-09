@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bundled EC2 provisioning (`userdata.sh`) waits before each reboot until the SSM agent has no commands running, instead of only for the GuardDuty agent. A reboot that cut short an SSM Distributor install (e.g. the Amazon Inspector SSM plugin) left the package recorded as installed on every host launched from an image of that host, though it never was. Such hosts now also drop the build host's SSM state, and any Distributor package not recorded as installed, the first time they boot.
 - Fix: `write_file` on Linux quotes the destination path in the script that reassembles a chunked write (contents over 40 KiB), so a path containing shell metacharacters (`$(...)`, `;`, quotes, spaces) is written as a file instead of being run as a command in the guest
 - `write_file` raises `IOError` when the in-guest script that reassembles a chunked write exits non-zero, instead of returning as if the write had succeeded
 - VLANs: `VnetConfig(vlan_aware=True)` and `VmNicConfig.vlan_tag`, which every NIC on a VLAN-aware VNet must set to an access VLAN (1-4094) or `"trunk"`. See "VLANs" in the README

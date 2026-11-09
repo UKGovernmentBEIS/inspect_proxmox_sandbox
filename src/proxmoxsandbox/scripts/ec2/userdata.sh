@@ -43,32 +43,30 @@ for _ in $(seq 120); do
 done
 echo "SSM still busy after 10 min: $busy"
 WAITSSM
-# Backstop for an image taken mid-install: on the first boot under a new instance ID,
-# drop other instances' SSM state and any Distributor package not recorded as
-# Installed (state 8), so the agent installs it afresh.
+# Backstop for an image taken mid-install: the first time a host boots as a new
+# instance, before the agent starts, drop the build host's SSM state and any
+# Distributor package not recorded as Installed (state 8), so the agent installs it
+# afresh. A unit, not a cloud.cfg.d bootcmd, so a user-data bootcmd can't replace it.
 cat > /usr/local/sbin/ssm-reset-inherited << 'SSMRESET'
 #!/bin/bash
 cd /var/lib/amazon/ssm || exit 0
-iid=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/instance-id) || exit 0
-[ "$(cat .owner 2>/dev/null)" = "$iid" ] && exit 0
+iid=$(cat /var/lib/cloud/data/instance-id) || exit 0
 for d in i-*; do [ "$d" = "$iid" ] || rm -rf "$d"; done
 for f in packages/*/installstate; do grep -q '"state":8,' "$f" || rm -rf "${f%/*}"; done
-echo "$iid" > .owner
 SSMRESET
 chmod 755 /usr/local/sbin/wait-ssm-idle /usr/local/sbin/ssm-reset-inherited
-/usr/local/sbin/ssm-reset-inherited
 cat > /etc/systemd/system/ssm-reset-inherited.service << 'UNIT'
 [Unit]
-Wants=network-online.target
-After=network-online.target
+After=cloud-init-local.service
 Before=amazon-ssm-agent.service
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/ssm-reset-inherited
+ExecStart=/usr/bin/cloud-init-per instance ssm-reset-inherited /usr/local/sbin/ssm-reset-inherited
 [Install]
 WantedBy=multi-user.target
 UNIT
 systemctl enable ssm-reset-inherited.service
+cloud-init-per instance ssm-reset-inherited true
 
 cat > /usr/local/bin/eic_authorized_keys << 'EICSCRIPT'
 #!/bin/bash
