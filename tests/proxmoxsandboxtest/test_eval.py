@@ -20,58 +20,6 @@ CURRENT_DIR = Path(__file__).parent
 pytestmark = pytest.mark.req_proxmox
 
 
-@task
-def task_for_test() -> Task:
-    return Task(
-        dataset=[
-            Sample(
-                input="sample text",
-                target="42",
-            ),
-        ],
-        solver=[
-            basic_agent(
-                tools=[bash()],
-                message_limit=20,
-            ),
-        ],
-        scorer=includes(),
-        sandbox="proxmox",
-    )
-
-
-def test_inspect_eval() -> None:
-    eval_logs = eval(
-        tasks=[task_for_test()],
-        model=get_model(
-            "mockllm/model",
-            custom_outputs=[
-                ModelOutput.for_tool_call(
-                    model="mockllm/model",
-                    tool_name="bash",
-                    tool_arguments={"command": "uname -a"},
-                ),
-                ModelOutput.for_tool_call(
-                    model="mockllm/model",
-                    tool_name="submit",
-                    tool_arguments={"answer": "42"},
-                ),
-            ],
-        ),
-        log_level="trace",
-        display="plain",
-        # sandbox_cleanup=False
-    )
-
-    assert len(eval_logs) == 1
-    assert eval_logs[0]
-    assert eval_logs[0].error is None
-    assert eval_logs[0].samples
-    sample = eval_logs[0].samples[0]
-    tool_calls = [x for x in sample.messages if x.role == "tool"]
-    assert "ubuntu" in tool_calls[0].text
-
-
 def _make_structured_payload(line_count: int) -> bytes:
     """Build a fixed-width known-structured text payload.
 
@@ -221,29 +169,41 @@ def _iso_write_health_scorer():
 
 
 @task
-def _iso_write_fast_path_task(line_count: int = 200_000) -> Task:
+def task_for_test(line_count: int = 200_000) -> Task:
+    """One sample, one sandbox: the ISO fast-path probe, then a tool-using agent.
+
+    The write runs first so the agent's bash tool call later proves the guest
+    agent is still healthy after the CD-ROM media swap.
+    """
     return Task(
-        dataset=[Sample(input="ignored", target="ok")],
-        solver=[_write_and_inspect(line_count)],
-        scorer=_iso_write_health_scorer(),
+        dataset=[Sample(input="sample text", target="42")],
+        solver=[
+            _write_and_inspect(line_count),
+            basic_agent(tools=[bash()], message_limit=20),
+        ],
+        scorer=[includes(), _iso_write_health_scorer()],
         sandbox="proxmox",
     )
 
 
-def test_iso_write_fast_path_via_eval() -> None:
-    """End-to-end eval that exercises and probes the ISO fast path.
+def test_inspect_eval() -> None:
+    """A full `inspect eval` against a Proxmox sandbox.
 
-    Goes beyond "did the bytes arrive" — captures guest dmesg/device
-    state before and after the write, so we'd notice kernel-level
-    trouble (AHCI errors, "Can't open blockdev", I/O errors) even on
-    runs where the fallback masked a real failure. Asserts:
+    Covers Inspect's sandbox lifecycle (task_init/sample_init/sample_cleanup
+    driven by eval()), a bash() tool call answered from the guest, and the ISO
+    write fast path probed in-guest. For the latter it goes beyond "did the
+    bytes arrive" — it captures guest dmesg/device state before and after the
+    write, so we'd notice kernel-level trouble (AHCI errors, "Can't open
+    blockdev", I/O errors) even on runs where the fallback masked a real
+    failure. Asserts:
 
-      1. In-guest sha256/wc all match the host's expectation.
-      2. The fast-path log line ('iso_write vm=...') appears — the
+      1. The bash tool's `uname -a` output came from the Ubuntu guest.
+      2. In-guest sha256/wc all match the host's expectation.
+      3. The fast-path log line ('iso_write vm=...') appears — the
          ISO path ran, not the chunked-QGA fallback.
-      3. The 'fast path disabled' warning does NOT appear — the path
+      4. The 'fast path disabled' warning does NOT appear — the path
          didn't silently fail and fall back.
-      4. (Soft) any red-flag lines added to dmesg get logged.
+      5. (Soft) any red-flag lines added to dmesg get logged.
     """
     # Attach a manual handler — pytest's caplog doesn't reliably catch
     # records emitted from inside Inspect's eval() pipeline.
@@ -266,8 +226,22 @@ def test_iso_write_fast_path_via_eval() -> None:
 
     try:
         eval_logs = eval(
-            tasks=[_iso_write_fast_path_task()],
-            model=get_model("mockllm/model"),
+            tasks=[task_for_test()],
+            model=get_model(
+                "mockllm/model",
+                custom_outputs=[
+                    ModelOutput.for_tool_call(
+                        model="mockllm/model",
+                        tool_name="bash",
+                        tool_arguments={"command": "uname -a"},
+                    ),
+                    ModelOutput.for_tool_call(
+                        model="mockllm/model",
+                        tool_name="submit",
+                        tool_arguments={"answer": "42"},
+                    ),
+                ],
+            ),
             log_level="info",
             display="plain",
         )
@@ -282,6 +256,9 @@ def test_iso_write_fast_path_via_eval() -> None:
     assert log.samples and len(log.samples) == 1
     sample = log.samples[0]
     assert sample.scores, "no scores recorded"
+
+    tool_calls = [x for x in sample.messages if x.role == "tool"]
+    assert "ubuntu" in tool_calls[0].text
 
     m = sample.metadata
     # Hard assertions: write_file's correctness contract.
