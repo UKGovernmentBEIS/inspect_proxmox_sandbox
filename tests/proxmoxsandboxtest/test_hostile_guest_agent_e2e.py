@@ -1,16 +1,18 @@
-"""Check provider behavior against a canned guest-agent replacement in a fresh VM."""
+"""Check provider behavior against a canned guest-agent replacement in a VM."""
 
 import asyncio
 import base64
+import itertools
 import json
 import os
 import time
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import httpx
 import pytest
 from inspect_ai.util._sandbox.limits import override_max_exec_output_size
 
+from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
@@ -24,10 +26,18 @@ pytestmark = pytest.mark.req_proxmox
 
 # Proxmox synchronizes and pings before each command; those replies stay valid
 # so each test reaches its intended command response.
+#
+# The shim also answers a real file-open/write/close for its own replies file
+# (handle CONTROL_HANDLE) and reloads the replies on close, so one VM serves
+# every case: the host rewrites the replies through the shim with a plain
+# agent/file-write. Cases must therefore not override those three commands.
 SHIM_SOURCE = r"""
-import json, os, sys, time
+import base64, json, os, sys, time
 
-replies = json.load(open(sys.argv[1]))
+replies_path = sys.argv[1]
+replies = json.load(open(replies_path))
+CONTROL_HANDLE = 7
+control = None
 fd = os.open("/dev/virtio-ports/org.qemu.guest_agent.0", os.O_RDWR)
 buf = b""
 
@@ -63,6 +73,18 @@ while True:
         elif cmd == "guest-sync":
             reply({"return": args.get("id")})
         elif cmd == "guest-ping":
+            reply({"return": {}})
+        elif cmd == "guest-file-open" and args.get("path") == replies_path:
+            control = open(replies_path, "wb")
+            reply({"return": CONTROL_HANDLE})
+        elif cmd == "guest-file-write" and args.get("handle") == CONTROL_HANDLE:
+            data = base64.b64decode(args["buf-b64"])
+            control.write(data)
+            reply({"return": {"count": len(data), "eof": False}})
+        elif cmd == "guest-file-close" and args.get("handle") == CONTROL_HANDLE:
+            control.close()
+            control = None
+            replies = json.load(open(replies_path))
             reply({"return": {}})
         elif cmd in replies:
             if replies[cmd] is not None:
@@ -103,11 +125,44 @@ HONEST_SHAPED: dict[str, Any] = {
 }
 
 
-async def _install_shim(env: ProxmoxSandboxEnvironment, overrides: dict) -> None:
+def _replies(overrides: dict, generation: int) -> dict:
+    """The shim's reply table; osinfo carries `generation` so a reload is observable."""
+    osinfo = {
+        "return": {
+            "id": SHIM_OSINFO_ID,
+            "name": SHIM_OSINFO_ID,
+            "version": str(generation),
+        }
+    }
+    return {**HONEST_SHAPED, **overrides, "guest-get-osinfo": osinfo}
+
+
+async def _await_shim_generation(
+    env: ProxmoxSandboxEnvironment, generation: int, deadline: float
+) -> None:
+    api = env.infra_commands.async_proxmox
+    node = env.infra_commands.node
+    while True:
+        try:
+            info = await api.request(
+                "GET", f"/nodes/{node}/qemu/{env.vm_id}/agent/get-osinfo"
+            )
+            result = info.get("result", {}) if isinstance(info, dict) else {}
+            if result.get("id") == SHIM_OSINFO_ID and result.get("version") == str(
+                generation
+            ):
+                return
+        except httpx.HTTPStatusError:
+            pass  # agent is being swapped, or a stalled call is timing out
+        if time.monotonic() > deadline:
+            raise AssertionError(f"qga shim generation {generation} did not come up")
+        await asyncio.sleep(1)
+
+
+async def _install_shim(env: ProxmoxSandboxEnvironment, generation: int) -> None:
     """Swap qemu-ga for the shim, using the honest agent to do it."""
-    replies = {**HONEST_SHAPED, **overrides}
     await env.write_file(SHIM_PATH, SHIM_SOURCE)
-    await env.write_file(REPLIES_PATH, json.dumps(replies))
+    await env.write_file(REPLIES_PATH, json.dumps(_replies({}, generation)))
     # Deferred so this exec (and its rm -f cleanup) finish over the honest
     # agent before it goes away.
     res = await env.exec(
@@ -122,29 +177,60 @@ async def _install_shim(env: ProxmoxSandboxEnvironment, overrides: dict) -> None
         timeout=30,
     )
     assert res.success, res
+    await _await_shim_generation(env, generation, time.monotonic() + 120)
+
+
+async def _reconfigure_shim(
+    env: ProxmoxSandboxEnvironment, overrides: dict, generation: int
+) -> None:
+    """Rewrite the running shim's replies through the shim's control handle."""
     api = env.infra_commands.async_proxmox
     node = env.infra_commands.node
+    content = json.dumps(_replies(overrides, generation)).encode()
     deadline = time.monotonic() + 120
     while True:
         try:
-            info = await api.request(
-                "GET", f"/nodes/{node}/qemu/{env.vm_id}/agent/get-osinfo"
+            await api.request(
+                "POST",
+                f"/nodes/{node}/qemu/{env.vm_id}/agent/file-write",
+                json={
+                    "file": REPLIES_PATH,
+                    "content": base64.b64encode(content).decode(),
+                    "encode": 0,
+                },
             )
-            if isinstance(info, dict) and info.get("result", {}).get("id") == (
-                SHIM_OSINFO_ID
-            ):
-                return
+            break
         except httpx.HTTPStatusError:
-            pass  # agent is being swapped
-        if time.monotonic() > deadline:
-            raise AssertionError("qga shim did not come up")
-        await asyncio.sleep(1)
+            # The previous case may have left Proxmox waiting on a reply the
+            # shim never sends; that call has to time out first.
+            if time.monotonic() > deadline:
+                raise
+            await asyncio.sleep(1)
+    await _await_shim_generation(env, generation, deadline)
 
 
-@pytest.fixture
-async def hostile_env(request):
-    """Fresh VM with the shim installed; parametrise indirectly with overrides."""
-    overrides = request.param
+@pytest.fixture(scope="module", autouse=True)
+def reset_global_pool_state():
+    # Shadows conftest's function-scoped autouse fixture: hostile_vm's
+    # sample_cleanup at module teardown needs the pool created by task_init,
+    # so we must not clear pool state between cases.
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
+    yield
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
+
+
+_shim_generations = itertools.count(1)
+
+
+@pytest.fixture(scope="module")
+async def hostile_vm() -> AsyncGenerator[ProxmoxSandboxEnvironment, None]:
+    """One VM running the shim, shared by every case in the module.
+
+    The shim executes nothing, so a case leaves no state behind in the guest;
+    only the reply table differs between cases, and hostile_env swaps that.
+    """
     task_name = "test_hostile_guest_agent_e2e"
     template = os.getenv("PROXMOX_LINUX_TEMPLATE_TAG")
     config = (
@@ -163,12 +249,21 @@ async def hostile_env(request):
     try:
         env = envs["default"]
         assert isinstance(env, ProxmoxSandboxEnvironment)
-        await _install_shim(env, overrides)
+        await _install_shim(env, generation=0)
         yield env
     finally:
         await ProxmoxSandboxEnvironment.sample_cleanup(
             task_name=task_name, config=config, environments=envs, interrupted=False
         )
+
+
+@pytest.fixture
+async def hostile_env(
+    request: pytest.FixtureRequest, hostile_vm: ProxmoxSandboxEnvironment
+) -> ProxmoxSandboxEnvironment:
+    """The shared shim VM, answering with this case's overrides."""
+    await _reconfigure_shim(hostile_vm, request.param, next(_shim_generations))
+    return hostile_vm
 
 
 @pytest.mark.parametrize("hostile_env", [{}], indirect=True)

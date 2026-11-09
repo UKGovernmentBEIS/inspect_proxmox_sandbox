@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Dict
 
 import pytest
-from inspect_ai.util import SandboxConnection, SandboxEnvironment
+from inspect_ai.util import SandboxEnvironment
 
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
@@ -338,13 +338,6 @@ async def test_ova() -> None:
             environments=envs_dict,
             interrupted=False,
         )
-
-
-async def test_connect(proxmox_sandbox_environment: ProxmoxSandboxEnvironment) -> None:
-    connection: SandboxConnection = await proxmox_sandbox_environment.connection()
-    # we can't really do much more than this assertion;
-    # sandbox.connection() needs to be tested manually
-    assert "open 'http" in connection.command
 
 
 async def test_task_cleanup_after_interrupted_sample(

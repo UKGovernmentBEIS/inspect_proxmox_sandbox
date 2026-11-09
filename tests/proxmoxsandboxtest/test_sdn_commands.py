@@ -1,21 +1,53 @@
+from typing import AsyncGenerator
+
 import pytest
 from pytest import raises
 
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, SdnCommands
 from proxmoxsandbox.schema import DhcpRange, SdnConfig, SubnetConfig, VnetConfig
 
-pytestmark = pytest.mark.req_proxmox
+# Only the tests that reach Proxmox are marked req_proxmox; config validation
+# is checked against an SdnCommands that has no host behind it.
 
 
-async def test_create_sdn_no_vnets(ids_start: str, sdn_commands: SdnCommands) -> None:
+@pytest.fixture
+def offline_sdn_commands() -> SdnCommands:
+    """SdnCommands with no host behind it.
+
+    create_sdn rejects these configs before its first request, so a request
+    shows up as a connection failure if that ever changes.
+    """
+    return SdnCommands(AsyncProxmoxAPI("proxmox.invalid:8006", "nobody", "nothing"))
+
+
+@pytest.fixture(scope="module")
+async def module_sdn_zones(
+    module_sdn_commands: SdnCommands,
+) -> AsyncGenerator[list[str], None]:
+    """Zones to tear down together at module end.
+
+    Each teardown is a PUT /cluster/sdn apply of several seconds; tests whose
+    teardown is not itself under test register their zone here instead.
+    """
+    zones: list[str] = []
+    yield zones
+    gone = await module_sdn_commands.tear_down_sdn_zones_and_vnets(zones, ())
+    assert gone == set(zones)
+
+
+async def test_create_sdn_no_vnets(
+    ids_start: str, offline_sdn_commands: SdnCommands
+) -> None:
     with raises(ValueError) as e_info:
-        await sdn_commands.create_sdn(
+        await offline_sdn_commands.create_sdn(
             proxmox_ids_start=ids_start,
             sdn_config=SdnConfig(vnet_configs=(), use_pve_ipam_dnsnmasq=False),
         )
     assert "No vnets provided" in str(e_info.value)
 
 
+@pytest.mark.req_proxmox
 async def test_create_sdn_with_vnets(ids_start: str, sdn_commands: SdnCommands) -> None:
     sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(
         proxmox_ids_start=ids_start,
@@ -33,11 +65,14 @@ async def test_create_sdn_with_vnets(ids_start: str, sdn_commands: SdnCommands) 
     assert vnet_aliases[0][1] is None
     assert vnet_aliases[1][1] == "test_create_sdn_with_vnets"
 
+    # Torn down here, not via module_sdn_zones: test_create_sdn_none expects
+    # no aliased vnets on the host.
     await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
+@pytest.mark.req_proxmox
 async def test_create_sdn_with_vnets_and_subnet(
-    ids_start: str, sdn_commands: SdnCommands
+    ids_start: str, sdn_commands: SdnCommands, module_sdn_zones: list[str]
 ) -> None:
     sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(
         proxmox_ids_start=ids_start,
@@ -61,15 +96,15 @@ async def test_create_sdn_with_vnets_and_subnet(
     assert sdn_zone_id is not None
     assert len(vnet_aliases) == 1
 
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
+    module_sdn_zones.append(sdn_zone_id)
 
 
 async def test_inconsistent_ipam_setting_true_but_no_dhcp(
     ids_start: str,
-    sdn_commands: SdnCommands,
+    offline_sdn_commands: SdnCommands,
 ) -> None:
     with raises(ValueError) as e_info:
-        await sdn_commands.create_sdn(
+        await offline_sdn_commands.create_sdn(
             proxmox_ids_start=ids_start,
             sdn_config=SdnConfig(
                 vnet_configs=(VnetConfig(),),
@@ -81,10 +116,10 @@ async def test_inconsistent_ipam_setting_true_but_no_dhcp(
 
 async def test_inconsistent_ipam_setting_false_but_dhcp(
     ids_start: str,
-    sdn_commands: SdnCommands,
+    offline_sdn_commands: SdnCommands,
 ) -> None:
     with raises(ValueError) as e_info:
-        await sdn_commands.create_sdn(
+        await offline_sdn_commands.create_sdn(
             proxmox_ids_start=ids_start,
             sdn_config=SdnConfig(
                 vnet_configs=(
@@ -109,10 +144,10 @@ async def test_inconsistent_ipam_setting_false_but_dhcp(
 
 async def test_create_sdn_overlapping(
     ids_start: str,
-    sdn_commands: SdnCommands,
+    offline_sdn_commands: SdnCommands,
 ) -> None:
     with raises(ValueError) as e_info:
-        await sdn_commands.create_sdn(
+        await offline_sdn_commands.create_sdn(
             proxmox_ids_start=ids_start,
             sdn_config=SdnConfig(
                 vnet_configs=(
@@ -147,7 +182,10 @@ async def test_create_sdn_overlapping(
     assert "Duplicate IP ranges" in str(e_info.value)
 
 
-async def test_create_sdn_auto(ids_start: str, sdn_commands: SdnCommands) -> None:
+@pytest.mark.req_proxmox
+async def test_create_sdn_auto(
+    ids_start: str, sdn_commands: SdnCommands, module_sdn_zones: list[str]
+) -> None:
     sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(
         proxmox_ids_start=ids_start, sdn_config="auto"
     )
@@ -155,9 +193,10 @@ async def test_create_sdn_auto(ids_start: str, sdn_commands: SdnCommands) -> Non
     assert sdn_zone_id is not None
     assert len(vnet_aliases) == 1
 
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
+    module_sdn_zones.append(sdn_zone_id)
 
 
+@pytest.mark.req_proxmox
 async def test_create_sdn_none(ids_start: str, sdn_commands: SdnCommands) -> None:
     sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(
         proxmox_ids_start=ids_start, sdn_config=None
@@ -167,6 +206,7 @@ async def test_create_sdn_none(ids_start: str, sdn_commands: SdnCommands) -> Non
     assert vnet_aliases == []
 
 
+@pytest.mark.req_proxmox
 async def test_create_dhcp_mapping(ids_start: str, sdn_commands: SdnCommands) -> None:
     """Test creating a DHCP static mapping."""
     from ipaddress import ip_address, ip_network

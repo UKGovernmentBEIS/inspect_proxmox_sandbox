@@ -4,11 +4,25 @@ from pathlib import Path
 import httpx
 import pytest
 import tenacity
-from inspect_ai.util import OutputLimitExceededError
+from inspect_ai.util import OutputLimitExceededError, SandboxConnection
 
+from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
 
 pytestmark = pytest.mark.req_proxmox
+
+
+@pytest.fixture(scope="module", autouse=True)
+def reset_global_pool_state():
+    # Shadows conftest's function-scoped autouse fixture: the shared
+    # proxmox_sandbox_environment's sample_cleanup at module teardown needs
+    # the pool created by task_init, so we must not clear pool state between
+    # tests.
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
+    yield
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
 
 
 async def test_exec_timeout_with_sigterm_handler_no_retryerror(
@@ -251,3 +265,10 @@ async def test_exec_self_kill_degrades_gracefully(
 
     after = await proxmox_sandbox_environment.exec(["echo", "alive"])
     assert after.success and after.stdout.strip() == "alive"
+
+
+async def test_connect(proxmox_sandbox_environment: ProxmoxSandboxEnvironment) -> None:
+    connection: SandboxConnection = await proxmox_sandbox_environment.connection()
+    # we can't really do much more than this assertion;
+    # sandbox.connection() needs to be tested manually
+    assert "open 'http" in connection.command

@@ -129,14 +129,34 @@ async def ids_start() -> str:
     return ids_start
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
+async def module_sdn_commands() -> SdnCommands:
+    """SdnCommands for module-scoped SDN fixtures.
+
+    Built separately from the function-scoped `infra_commands` family so it
+    is never registered in InfraCommands._instances, which the autouse reset
+    clears around every test.
+    """
+    instance_config = _load_single_instance_from_env()
+    return SdnCommands(AsyncProxmoxAPI.from_instance_config(instance_config))
+
+
+@pytest.fixture(scope="module")
 async def auto_sdn_vnet_aliases(
-    ids_start: str, sdn_commands: SdnCommands
+    module_sdn_commands: SdnCommands,
 ) -> AsyncGenerator[VnetAliases, None]:
-    sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(ids_start, "auto")
+    """One "auto" SDN zone shared by every test in the module.
+
+    Each SDN create and teardown is a PUT /cluster/sdn apply of several
+    seconds, so the zone is created once per module. Tests only read the
+    vnet aliases and attach NICs to the vnet; nothing they do alters the zone.
+    Any VM a test puts on the vnet must be destroyed before the module ends.
+    """
+    ids_start = f"cts{random.randint(100, 999)}"
+    sdn_zone_id, vnet_aliases = await module_sdn_commands.create_sdn(ids_start, "auto")
     assert sdn_zone_id is not None
     yield vnet_aliases
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
+    await module_sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
 def _get_os_params() -> list[str]:
@@ -168,15 +188,28 @@ def _get_os_config(os_name: str) -> ProxmoxSandboxEnvironmentConfig:
     raise ValueError(f"Unknown OS: {os_name}")
 
 
-@pytest.fixture(params=_get_os_params())
+@pytest.fixture(scope="module", params=_get_os_params())
 def sandbox_env_config_by_os(request) -> ProxmoxSandboxEnvironmentConfig:
     return _get_os_config(request.param)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="module")
 async def proxmox_sandbox_environment(
     sandbox_env_config_by_os: ProxmoxSandboxEnvironmentConfig,
 ) -> AsyncGenerator[ProxmoxSandboxEnvironment, None]:
+    """One default sandbox (per OS) shared by every test in the module.
+
+    A fresh sandbox is a VM clone, boot and guest-agent wait plus two SDN
+    applies, so it is set up once per module rather than per test. Tests
+    share the guest, so each must write to paths no other test uses; a QGA
+    exec costs ~3 s, so they do not pay to remove them.
+
+    A module using this must shadow `reset_global_pool_state` with a
+    module-scoped one (see test_proxmox_sandbox_agent_commands.py): the
+    sample_cleanup at module teardown needs the pool that task_init created.
+    It must also not call sample_init itself, whose pre-clean would sweep the
+    shared VM as a leftover.
+    """
     task_name = "from_conftest"
     await ProxmoxSandboxEnvironment.task_init(task_name=task_name, config=None)
     envs_dict = await ProxmoxSandboxEnvironment.sample_init(
