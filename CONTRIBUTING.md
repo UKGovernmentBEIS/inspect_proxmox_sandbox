@@ -70,7 +70,7 @@ host pays for anything else.
 
 Tests marked `slow` are skipped by default. They are the ones whose cost is
 dominated by the Kali built-in: installing `kali-linux-everything` takes 25+
-minutes, and the resulting 64 GiB guest is slow to boot. Run them when you
+minutes, and the resulting 64 GiB guest is the slowest to clone and boot. Run them when you
 touch the built-in image code or before a release:
 
 ```bash

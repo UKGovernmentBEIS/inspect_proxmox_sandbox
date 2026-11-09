@@ -6,6 +6,7 @@
 - A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
 - VM creation retries when another process takes the VM ID between `/cluster/nextid` and the create; VM start retries a failed start task
 - `exec` reads its stdout, stderr and exit code concurrently and does not ping the guest agent before each file read any more, about 1 s less per command
+- Built-in templates named by one config are built concurrently, and they boot with a quiet console (`quiet` on the kernel command line)
 - Fix: a guest file read that Proxmox itself rejects as a malformed guest-agent reply (qemu-server 9.2.11+: "agent file-read: got invalid count" or "mismatch between returned count and buffer length") raises `GuestAgentTamperError` straight away, instead of being retried as a transient error for up to 10 minutes and then raising `httpx.HTTPStatusError`
 
 ## 0.12.0
