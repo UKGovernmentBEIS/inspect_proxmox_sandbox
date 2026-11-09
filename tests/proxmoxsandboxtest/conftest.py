@@ -36,6 +36,26 @@ from proxmoxsandbox.schema import (
 WINDOWS_TEMPLATE_TAG = os.getenv("PROXMOX_WINDOWS_TEMPLATE_TAG")
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--runslow",
+        action="store_true",
+        default=False,
+        help="also run tests marked `slow` (e.g. the Kali built-in)",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if config.getoption("--runslow"):
+        return
+    skip_slow = pytest.mark.skip(reason="marked slow; pass --runslow to run")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)
+
+
 @pytest.fixture(autouse=True)
 def reset_global_pool_state():
     """Reset process-global pool and instance registries around every test.

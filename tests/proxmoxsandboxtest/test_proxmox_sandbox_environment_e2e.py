@@ -92,6 +92,11 @@ async def test_static_ip() -> None:
 
 
 async def test_built_in() -> None:
+    """Ubuntu and Debian built-ins boot as UEFI sandboxes with two NICs each.
+
+    Kali is covered by test_built_in_kali: its template bake and boot are an
+    order of magnitude slower than the other two, so it is opt-in.
+    """
     envs_dict: Dict[str, SandboxEnvironment] = {}
     sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
         sdn_config=SdnConfig(
@@ -150,18 +155,6 @@ async def test_built_in() -> None:
                 is_sandbox=True,
                 uefi_boot=True,
             ),
-            VmConfig(
-                name="kali",
-                vm_source_config=VmSourceConfig(built_in="kali2025.4"),
-                nics=(
-                    VmNicConfig(vnet_alias="vnet80"),
-                    VmNicConfig(vnet_alias="vnet81"),
-                ),
-                ram_mb=2347,
-                vcpus=1,
-                is_sandbox=True,
-                uefi_boot=True,
-            ),
         ),
     )
     try:
@@ -171,7 +164,6 @@ async def test_built_in() -> None:
         await check_os(sandbox, "Ubuntu")
 
         await check_os(envs_dict["debian"], "Debian")
-        await check_os(envs_dict["kali"], "Kali")
 
         ipa_result = await sandbox.exec(
             [
@@ -207,6 +199,39 @@ async def test_built_in() -> None:
         curl_result = await sandbox.exec(["curl", "--fail", "http://amazon.com"])
         assert curl_result.success, f"Failed to run curl: {curl_result=}"
 
+    finally:
+        await ProxmoxSandboxEnvironment.sample_cleanup(
+            task_name="unused",
+            config=sandbox_env_config,
+            environments=envs_dict,
+            interrupted=False,
+        )
+
+
+@pytest.mark.slow
+async def test_built_in_kali() -> None:
+    """The Kali built-in bakes, clones and boots as a UEFI sandbox."""
+    envs_dict: Dict[str, SandboxEnvironment] = {}
+    sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
+        vms_config=(
+            VmConfig(
+                name="kali",
+                vm_source_config=VmSourceConfig(built_in="kali2025.4"),
+                ram_mb=2347,
+                vcpus=1,
+                is_sandbox=True,
+                uefi_boot=True,
+            ),
+        ),
+    )
+    try:
+        _, envs_dict = await setup_sandbox("kali_smoketask", sandbox_env_config)
+        sandbox = envs_dict["default"]
+        await check_os(sandbox, "Kali")
+
+        # The Kali image has no efibootmgr; the kernel exposes the firmware type.
+        uefi_result = await sandbox.exec(["test", "-d", "/sys/firmware/efi"])
+        assert uefi_result.success, f"Kali did not boot under UEFI: {uefi_result=}"
     finally:
         await ProxmoxSandboxEnvironment.sample_cleanup(
             task_name="unused",
