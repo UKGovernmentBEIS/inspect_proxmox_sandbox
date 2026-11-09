@@ -28,10 +28,7 @@ dpkg -i /tmp/amazon-ssm-agent.deb
 systemctl enable amazon-ssm-agent
 systemctl start amazon-ssm-agent
 
-# A reboot that cuts short an SSM Distributor install (e.g. GuardDuty, Inspector)
-# either wedges dpkg or, on the next boot, is taken for an install that rebooted on
-# purpose and recorded as done when it never was. So wait for SSM to go quiet
-# (sessions excepted) before every reboot.
+# Rebooting mid SSM Distributor install wedges dpkg or records it as installed (#189)
 cat > /usr/local/sbin/wait-ssm-idle << 'WAITSSM'
 #!/bin/bash
 quiet=0
@@ -43,10 +40,8 @@ for _ in $(seq 120); do
 done
 echo "SSM still busy after 10 min: $busy"
 WAITSSM
-# Backstop for an image taken mid-install: the first time a host boots as a new
-# instance, before the agent starts, drop the build host's SSM state and any
-# Distributor package not recorded as Installed (state 8), so the agent installs it
-# afresh. A unit, not a cloud.cfg.d bootcmd, so a user-data bootcmd can't replace it.
+# First boot as a new instance: drop inherited SSM state and packages not Installed (8).
+# A unit because a user-data bootcmd would replace a cloud.cfg.d one.
 cat > /usr/local/sbin/ssm-reset-inherited << 'SSMRESET'
 #!/bin/bash
 cd /var/lib/amazon/ssm || exit 0
