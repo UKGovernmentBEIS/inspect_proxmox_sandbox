@@ -11,14 +11,16 @@
 # the guest can reach the internet — and so do the port-53 and DNS probes, because without the
 # lockdown marker the node firewall accepts port 53 and the SDN resolver recurses.
 #
-# Usage: check-guest-isolation.sh [--host-addr IP] [--unreachable IP[:PORT]] ...
-# Both flags repeat; there is no list syntax.
+# Usage: check-guest-isolation.sh [--host-addr IP] [--unreachable IP[:PORT]] [--vpc-resolver IP] ...
+# The flags repeat; there is no list syntax.
 #   --host-addr    an address the Proxmox host holds: its management address, the NAT bridge,
 #                  or an SDN gateway. Each gets the full host-service port battery.
 #   --unreachable  an address that must not be reachable — a VPC interface endpoint, a host
 #                  across a peering link. Port defaults to 443; an IPv6 literal needs
 #                  brackets to carry one, as in [fd00::1]:8443.
-# Both are site-specific and never hardcoded here; check-host-isolation.sh prints the line
+#   --vpc-resolver an address the VPC resolver answers on besides 169.254.169.253: the VPC
+#                  CIDR's base plus two. Gets the same TCP and UDP port-53 probes.
+# All are site-specific and never hardcoded here; check-host-isolation.sh prints the line
 # to paste.
 set -uo pipefail
 # Error text from the probes is matched against English, so pin the messages.
@@ -26,19 +28,21 @@ export LC_ALL=C
 
 host_addrs=()
 unreachable=()
+vpc_resolvers=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --host-addr | --unreachable)
+        --host-addr | --unreachable | --vpc-resolver)
             [ $# -ge 2 ] || { echo "$1 needs an address" >&2; exit 2; }
             case "$1" in
                 --host-addr) host_addrs+=("$2") ;;
+                --vpc-resolver) vpc_resolvers+=("$2") ;;
                 *) unreachable+=("$2") ;;
             esac
             shift 2
             ;;
         *)
-            echo "unknown argument: $1 (every argument takes a --host-addr or" \
-                "--unreachable flag)" >&2
+            echo "unknown argument: $1 (every argument takes a --host-addr," \
+                "--unreachable or --vpc-resolver flag)" >&2
             exit 2
             ;;
     esac
@@ -129,8 +133,9 @@ echo "# cloud metadata and link-local"
 # Resolver addresses: https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html
 want blocked "IMDS 169.254.169.254:80" "$(tcp_state 169.254.169.254 80)"
 want blocked "IMDS [fd00:ec2::254]:80" "$(tcp_state fd00:ec2::254 80)"
-# The resolver also answers on a VPC-specific address, which the guest has no way to derive.
-for resolver_addr in 169.254.169.253 fd00:ec2::253; do
+# The resolver also answers on a VPC-specific address, which the guest has no way to derive,
+# so it comes in as --vpc-resolver.
+for resolver_addr in 169.254.169.253 fd00:ec2::253 "${vpc_resolvers[@]}"; do
     label="VPC resolver $resolver_addr"
     [[ $resolver_addr == *:* ]] && label="VPC resolver [$resolver_addr]"
     want blocked "$label:53" "$(tcp_state "$resolver_addr" 53)"

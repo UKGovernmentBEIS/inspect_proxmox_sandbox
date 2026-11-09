@@ -233,8 +233,9 @@ PASS/FAIL/SKIP line per check and a trailing summary, and exit nonzero if anythi
 On an ordinary host they fail by design — that host is not isolated.
 
 `check-host-isolation.sh` runs as root *on the host* and checks the **mechanism**: the
-units from `userdata.sh` are installed, enabled and last ran OK, the rules they install are
-loaded, the Proxmox firewall accepts only what the AMI configured, the egress lockdown is
+units from `userdata.sh` are installed, enabled and last ran OK, the root password was
+regenerated for this instance-id and is the one in `/root/root-password`, the rules they
+install are loaded, the Proxmox firewall accepts only what the AMI configured, the egress lockdown is
 armed, and the VPC-level items above hold as seen from the host (endpoints private, DNS
 firewall NXDOMAINs, no route out). It also verifies the launch-time IMDS settings: a GET
 with no session token gets 401 (`HttpTokens=required`), and a token PUT's reply segments
@@ -249,7 +250,8 @@ experimental/run-script-on-host.sh <instance-id> check-host-isolation.sh
 
 `check-guest-isolation.sh` runs *inside a Linux guest* and checks the **effect**: what the
 guest can reach. Run the host script first; it ends by printing the guest command line to
-paste, with the host's addresses and the VPC endpoints filled in.
+paste, with the host's addresses, the VPC endpoints and the VPC resolver's CIDR-based
+addresses filled in.
 
 ## Other scripts
 

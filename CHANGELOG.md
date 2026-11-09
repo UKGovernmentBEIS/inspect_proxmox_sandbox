@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `check-host-isolation.sh` checks that the root password was regenerated for this instance and matches `/root/root-password`, and passes the VPC resolver's CIDR-based addresses to `check-guest-isolation.sh`, which probes them with the new `--vpc-resolver` flag
 - EC2 scripts: `check-host-isolation.sh` and `check-guest-isolation.sh` move out of `experimental/` and are supported scripts; the host script now verifies the launch-time IMDS settings (`HttpTokens=required`, `HttpPutResponseHopLimit=1`) from the host
 
 ## 0.12.0
