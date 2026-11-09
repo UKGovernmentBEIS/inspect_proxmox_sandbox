@@ -7,13 +7,11 @@ concurrently: each is mostly waiting on the guest's apt run, so the module
 costs about as much as its slowest build.
 
 Kali's kali-linux-everything install dwarfs the other two, so it is only
-rebuilt here when PROXMOX_TEST_REBUILD_KALI is set. Without it, a host that
-has no Kali template still builds one (through the same code) the first time
-test_proxmox_sandbox_environment_e2e.py::test_built_in asks for it.
+rebuilt here under --runslow. Without it, a host that has no Kali template
+still builds one (through the same code) the first time a test asks for it.
 """
 
 import asyncio
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,9 +23,10 @@ from proxmoxsandbox.schema import _load_single_instance_from_env
 
 pytestmark = pytest.mark.req_proxmox
 
-REBUILD_KALI = bool(os.getenv("PROXMOX_TEST_REBUILD_KALI"))
 
-BUILT_INS = ["ubuntu24.04", "debian13"] + (["kali2025.4"] if REBUILD_KALI else [])
+def _built_ins(config: pytest.Config) -> list[str]:
+    fast = ["ubuntu24.04", "debian13"]
+    return fast + (["kali2025.4"] if config.getoption("--runslow") else [])
 
 
 @dataclass(frozen=True)
@@ -38,7 +37,8 @@ class Rebuild:
 
 
 @pytest.fixture(scope="module")
-async def rebuild() -> Rebuild:
+async def rebuild(request: pytest.FixtureRequest) -> Rebuild:
+    built_ins = _built_ins(request.config)
     instance_config = _load_single_instance_from_env()
     async_proxmox = AsyncProxmoxAPI.from_instance_config(instance_config)
     infra = InfraCommands.build(
@@ -46,18 +46,18 @@ async def rebuild() -> Rebuild:
     )
     built_in_vm = infra.built_in_vm
 
-    for built_in in BUILT_INS:
+    for built_in in built_ins:
         await built_in_vm.clear_builtin(built_in)
     known_builtins = await built_in_vm.known_builtins()
-    assert not set(BUILT_INS) & set(known_builtins)
+    assert not set(built_ins) & set(known_builtins)
 
     existing_vm_ids = {vm["vmid"] for vm in await infra.qemu_commands.list_vms()}
 
-    await asyncio.gather(*(built_in_vm.ensure_exists(name) for name in BUILT_INS))
+    await asyncio.gather(*(built_in_vm.ensure_exists(name) for name in built_ins))
 
     all_vms = await infra.qemu_commands.list_vms()
     return Rebuild(
-        built_ins=BUILT_INS,
+        built_ins=built_ins,
         new_vms=[vm for vm in all_vms if vm["vmid"] not in existing_vm_ids],
     )
 
@@ -74,9 +74,7 @@ async def test_debian(rebuild: Rebuild) -> None:
     _check_template(rebuild, "debian13")
 
 
-@pytest.mark.skipif(
-    not REBUILD_KALI, reason="set PROXMOX_TEST_REBUILD_KALI to rebuild Kali (~25 min)"
-)
+@pytest.mark.slow
 async def test_kali(rebuild: Rebuild) -> None:
     _check_template(rebuild, "kali2025.4")
 
