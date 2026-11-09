@@ -4,7 +4,7 @@
 
 ## 0.12.1
 
-- Fix: the bundled provisioning scripts skipped the `pve-qemu-kvm` rebuild whenever the stock package's version sorted at or above the rebuild's, so hosts provisioned once `pve-qemu-kvm` 11.1.x reached the `pve-no-subscription` repository (after 2026-11-02; hosts built on 2026-11-02 still got 11.0.3-4 and the rebuild) run stock QEMU, unheld, without the AHCI fixes or the IDE bounds check. The rebuild now runs unless that exact version is installed, and is rebased onto stock 11.1.3-1 plus the two AHCI fixes and the IDE PIO transfer window bounds check on migration load (upstream QEMU `d7f16bad8f`, `a2fbf1785b`, `1332990194`), building `11.1.3-1+aisi1`. New hosts carry contract `aisi4`. To check a host built earlier, run `dpkg-query -W pve-qemu-kvm`: anything other than a `+aisi` version is stock. To fix it, rerun the rebuild with the `patch-pve-qemu.sh` block from the provisioning script (it installs the package and holds it), or rebuild the host. Running VMs keep the old QEMU binary until they are stopped and started again.
+- Security: the bundled provisioning scripts build `pve-qemu-kvm` `11.1.3-1+aisi4`: stock 11.1.3-1 plus six upstream QEMU AHCI/IDE fixes that are not in any QEMU stable release or Proxmox package, among them draining each port on AHCI controller teardown (`5bdc12fed592`, upstream issue 4069), which fixes a use-after-free a guest can trigger by ejecting the controller during a CD-ROM read. The rebuild now runs unless that exact version is installed; it used to be skipped whenever stock sorted at or above it, so hosts built since stock 11.1.x reached `pve-no-subscription` run stock QEMU. New hosts carry contract `aisi4`. Rebuild existing hosts.
 
 ## 0.12.0
 

@@ -148,26 +148,16 @@ Both provisioning scripts embed the same `patch-pve-qemu.sh` (a test keeps the t
 copies identical). It builds Proxmox's stock `pve-qemu-kvm` at `STOCK_VERSION`
 (source commit `PVE_QEMU_BASE_COMMIT`), adds the QEMU commits in `QEMU_FIXES` as
 extra patches, installs the result as `PATCHED_VERSION` and holds it. It skips
-only when exactly `PATCHED_VERSION` is installed, so a newer stock build that
-lacks the fixes is replaced rather than kept.
+only when exactly `PATCHED_VERSION` is installed.
 
-The "Check pve-qemu-kvm rebuild against Proxmox" workflow runs daily. When
-`pve-test` or `pve-no-subscription` has a version other than `STOCK_VERSION`, it
-opens an issue listing which `QEMU_FIXES` that version carries. Run
-`.github/scripts/check-pve-qemu.sh` to get the same report locally. Then either:
-
-- rebase: set `STOCK_VERSION` and `PVE_QEMU_BASE_COMMIT` from the issue, remove
-  the fixes it marks as present, and build a host to check the patches still apply; or
-- drop the rebuild, once every fix is present and the version is in
-  `pve-no-subscription`: delete the block from both scripts. Hosts built
-  earlier need `apt-mark unhold pve-qemu-kvm` and
-  `apt-get install --allow-downgrades pve-qemu-kvm=<stock version>`.
-
-To add a fix, append its QEMU commit to `QEMU_FIXES`; if `STOCK_VERSION` stays
-the same, raise the `+aisiN` suffix of `PATCHED_VERSION`. Any change here changes
-the sandbox's security properties: bump the version (see "Versioning") and the
-host contract `C=aisiN`. Running VMs keep the old QEMU binary until they are
-stopped and started again.
+To add a fix, append its QEMU commit to `QEMU_FIXES` and raise the `+aisiN`
+suffix of `PATCHED_VERSION`. To rebase, set `STOCK_VERSION` and
+`PVE_QEMU_BASE_COMMIT` (the `.deb`'s `/usr/share/doc/pve-qemu-kvm/SOURCE` names
+the commit), remove the fixes the new release carries, raise `+aisiN`, and build
+a host to check the patches still apply. Once a stock release carries every fix,
+delete the block from both scripts. Any change here changes the sandbox's
+security properties: bump the version (see "Versioning") and the host contract
+`C=aisiN`.
 
 ## Design Notes
 

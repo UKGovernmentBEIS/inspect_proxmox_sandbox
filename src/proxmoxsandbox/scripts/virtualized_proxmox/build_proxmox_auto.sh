@@ -192,13 +192,10 @@ set -euxo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-# The stock build this rebuild is based on, and the upstream QEMU commits it
-# adds. .github/scripts/check-pve-qemu.sh reads these three; it reports when
-# Proxmox publishes another build, and which QEMU_FIXES that build lacks.
 STOCK_VERSION="11.1.3-1"
 PVE_QEMU_BASE_COMMIT="ae7733cb6e3abe422144906f92a3b00387402672"
-QEMU_FIXES="d7f16bad8f0263ca01c1da61d5d69ee79fca837f a2fbf1785b7a464d61c0f60c4ad0a86d82925e5d 1332990194b53f5ca6a4fe7ac93cf4ad6eecfa9c"
-PATCHED_VERSION="${STOCK_VERSION}+aisi1"
+QEMU_FIXES="d7f16bad8f0263ca01c1da61d5d69ee79fca837f a2fbf1785b7a464d61c0f60c4ad0a86d82925e5d 1332990194b53f5ca6a4fe7ac93cf4ad6eecfa9c 2713717148f538577e5f2a5d4d9dc272f7a8dc4b 795af987ce4cbac260582189cff2394a27eff7cb 5bdc12fed592a1673f64ca1e8243046632f83a26"
+PATCHED_VERSION="${STOCK_VERSION}+aisi4"
 BUILD_DIR="/root/pve-qemu-build"
 
 # Skip only on an exact match. A version comparison would skip whenever stock
@@ -207,10 +204,6 @@ INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
 if [ "$INSTALLED_VERSION" = "$PATCHED_VERSION" ]; then
     echo "pve-qemu-kvm $PATCHED_VERSION already installed, nothing to do"
     exit 0
-fi
-if dpkg --compare-versions "$INSTALLED_VERSION" gt "$PATCHED_VERSION"; then
-    echo "WARNING: replacing newer pve-qemu-kvm $INSTALLED_VERSION with $PATCHED_VERSION;" \
-        "rebase the rebuild onto it" >&2
 fi
 
 apt-get -o DPkg::Lock::Timeout=600 update
@@ -231,6 +224,9 @@ for c in $QEMU_FIXES; do
     echo "extra/aisi-$c.patch" >> debian/patches/series
 done
 rm -rf /root/qemu-fixes
+# 5bdc12fed592's context has master's ahci_reset_port(..., IDEResetKind kind); 11.1.3 lacks the argument
+sed -i 's/^ static void ahci_reset_port(AHCIState \*s, int port, IDEResetKind kind)$/ static void ahci_reset_port(AHCIState *s, int port)/' \
+    debian/patches/extra/aisi-5bdc12fed592a1673f64ca1e8243046632f83a26.patch
 
 mv debian/changelog debian/changelog.orig
 {
