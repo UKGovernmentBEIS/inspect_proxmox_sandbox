@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import os
 import subprocess
 import tempfile
@@ -47,6 +48,13 @@ KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
 
 STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
 
+# built-in name -> filename of its source image in local storage
+SOURCE_IMAGE_NAMES = {
+    "ubuntu24.04": Path(urlparse(UBUNTU_URL).path).name,
+    "debian13": Path(urlparse(DEBIAN_13_URL).path).name,
+    "kali2025.4": KALI_DISK_RENAMED,
+}
+
 
 async def download_to_file(url: str, destination: Path) -> None:
     async with httpx.AsyncClient(
@@ -89,6 +97,9 @@ class BuiltInVM(abc.ABC):
         self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
+        # Guards the unreserved-ID VM create and the static SDN create when
+        # several built-ins are built concurrently on one host.
+        self._create_lock = asyncio.Lock()
         self.cache_dir = platformdirs.user_cache_path(
             appname="inspect_proxmox_sandbox", ensure_exists=True
         )
@@ -275,32 +286,25 @@ runcmd:
 
     # for test code only
     async def clear_builtins(self) -> None:
-        existing_vms = await self.known_builtins()
-        for built_in, vm_id in existing_vms.items():
+        for built_in in SOURCE_IMAGE_NAMES:
+            await self.clear_builtin(built_in)
+
+    # for test code only
+    async def clear_builtin(self, built_in: str) -> None:
+        """Remove one built-in's template and its uploaded source image."""
+        source_image_name = SOURCE_IMAGE_NAMES[built_in]
+        vm_id = (await self.known_builtins()).get(built_in)
+        if vm_id is not None:
             await self.qemu_commands.destroy_vm(vm_id=vm_id, name=f"inspect-{built_in}")
 
-        existing_content = await self.read_all_content()
-
-        storage_names_to_delete = [
-            Path(urlparse(UBUNTU_URL).path).name,
-            Path(urlparse(DEBIAN_13_URL).path).name,
-            KALI_DISK_RENAMED,
-        ]
-
-        deletion_upids: list[str] = []
-        for content in existing_content:
-            if content["volid"]:
-                for storage_name in storage_names_to_delete:
-                    if content["volid"].endswith(f"/{storage_name}"):
-                        upid = await self.async_proxmox.request(
-                            "DELETE",
-                            f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
-                        )
-                        if upid is not None:
-                            deletion_upids.append(upid)
-
-        for upid in deletion_upids:
-            await self.async_proxmox.wait_for_task(upid=upid)
+        for content in await self.read_all_content():
+            if content["volid"] and content["volid"].endswith(f"/{source_image_name}"):
+                upid = await self.async_proxmox.request(
+                    "DELETE",
+                    f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
+                )
+                if upid is not None:
+                    await self.async_proxmox.wait_for_task(upid=upid)
 
     async def known_builtins(self) -> Dict[str, int]:
         existing_vms = await self.qemu_commands.list_vms()
@@ -341,11 +345,8 @@ runcmd:
         if built_in_name in await self.known_builtins():
             return
 
-        next_available_vm_id = await self.qemu_commands.find_next_available_vm_id()
-
         if built_in_name == "ubuntu24.04":
             await self.ensure_exists_from_ova(
-                next_available_vm_id=next_available_vm_id,
                 built_in=built_in_name,
                 source_image_source_url=UBUNTU_URL,
                 ova_vmdk_filename=UBUNTU_VMDK_FILENAME,
@@ -353,14 +354,12 @@ runcmd:
         elif built_in_name == "debian13":
             await self.ensure_version(9)
             await self.ensure_exists_from_qcow2(
-                next_available_vm_id=next_available_vm_id,
                 built_in=built_in_name,
                 source_image_source_url=DEBIAN_13_URL,
             )
         elif built_in_name == "kali2025.4":
             await self.ensure_version(9)
             await self.ensure_exists_from_xz(
-                next_available_vm_id=next_available_vm_id,
                 built_in=built_in_name,
                 source_image_source_url=KALI_DOWNLOAD_URL,
                 disk_renamed=KALI_DISK_RENAMED,
@@ -373,7 +372,6 @@ runcmd:
 
     async def ensure_exists_from_ova(
         self,
-        next_available_vm_id: int,
         built_in: str,
         source_image_source_url: str,
         ova_vmdk_filename: str,
@@ -387,14 +385,12 @@ runcmd:
         await self.ensure_static_sdn_exists()
 
         await self.startup_vm(
-            next_available_vm_id,
             built_in,
             f"import/{source_image_name}/{ova_vmdk_filename}",
         )
 
     async def ensure_exists_from_qcow2(
         self,
-        next_available_vm_id: int,
         built_in: str,
         source_image_source_url: str,
     ) -> None:
@@ -406,13 +402,10 @@ runcmd:
 
         await self.ensure_static_sdn_exists()
 
-        await self.startup_vm(
-            next_available_vm_id, built_in, f"import/{source_image_name}"
-        )
+        await self.startup_vm(built_in, f"import/{source_image_name}")
 
     async def ensure_exists_from_xz(
         self,
-        next_available_vm_id: int,
         built_in: str,
         source_image_source_url: str,
         disk_renamed: str,
@@ -439,10 +432,15 @@ runcmd:
                 download_path = Path(self.cache_dir) / download_filename
                 await download_to_file(source_image_source_url, download_path)
 
-                # shell out to tar -xf with subprocess:
-                subprocess.check_call(
-                    ["tar", "-xf", download_path, "-C", self.cache_dir]
+                # tar -xf as a subprocess; awaited rather than check_call so
+                # the event loop (other builds' polls) keeps running meanwhile
+                tar = await asyncio.create_subprocess_exec(
+                    "tar", "-xf", str(download_path), "-C", str(self.cache_dir)
                 )
+                if await tar.wait() != 0:
+                    raise subprocess.CalledProcessError(
+                        tar.returncode or -1, ["tar", "-xf", str(download_path)]
+                    )
 
                 # rename the output disk.raw to something better:
 
@@ -463,7 +461,6 @@ runcmd:
         await self.ensure_static_sdn_exists()
 
         await self.startup_vm(
-            next_available_vm_id,
             built_in,
             f"import/{disk_renamed}",
             user_data=user_data,
@@ -485,7 +482,7 @@ runcmd:
                 TRACE_NAME,
                 f"upload source image {built_in=} ",
             ):
-                await self.async_proxmox.request(
+                upid = await self.async_proxmox.request(
                     "POST",
                     f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/download-url",
                     json={
@@ -494,20 +491,10 @@ runcmd:
                         "url": source_image_source_url,
                     },
                 )
-
-                @tenacity.retry(
-                    wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                    stop=tenacity.stop_after_delay(VM_TIMEOUT),
-                )
-                async def upload_complete() -> None:
-                    if not await self.content_exists(source_image_name):
-                        raise ValueError("image upload not yet complete")
-
-                await upload_complete()
+                await self.async_proxmox.wait_for_task(upid=upid)
 
     async def startup_vm(
         self,
-        next_available_vm_id: int,
         built_in: str,
         import_source: str,
         user_data: str = DEFAULT_USER_DATA,
@@ -516,16 +503,15 @@ runcmd:
     ) -> None:
         name = f"inspect-{built_in}"
 
-        with trace_action(
-            self.logger,
-            TRACE_NAME,
-            f"build template {built_in=} {next_available_vm_id=}",
-        ):
-            with trace_action(
-                self.logger,
-                TRACE_NAME,
-                f"create VM from import {next_available_vm_id=}",
-            ):
+        with trace_action(self.logger, TRACE_NAME, f"build template {built_in=}"):
+            # /cluster/nextid reserves nothing, so concurrent builds hold the
+            # lock from reading it until the create call has returned (PVE
+            # writes the VM config, with a "create" lock, before the import
+            # work starts, so the ID is taken from then on).
+            async with self._create_lock:
+                next_available_vm_id = (
+                    await self.qemu_commands.find_next_available_vm_id()
+                )
                 upid = await self.async_proxmox.request(
                     "POST",
                     f"/nodes/{self.node}/qemu",
@@ -549,6 +535,11 @@ runcmd:
                         "agent": "enabled=1",
                     },
                 )
+            with trace_action(
+                self.logger,
+                TRACE_NAME,
+                f"create VM from import {built_in=} {next_available_vm_id=}",
+            ):
                 await self.async_proxmox.wait_for_task(upid=upid)
 
             if disk_gib is not None:
@@ -676,14 +667,17 @@ runcmd:
             await remove_cdrom()
 
     async def ensure_static_sdn_exists(self):
-        existing_zones = await self.sdn_commands.list_sdn_zones()
+        async with self._create_lock:
+            existing_zones = await self.sdn_commands.list_sdn_zones()
 
-        exists_already = any(
-            zone_info["zone"] and zone_info["zone"] == f"{STATIC_SDN_START}z"
-            for zone_info in existing_zones
-        )
+            exists_already = any(
+                zone_info["zone"] and zone_info["zone"] == f"{STATIC_SDN_START}z"
+                for zone_info in existing_zones
+            )
 
-        if not exists_already:
+            if exists_already:
+                return
+
             await self.sdn_commands.create_sdn(
                 proxmox_ids_start=STATIC_SDN_START,
                 sdn_config=SdnConfig(

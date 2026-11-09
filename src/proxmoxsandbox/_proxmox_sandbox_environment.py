@@ -317,8 +317,14 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         for vm_config in config.vms_config:
             if vm_config.vm_source_config.built_in is not None:
                 built_in_names.add(vm_config.vm_source_config.built_in)
-        for built_in_name in built_in_names:
-            await infra_commands.built_in_vm.ensure_exists(built_in_name)
+        # Each build is a VM boot plus an apt run, mostly waiting on the guest,
+        # so building the set concurrently costs about one build's time.
+        await asyncio.gather(
+            *(
+                infra_commands.built_in_vm.ensure_exists(built_in_name)
+                for built_in_name in sorted(built_in_names)
+            )
+        )
 
     @classmethod
     @override
