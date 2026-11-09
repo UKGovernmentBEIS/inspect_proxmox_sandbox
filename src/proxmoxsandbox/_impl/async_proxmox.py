@@ -2,7 +2,7 @@ import re
 import time
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import tenacity
@@ -25,6 +25,7 @@ ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 # Error text is matched on short stable substrings and quoted in logs and
 # exceptions; cap both the HTTP reason and body independently.
 _MAX_ERROR_TEXT_CHARS = 8192
+_TASK_POLL_MAX_WAIT = 5.0
 
 
 def _bounded_error_text(text: str) -> str:
@@ -366,18 +367,31 @@ class AsyncProxmoxAPI:
         self,
         *,
         upid: str,
-    ) -> None:
+    ) -> dict[str, Any]:
+        """Poll until the task has finished; returns its final status record.
+
+        Does not raise on a failed task: callers that care read `exitstatus`
+        ("OK", "WARNINGS: n" or an error message) from the result.
+        """
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")
         node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
 
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            # Uncapped, the gap between polls grows to ~30% of the time already
+            # waited, so a 10 min disk import could sit finished for 3 min.
+            wait=tenacity.wait_exponential(
+                min=0.1, max=_TASK_POLL_MAX_WAIT, exp_base=1.3
+            ),
             stop=tenacity.stop_after_delay(1200),
-            retry=tenacity.retry_if_result(lambda x: x is False),
+            retry=tenacity.retry_if_result(lambda x: x is None),
         )
-        async def _wait_for_task() -> bool:
+        async def _wait_for_task() -> dict[str, Any] | None:
             response = await self.request("GET", f"/nodes/{node}/tasks/{upid}/status")
-            return response.get("exitstatus") is not None
+            if response.get("exitstatus") is None:
+                return None
+            return response
 
-        await _wait_for_task()
+        status = await _wait_for_task()
+        assert status is not None  # tenacity raises RetryError rather than return None
+        return status
