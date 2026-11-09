@@ -805,11 +805,23 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     stderr=exec_status.err_data,
                 )
             else:
-                # TODO: consider reading all files at once?
-                stdout = await self._read_exec_output(f"{tmp_start}script.stdout")
-                stderr = await self._read_exec_output(f"{tmp_start}script.stderr")
+                # The wrapper wrote all three files before exiting, so read
+                # them concurrently; QGA round trips dominate exec latency.
+                stdout_read, stderr_read, returncode_read = await asyncio.gather(
+                    self._read_exec_output(f"{tmp_start}script.stdout"),
+                    self._read_exec_output(f"{tmp_start}script.stderr"),
+                    self._read_return_code(tmp_start),
+                    return_exceptions=True,
+                )
+                if isinstance(stdout_read, BaseException):
+                    raise stdout_read
+                if isinstance(stderr_read, BaseException):
+                    raise stderr_read
+                stdout, stderr = stdout_read, stderr_read
                 try:
-                    returncode = await self._read_return_code(tmp_start)
+                    if isinstance(returncode_read, BaseException):
+                        raise returncode_read
+                    returncode = returncode_read
                     exec_response = ExecResult(
                         success=returncode == 0,
                         returncode=returncode,
