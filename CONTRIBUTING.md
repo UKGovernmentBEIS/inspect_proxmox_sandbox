@@ -150,6 +150,12 @@ copies identical). It builds Proxmox's stock `pve-qemu-kvm` at `STOCK_VERSION`
 extra patches, installs the result as `PATCHED_VERSION` and holds it. It skips
 only when exactly `PATCHED_VERSION` is installed.
 
+The "Check pve-qemu-kvm rebuild against Proxmox" workflow runs daily. When
+`pve-test` or `pve-no-subscription` has a version other than `STOCK_VERSION`, it
+opens an issue listing which `QEMU_FIXES` that version carries, which says
+whether to rebase or drop the rebuild. Run `.github/scripts/check-pve-qemu.sh`
+to get the same report locally.
+
 To add a fix, append its QEMU commit to `QEMU_FIXES` and raise the `+aisiN`
 suffix of `PATCHED_VERSION`. To rebase, set `STOCK_VERSION` and
 `PVE_QEMU_BASE_COMMIT` (the `.deb`'s `/usr/share/doc/pve-qemu-kvm/SOURCE` names
