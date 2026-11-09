@@ -4,7 +4,7 @@
 
 ## 0.12.1
 
-- Security: the bundled provisioning scripts build `pve-qemu-kvm` `11.1.3-1+aisi4`: stock 11.1.3-1 plus six upstream QEMU AHCI/IDE fixes that are not in any QEMU stable release or Proxmox package, among them draining each port on AHCI controller teardown (`5bdc12fed592`, upstream issue 4069), which fixes a use-after-free a guest can trigger by ejecting the controller during a CD-ROM read. The rebuild now runs unless that exact version is installed; it used to be skipped whenever stock sorted at or above it, so hosts built since stock 11.1.x reached `pve-no-subscription` run stock QEMU. New hosts carry contract `aisi4`. Rebuild existing hosts.
+- Security: the bundled provisioning scripts build `pve-qemu-kvm` `11.1.3-1+aisi4`, adding six upstream AHCI/IDE fixes to stock 11.1.3-1, among them a use-after-free when a guest ejects the AHCI controller during a read (QEMU issue 4069). Hosts built since stock 11.1.x reached `pve-no-subscription` skipped the patch and run stock QEMU. Rebuild existing hosts; new ones carry contract `aisi4`.
 
 ## 0.12.0
 
