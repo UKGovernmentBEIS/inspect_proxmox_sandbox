@@ -4,7 +4,7 @@ from typing import Dict
 import pytest
 from inspect_ai.util import SandboxEnvironment
 
-from proxmoxsandbox._impl.built_in_vm import BuiltInVM
+from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
@@ -344,17 +344,14 @@ async def test_ova() -> None:
 async def test_cleanup_after_interrupted_sample(
     qemu_commands: QemuCommands,
     sdn_commands: SdnCommands,
-    built_in_vm: BuiltInVM,
-    ids_start: str,
 ) -> None:
     """Ctrl-C leaves resources for task_cleanup; the CLI sweeps untracked leftovers.
 
     One booted sandbox covers both: sample_cleanup(interrupted=True) must leave
     everything in place, task_cleanup must then destroy exactly what was tracked,
     and cli_cleanup afterwards must find nothing (templates must survive the
-    sweep). The CLI's own destroy path is then exercised on a
-    zone plus a non-sandbox VM made outside sample_init, so nothing tracks them
-    and no guest-agent boot is waited for.
+    sweep). The CLI's own destroy path is then exercised on a second sandbox
+    that nothing tracks any more.
     """
     sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
         vms_config=(
@@ -415,18 +412,15 @@ async def test_cleanup_after_interrupted_sample(
     assert await vm_ids() == {vm["vmid"] for vm in existing_vms}
     assert await zones() == existing_zones
 
-    # Untracked leftovers (as after a crash of the process that made them):
-    # the CLI discovers them by tag and zone naming, not from memory.
-    sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(ids_start, "auto")
-    await qemu_commands.create_and_start_vm(
-        sdn_vnet_aliases=vnet_aliases,
-        vm_config=VmConfig(
-            vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
-            name="test-cli-cleanup",
-            is_sandbox=False,
-        ),
-        built_in_vm_ids=await built_in_vm.known_builtins(),
-    )
+    # Leftovers of a process that has gone: a whole sandbox as sample_init
+    # builds it, booted so its guest holds a DHCP lease. Dropping the pool and
+    # instance registries forgets what this process tracked, so the CLI has to
+    # find the VM by tag and the zone by name.
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
+    await setup_sandbox("tcc", sandbox_env_config)
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()
     assert len(await vm_ids()) == len(existing_vms) + 1
     assert len(await zones()) == len(existing_zones) + 1
 
