@@ -70,6 +70,7 @@ class Scenario(BaseModel):
     timeout: int | None = 5
     untimed_wait: str | None = None
     http_error: str | None = None
+    http_error_status: int = 400
     input: str | None = None
     command: list[str] = ["echo", "hello"]
     iso_uploads: bool = False
@@ -199,7 +200,9 @@ class GuestReplies:
                 )
         elif route == "file-read":
             if scenario.http_error is not None:
-                return httpx.Response(400, text=scenario.http_error)
+                return httpx.Response(
+                    scenario.http_error_status, text=scenario.http_error
+                )
             if scenario.operation == "read_file":
                 await self.apply_fault("read")
                 data = scenario.file_reply

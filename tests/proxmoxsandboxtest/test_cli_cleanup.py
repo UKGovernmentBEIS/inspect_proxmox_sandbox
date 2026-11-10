@@ -187,7 +187,7 @@ async def test_cli_cleanup_empty_config():
 
 @pytest.mark.asyncio
 async def test_cli_cleanup_handles_cleanup_error():
-    """Test that cli_cleanup propagates exception when cleanup fails."""
+    """A failing instance is reported after every other instance is swept."""
     config_data = {
         "instances": [
             {
@@ -240,13 +240,10 @@ async def test_cli_cleanup_handles_cleanup_error():
             patch("proxmoxsandbox._proxmox_sandbox_environment.AsyncProxmoxAPI"),
             patch.object(InfraCommands, "build", side_effect=create_failing_infra),
         ):
-            # Should raise the exception from the first cleanup
-            with pytest.raises(Exception, match="Cleanup failed on first instance"):
+            with pytest.raises(RuntimeError, match=r"\['server-1'\]"):
                 await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
 
-            # Only the first cleanup should have been attempted
-            # (Current implementation doesn't continue on error)
-            assert cleanup_calls == [1]
+            assert cleanup_calls == [1, 2], "second instance still swept"
 
     finally:
         os.unlink(temp_path)

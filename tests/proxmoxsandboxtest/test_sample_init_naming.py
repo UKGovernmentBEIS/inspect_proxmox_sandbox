@@ -38,6 +38,7 @@ async def _sample_init(
 ) -> dict:
     infra = MagicMock()
     infra.sdn_commands.read_all_vnets = AsyncMock(return_value=[])
+    infra.qemu_commands.list_vms = AsyncMock(return_value=[])
     infra.built_in_vm.ensure_exists = AsyncMock()
     infra.async_proxmox = AsyncMock()
     infra.node = "pve1"

@@ -184,6 +184,11 @@ check "forwarded IPv6 dropped: ip6tables FORWARD -j DROP" has_rule6 FORWARD "-A 
 check "IPv6 off for interfaces created after boot (SDN vnets): net.ipv6.conf.default.disable_ipv6" \
     sysctl_is net.ipv6.conf.default.disable_ipv6 1
 check "IPv4 forwarding on (guests reach their gateway): net.ipv4.ip_forward" sysctl_is net.ipv4.ip_forward 1
+# pve-firewall ships all.rp_filter=2; the kernel applies max(all, <iface>), and it is
+# what drops packets from guests on a vnet with no host address (e.g. VLAN-aware)
+# before the host routes them anywhere.
+rp_filter_on() { case "$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null)" in 1 | 2) ;; *) return 1 ;; esac; }
+check "no forwarding from address-less vnets: net.ipv4.conf.all.rp_filter is 1 or 2" rp_filter_on
 # pve-network bakes the SNAT --to-source literal into interfaces.d/sdn when the SDN config is
 # applied (SimplePlugin.pm, get_local_route_ip), so an image taken from such a host SNATs
 # guests to the build instance's address. With the ENI source/dest check off, that is traffic

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.12.2
+
+- Security: guest commands on Linux and Windows use private staging and a persistent per-execution launch claim. Unconfirmed completion raises `GuestExecIncompleteError` and retains recovery files; guest HTTP responses are bounded before parsing.
+- Fix: a guest file read that Proxmox itself rejects as a malformed guest-agent reply (qemu-server 9.2.11+: "agent file-read: got invalid count" or "mismatch between returned count and buffer length") raises `GuestAgentTamperError` straight away, instead of being retried as a transient error for up to 10 minutes and then raising `httpx.HTTPStatusError`
+
+## 0.12.1
+
+- Security: the bundled provisioning scripts build `pve-qemu-kvm` `11.1.3-1+aisi4`, adding six upstream AHCI/IDE fixes to stock 11.1.3-1, among them a use-after-free when a guest ejects the AHCI controller during a read ([QEMU issue][qemu-4069]). Hosts built since stock 11.1.x reached `pve-no-subscription` skipped the patch and run stock QEMU. Rebuild existing hosts; new ones carry contract `aisi4`.
+
+[qemu-4069]: https://gitlab.com/qemu-project/qemu/-/work_items/4069
+
+## 0.12.0
+
+- Fix: `write_file` on Linux quotes the destination path in the script that reassembles a chunked write (contents over 40 KiB), so a path containing shell metacharacters (`$(...)`, `;`, quotes, spaces) is written as a file instead of being run as a command in the guest
+- `write_file` raises `IOError` when the in-guest script that reassembles a chunked write exits non-zero, instead of returning as if the write had succeeded
+- VLANs: `VnetConfig(vlan_aware=True)` and `VmNicConfig.vlan_tag`, which every NIC on a VLAN-aware VNet must set to an access VLAN (1-4094) or `"trunk"`. See "VLANs" in the README
 - Bundled provisioning scripts `apt-mark hold` the rebuilt `pve-qemu-kvm` and the patched `libpve-network-perl`. Hosts built earlier need `apt-mark hold pve-qemu-kvm libpve-network-perl` applied by hand.
 - VMs with `is_sandbox=False` are no longer given to Inspect as sandboxes, fixing a bug where Inspect since 0.3.274 tries to `exec()` on every sandbox, causing ~7-minute timeouts for each VM without a guest agent during sample init.
 - `kali2025.4` built-in now installs `kali-linux-everything`; delete any existing `builtin-kali2025.4` template to pick this up
@@ -32,6 +48,9 @@
 - Fix: `exec()` no longer aborts the sample when a command kills its own command-runner wrapper process
 - Fix: "500 QEMU guest agent is not running" is retried for much longer (~45s -> 8m25s)
 - VMs boot concurrently rather than one after another
+- Fix: with `--no-sandbox-cleanup`, a failed `sample_init` now leaves its partial VMs and SDN up for inspection instead of destroying them
+- Fix: a `sample_init` whose pre-clean of the instance fails now errors instead of creating VMs next to the leftovers; SDN zones are tracked from before creation and stay tracked (and are retried) when a teardown fails
+- `VnetConfig.alias` is now validated against Proxmox's rule (up to 256 of `()-_.`, word and space characters); previously any string passed and Proxmox rejected it mid-`sample_init`
 
 ## 0.11.0 - 2026-06-01
 

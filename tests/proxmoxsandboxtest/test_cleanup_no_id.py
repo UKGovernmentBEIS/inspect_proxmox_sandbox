@@ -12,7 +12,7 @@ import pytest
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
-from proxmoxsandbox._impl.sdn_commands import is_ephemeral_zone
+from proxmoxsandbox._impl.sdn_commands import SdnTeardownError, is_ephemeral_zone
 
 
 def _make_infra(
@@ -50,7 +50,9 @@ def _make_infra(
     infra.sdn_commands.list_sdn_zones = AsyncMock(return_value=zones or [])
     infra.sdn_commands.read_all_vnets = AsyncMock(return_value=vnets or [])
     infra.sdn_commands.read_all_ipam_mappings = AsyncMock(return_value=ipam or [])
-    infra.sdn_commands.tear_down_sdn_zones_and_vnets = AsyncMock()
+    infra.sdn_commands.tear_down_sdn_zones_and_vnets = AsyncMock(
+        side_effect=lambda zones, _ipam: set(zones)
+    )
 
     # Bind the real cleanup_no_id and find_all_zones onto the mock so the
     # mocked collaborators get exercised.
@@ -236,3 +238,34 @@ async def test_cleanup_mixed_case_protects_pre_existing_only():
     zones_passed = args[0]
     assert zones_passed == {"tlo123z"}
     assert "user_zone" not in zones_passed
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_tracking_zones_that_survive_teardown():
+    """A zone whose deletion fails stays tracked and the failure is raised.
+
+    cleanup_no_id runs as the next sample's pre-clean, so forgetting a zone
+    here would mean task_cleanup never retries it. The VM, which was
+    destroyed, and the zone that did go are forgotten as normal.
+    """
+    infra = _make_infra(
+        vms=[{"vmid": 100, "name": "vm", "tags": "inspect", "template": 0}],
+        vm_configs={100: {"net0": "virtio=AA:BB:CC:DD:EE:FF,bridge=abc123v0"}},
+        zones=[
+            {"zone": "abc123z", "type": "simple"},
+            {"zone": "abc124z", "type": "simple"},
+        ],
+        vnets=[{"vnet": "abc123v0", "zone": "abc123z"}],
+    )
+    infra.sdn_commands.tear_down_sdn_zones_and_vnets = AsyncMock(
+        return_value={"abc124z"}
+    )
+
+    with pytest.raises(SdnTeardownError) as excinfo:
+        await infra.cleanup_no_id(skip_confirmation=True)
+
+    assert excinfo.value.zone_ids == ["abc123z"]
+    infra.qemu_commands.deregister_vms.assert_called_once_with([100])
+    infra.sdn_commands.deregister_sdn_resources_for_zones.assert_called_once_with(
+        {"abc124z"}
+    )

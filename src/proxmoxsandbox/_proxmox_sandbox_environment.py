@@ -1,6 +1,7 @@
 import asyncio
 import errno
 import re
+import shlex
 import time
 from logging import INFO, NOTSET, getLogger
 from pathlib import Path, PureWindowsPath
@@ -198,10 +199,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             f"host={instance.host} port={instance.port} node={instance.node}"
         )
 
-        # Track variables for cleanup on failure
-        infra_commands = None
-        proxmox_ids_start = None
-
         try:
             async_proxmox_api = AsyncProxmoxAPI.from_instance_config(instance)
 
@@ -217,8 +214,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 InfraCommands.set_instance(target, infra_commands)
 
             # The pool guarantees one sample per instance at a time, so any
-            # leftover provider-managed VNETs here are orphans from a previous
-            # failed cleanup. User pre-existing VNETs are ignored by this check.
+            # leftover provider-managed VNETs or inspect-tagged VMs here are
+            # orphans from a previous sample whose init failed or whose cleanup
+            # didn't run. User pre-existing VNETs are ignored by this check.
+            # A pre-clean that cannot finish fails this sample.
             await cls._ensure_instance_clean(infra_commands, instance.instance_id)
 
             task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
@@ -282,97 +281,51 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             return reorder_default_first(sandboxes)
 
         except Exception as e:
-            # Attempt to clean up any partial infrastructure before
-            # releasing instance. This prevents leftover VMs/SDN from
-            # causing conflicts when the instance is reused.
-            cleanup_succeeded = False
-
-            # Only attempt cleanup if we got far enough to allocate IDs.
-            # If we have proxmox_ids_start, infrastructure creation was attempted.
-            should_attempt_cleanup = (
-                infra_commands is not None and proxmox_ids_start is not None
+            # No teardown here: Inspect only tells us whether the user wants
+            # cleanup via task_cleanup(cleanup=...), so whatever got created
+            # stays up (still tracked) for task_cleanup to sweep, or for the
+            # user to poke at under --no-sandbox-cleanup. The next sample to
+            # acquire this instance pre-cleans it in _ensure_instance_clean,
+            # and fails there (releasing the instance again) if it cannot.
+            cls.logger.info(
+                f"sample_init failed on instance {instance.instance_id}: {e}. "
+                f"Leaving any partial infrastructure for task_cleanup; "
+                f"releasing instance back to pool '{pool_id}'"
             )
-
-            if should_attempt_cleanup:
-                try:
-                    cls.logger.info(
-                        f"Attempting cleanup of partial infrastructure "
-                        f"for instance {instance.instance_id} "
-                        f"after sample_init failure: {e}"
-                    )
-
-                    # Use cleanup_no_id to discover and clean up all VMs/zones.
-                    # This is safe because only one sample runs per instance at a time,
-                    # so all inspect-tagged VMs belong to this failed sample.
-                    await infra_commands.cleanup_no_id(skip_confirmation=True)  # type: ignore
-
-                    cleanup_succeeded = True
-                    cls.logger.info(
-                        f"Successfully cleaned up partial infrastructure "
-                        f"for instance {instance.instance_id}"
-                    )
-                except Exception as cleanup_ex:
-                    # Log cleanup failure but don't mask the original error
-                    cls.logger.warning(
-                        f"Failed to clean up partial infrastructure "
-                        f"for instance {instance.instance_id}: {cleanup_ex}. "
-                        f"This may leave resources on the server."
-                    )
-            else:
-                # Early failure or no SDN requested - instance is clean
-                cleanup_succeeded = True
-
-            # Only return instance to pool after successful cleanup.
-            # Dirty instances would cause cascading failures across samples.
-            if cleanup_succeeded:
-                cls.logger.info(
-                    f"Releasing instance {instance.instance_id} "
-                    f"from pool '{pool_id}' back to queue"
-                )
-                await cls.proxmox_pool.release_instance(pool_id, instance)
-            else:
-                cls.logger.warning(
-                    f"NOT releasing instance {instance.instance_id} "
-                    f"from pool '{pool_id}' - "
-                    f"cleanup failed, instance may be dirty"
-                )
-
+            await cls.proxmox_pool.release_instance(pool_id, instance)
             raise
 
     @classmethod
     async def _ensure_instance_clean(
         cls, infra_commands: InfraCommands, instance_id: str
     ) -> None:
-        """Ensure instance has no leftover provider-managed ephemeral VNETs.
+        """Ensure instance has no leftover provider-managed VNETs or VMs.
 
         Only VNETs in zones matching the provider's ephemeral-zone naming
-        convention are considered leftovers. Pre-existing user VNETs
-        (referenced via sdn_config=None) and the static `inspvm*` SDN are
-        deliberately ignored — they are expected to persist across samples.
+        convention, and non-template VMs tagged `inspect`, are considered
+        leftovers. Pre-existing user VNETs (referenced via sdn_config=None)
+        and the static `inspvm*` SDN are deliberately ignored — they are
+        expected to persist across samples.
 
-        Logs errors but does not raise - if the instance is dirty,
-        the subsequent setup will fail and the error handler will deal with it.
+        Raises if the instance cannot be checked or cleaned. Carrying on
+        would not necessarily fail: a new sample gets fresh IDs, so it can
+        come up next to the leftovers and leave both sets of VMs running.
         """
-        try:
-            vnets = await infra_commands.sdn_commands.read_all_vnets()
-            leftover_vnets = [
-                v for v in vnets if "zone" in v and is_ephemeral_zone(v["zone"])
-            ]
+        vnets = await infra_commands.sdn_commands.read_all_vnets()
+        leftover_vnets = [
+            v for v in vnets if "zone" in v and is_ephemeral_zone(v["zone"])
+        ]
+        vms = await infra_commands.qemu_commands.list_vms()
+        leftover_vms = [v for v in vms if QemuCommands.vm_is_inspect(v, template=False)]
 
-            if leftover_vnets:
-                cls.logger.warning(
-                    f"Instance {instance_id} has {len(leftover_vnets)} "
-                    f"leftover provider-managed VNETs! "
-                    f"Cleaning up before proceeding..."
-                )
-                await infra_commands.cleanup_no_id(skip_confirmation=True)
-                cls.logger.info(f"Pre-cleaned instance {instance_id}")
-        except Exception as e:
-            cls.logger.error(
-                f"Failed to check/clean instance {instance_id}: "
-                f"{type(e).__name__}: {e}. "
-                f"Proceeding anyway - setup will fail if instance is dirty."
+        if leftover_vnets or leftover_vms:
+            cls.logger.warning(
+                f"Instance {instance_id} has {len(leftover_vnets)} "
+                f"leftover provider-managed VNETs and {len(leftover_vms)} "
+                f"leftover VMs! Cleaning up before proceeding..."
             )
+            await infra_commands.cleanup_no_id(skip_confirmation=True)
+            cls.logger.info(f"Pre-cleaned instance {instance_id}")
 
     @classmethod
     @override
@@ -491,6 +444,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         cls._init_package_log_level()
         if id is None:
             await cls.create_proxmox_instance_pools()
+            failures: list[str] = []
             for instance in cls.proxmox_pool.all_instances():
                 async_proxmox_api = AsyncProxmoxAPI.from_instance_config(instance)
                 infra_commands = InfraCommands.build(
@@ -498,7 +452,19 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     instance.node,
                     instance.image_storage,
                 )
-                await infra_commands.cleanup_no_id()
+                try:
+                    await infra_commands.cleanup_no_id()
+                except Exception as e:
+                    # Keep going: one bad host should not stop the others
+                    # being swept.
+                    cls.logger.error(
+                        f"cleanup failed on instance {instance.instance_id}: {e}"
+                    )
+                    failures.append(instance.instance_id)
+            if failures:
+                raise RuntimeError(
+                    f"cleanup left resources behind on instances {failures}"
+                )
         else:
             print("\n[red]Cleanup by ID not implemented[/red]\n")
 
@@ -696,19 +662,33 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                             f'copy /b "{file}"+"{chunk_file}" "{file}"\r\n'
                         )
                 combine_script_path = f"{temp_dir}\\combine.bat"
-                await self._write_file_only(combine_script_path, combine_script)
-                await self.exec(cmd=["cmd.exe", "/c", combine_script_path])
+                combine_cmd = ["cmd.exe", "/c", combine_script_path]
             else:
+                # The destination and chunk dir are caller-chosen paths pasted
+                # into a script sh runs in the guest, so they must be quoted or a
+                # name like `a$(id).txt` runs as a command. The loop's exit code
+                # is only the last cat's, so the byte count is what says every
+                # chunk landed.
                 seq_fmt = f"%0{padding_width}.0f"
                 combine_script = (
-                    f"rm -f {file}\n"
+                    f"target={shlex.quote(file)}\n"
+                    f"chunks={shlex.quote(temp_dir)}\n"
+                    f'rm -f -- "$target"\n'
                     f'for i in $(seq -f "{seq_fmt}" 0 {len(chunks) - 1}); do\n'
-                    f'  cat "{temp_dir}/chunk_$i" >> {file}\n'
+                    f'  cat "$chunks/chunk_$i" >> "$target"\n'
                     f"done\n"
+                    f'[ "$(wc -c < "$target")" -eq {len(content_bytes)} ]\n'
                 )
                 combine_script_path = f"{temp_dir}/combine.sh"
-                await self._write_file_only(combine_script_path, combine_script)
-                await self.exec(cmd=["sh", combine_script_path])
+                combine_cmd = ["sh", combine_script_path]
+
+            await self._write_file_only(combine_script_path, combine_script)
+            result = await self.exec(cmd=combine_cmd)
+            if not result.success:
+                raise IOError(
+                    f"write_file: combining chunks into {file} failed "
+                    f"(returncode={result.returncode}): stderr={result.stderr!r}"
+                )
 
         finally:
             cleanup = (

@@ -411,6 +411,34 @@ nics=(
 - `use_pve_ipam_dnsnmasq` must be `True` in the SDN config
 - The Proxmox server *must* be patched using the patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
+### VLANs
+
+A VNet with `vlan_aware=True` carries many VLANs over one bridge. Each NIC on it must say which:
+
+```python
+sdn_config=SdnConfig(
+    vnet_configs=(
+        VnetConfig(alias="lan", subnets=(...)),
+        VnetConfig(alias="fabric", vlan_aware=True),
+    ),
+),
+vms_config=(
+    # An ordinary host on VLAN 12: an access port
+    VmConfig(name="workstation", ..., nics=(VmNicConfig(vnet_alias="fabric", vlan_tag=12),)),
+    # A router VM with one 802.1Q sub-interface per VLAN: a trunk port
+    VmConfig(name="router", ..., nics=(
+        VmNicConfig(vnet_alias="lan"),
+        VmNicConfig(vnet_alias="fabric", vlan_tag="trunk"),
+    )),
+),
+```
+
+- An access port (`vlan_tag=12`) sees untagged frames and can reach only its own VLAN. Frames it tags for another VLAN are dropped by the host bridge.
+- A trunk port (`vlan_tag="trunk"`) carries VLAN 1 untagged and VLANs 2-4094 tagged, so the guest can join any VLAN on the VNet. Give trunks only to VMs that play the part of a router, firewall or switch; an ordinary host on a trunk defeats the segmentation.
+- Proxmox does not allow subnets on a VLAN-aware VNet, so it has no host gateway, DHCP or SNAT. Routing, DHCP and DNS between VLANs come from a guest such as the router above; for traffic to leave the VNet, that guest needs a NIC on an ordinary VNet too.
+- `vlan_tag` is not allowed on an ordinary VNet. Built-in and OVA VMs without `nics` are rejected when the first VNet is VLAN-aware, since they would be attached to it as trunks.
+- With `firewall=True` on the default iptables firewall backend, per-VM Proxmox firewall rules do not filter the frames a guest tags itself (the kernel's `net.bridge.bridge-nf-filter-vlan-tagged` is 0). Rules on access-port VMs work as normal, but rules on a trunk VM do not cover its tagged traffic.
+
 ### Using Existing Proxmox VNETs (Advanced/Not Recommended)
 
 **⚠️ WARNING**: This feature is intended for advanced users with specific integration requirements. For most use cases, you should let the sandbox manage its own network configuration using the standard `sdn_config` options.
