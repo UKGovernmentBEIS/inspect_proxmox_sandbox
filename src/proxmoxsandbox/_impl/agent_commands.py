@@ -45,6 +45,10 @@ _QGA_RETRY_MAX_DELAY = 20.0  # seconds
 # Limit requests and retry sleeps together, including a request that never returns.
 _QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
 
+# qm cleanup waits up to 60 s for the config lock, then holds it for up to 30 s
+_ROLLBACK_LOCK_TIMEOUT = 120.0
+_TASK_POLL_INTERVAL = 0.5
+
 
 def _is_pid_gone(exc: httpx.HTTPStatusError) -> bool:
     """Whether a QGA error says the PID is unknown.
@@ -244,3 +248,46 @@ class AgentCommands:
         path = f"/nodes/{self.node}/qemu/{vm_id}/snapshot/{snapshot_name}/rollback"
         upid = await self.async_proxmox.request("POST", path)
         await self.async_proxmox.wait_for_task(upid=upid)
+        await self._await_config_lock_after_rollback(vm_id)
+
+    async def _await_config_lock_after_rollback(
+        self, vm_id: int, timeout: float = _ROLLBACK_LOCK_TIMEOUT
+    ) -> None:
+        """Wait until the VM's config lock can be taken again after a rollback.
+
+        The rollback stops the old QEMU, so qmeventd runs `qm cleanup`. That
+        usually takes the config lock as soon as the rollback drops it, finds
+        the new QEMU running and holds the lock for 30 s before giving up
+        (cleanup in qemu-server's PVE/CLI/qm.pm). In that window any snapshot,
+        rollback or stop of the VM fails with "can't lock file ... got timeout".
+        Resuming a running VM takes the same lock and otherwise does nothing, so
+        a resume task that ends OK means the lock is free.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            upid = await self.async_proxmox.request(
+                "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/resume"
+            )
+            exitstatus = await self._task_exitstatus(upid)
+            if exitstatus == "OK":
+                return
+            if (
+                "can't lock file" not in exitstatus
+                or asyncio.get_running_loop().time() >= deadline
+            ):
+                raise RuntimeError(
+                    f"VM {vm_id}: config lock still not free {timeout:g}s after "
+                    f"a snapshot rollback; last resume task {upid}: {exitstatus}"
+                )
+
+    async def _task_exitstatus(self, upid: str) -> str:
+        # Read the exit status directly rather than through wait_for_task: a
+        # lock timeout here is an expected result, not a failure to raise
+        node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
+        while True:
+            status = await self.async_proxmox.request(
+                "GET", f"/nodes/{node}/tasks/{upid}/status"
+            )
+            if status.get("exitstatus") is not None:
+                return str(status["exitstatus"])
+            await asyncio.sleep(_TASK_POLL_INTERVAL)
