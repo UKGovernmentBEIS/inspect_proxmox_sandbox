@@ -37,6 +37,8 @@ from proxmoxsandbox.schema import (
     VmConfig,
 )
 
+_DESTROY_CONCURRENCY = 4
+
 
 class ProxmoxTarget(NamedTuple):
     """Identifies a specific Proxmox host+node combination."""
@@ -277,12 +279,17 @@ class InfraCommands(abc.ABC):
         vms: dict[int, VmConfig],
     ):
         # VM deletion has no shared ID counter to race on (unlike creation),
-        # so the stop/delete waits can overlap.
+        # so the stop/delete waits can overlap. Bounded: a 19-VM range posting
+        # every stop and delete at once had Proxmox fail some of them with
+        # "500 got no worker upid - start worker failed".
+        slots = asyncio.Semaphore(_DESTROY_CONCURRENCY)
+
+        async def destroy(vm_id: int, vm_config: VmConfig) -> None:
+            async with slots:
+                await self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
+
         results = await asyncio.gather(
-            *(
-                self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
-                for vm_id, vm_config in vms.items()
-            ),
+            *(destroy(vm_id, vm_config) for vm_id, vm_config in vms.items()),
             # Let every destroy settle before reporting a failure: one still
             # running after this returns would race task_cleanup's destroy of
             # the same VM.
