@@ -6,7 +6,9 @@
 
 ## 0.12.1
 
-- Security: the bundled provisioning scripts build `pve-qemu-kvm` `11.1.3-1+aisi4`, adding six upstream AHCI/IDE fixes to stock 11.1.3-1, among them a use-after-free when a guest ejects the AHCI controller during a read (QEMU issue 4069). Hosts built since stock 11.1.x reached `pve-no-subscription` skipped the patch and run stock QEMU. Rebuild existing hosts; new ones carry contract `aisi4`.
+- Security: the bundled provisioning scripts build `pve-qemu-kvm` `11.1.3-1+aisi4`, adding six upstream AHCI/IDE fixes to stock 11.1.3-1, among them a use-after-free when a guest ejects the AHCI controller during a read ([QEMU issue][qemu-4069]). Hosts built since stock 11.1.x reached `pve-no-subscription` skipped the patch and run stock QEMU. Rebuild existing hosts; new ones carry contract `aisi4`.
+
+[qemu-4069]: https://gitlab.com/qemu-project/qemu/-/work_items/4069
 
 ## 0.12.0
 
