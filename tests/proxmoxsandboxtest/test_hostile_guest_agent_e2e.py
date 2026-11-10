@@ -31,7 +31,9 @@ pytestmark = pytest.mark.req_proxmox
 # The shim also answers a real file-open/write/close for its own replies file
 # (handle CONTROL_HANDLE) and reloads the replies on close, so one VM serves
 # every case: the host rewrites the replies through the shim with a plain
-# agent/file-write. Cases must therefore not override those three commands.
+# agent/file-write. Those branches match ahead of the reply table, so a case
+# may override file-open/write/close; hostile_env rejects the two overrides
+# that would break this.
 SHIM_SOURCE = r"""
 import base64, json, os, sys, time
 
@@ -97,6 +99,7 @@ while True:
 SHIM_PATH = "/root/qga_shim.py"
 REPLIES_PATH = "/root/qga_shim_replies.json"
 SHIM_OSINFO_ID = "qga-shim"
+SHIM_CONTROL_HANDLE = 7  # CONTROL_HANDLE in SHIM_SOURCE
 
 
 def _b64(data: bytes) -> str:
@@ -263,6 +266,13 @@ async def hostile_env(
     request: pytest.FixtureRequest, hostile_vm: ProxmoxSandboxEnvironment
 ) -> ProxmoxSandboxEnvironment:
     """The shared shim VM, answering with this case's overrides."""
+    overrides = request.param
+    # _replies replaces osinfo with the generation marker, so such a case
+    # would run against honest replies and assert nothing.
+    assert "guest-get-osinfo" not in overrides
+    # The shim would take the provider's next write for one to its own file.
+    file_open = overrides.get("guest-file-open") or {}
+    assert file_open.get("return") != SHIM_CONTROL_HANDLE
     await _reconfigure_shim(hostile_vm, request.param, next(_shim_generations))
     return hostile_vm
 

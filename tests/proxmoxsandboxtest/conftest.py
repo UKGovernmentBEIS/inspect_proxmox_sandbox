@@ -121,12 +121,20 @@ async def built_in_vm(infra_commands: InfraCommands) -> BuiltInVM:
     return infra_commands.built_in_vm
 
 
-@pytest.fixture(scope="function")
-async def ids_start() -> str:
+# Drawn without replacement: module-scoped zones outlive the test that made
+# them, so a repeated number would collide with a zone that still exists.
+_ID_NUMBERS = iter(random.sample(range(100, 1000), 900))
+
+
+def _next_ids_start() -> str:
     # this could definitely be improved to go and check
     # proxmox and find a non-conflicting ID
-    ids_start = f"cts{random.randint(100, 999)}"
-    return ids_start
+    return f"cts{next(_ID_NUMBERS)}"
+
+
+@pytest.fixture(scope="function")
+async def ids_start() -> str:
+    return _next_ids_start()
 
 
 @pytest.fixture(scope="module")
@@ -152,8 +160,9 @@ async def auto_sdn_vnet_aliases(
     vnet aliases and attach NICs to the vnet; nothing they do alters the zone.
     Any VM a test puts on the vnet must be destroyed before the module ends.
     """
-    ids_start = f"cts{random.randint(100, 999)}"
-    sdn_zone_id, vnet_aliases = await module_sdn_commands.create_sdn(ids_start, "auto")
+    sdn_zone_id, vnet_aliases = await module_sdn_commands.create_sdn(
+        _next_ids_start(), "auto"
+    )
     assert sdn_zone_id is not None
     yield vnet_aliases
     await module_sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
@@ -222,9 +231,16 @@ async def proxmox_sandbox_environment(
 
     yield default_env
 
-    await ProxmoxSandboxEnvironment.sample_cleanup(
-        task_name=task_name,
-        config=sandbox_env_config_by_os,
-        environments=envs_dict,
-        interrupted=False,
-    )
+    try:
+        await ProxmoxSandboxEnvironment.sample_cleanup(
+            task_name=task_name,
+            config=sandbox_env_config_by_os,
+            environments=envs_dict,
+            interrupted=False,
+        )
+    finally:
+        # The module-scoped reset does not run between the OS params. A
+        # cleanup that failed has withheld the instance, and the next param's
+        # sample_init would wait on the emptied pool forever.
+        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+        InfraCommands._instances.clear()
