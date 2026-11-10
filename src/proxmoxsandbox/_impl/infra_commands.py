@@ -279,12 +279,19 @@ class InfraCommands(abc.ABC):
     ):
         # VM deletion has no shared ID counter to race on (unlike creation),
         # so the stop/delete waits can overlap.
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(
                 self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
                 for vm_id, vm_config in vms.items()
-            )
+            ),
+            # Let every destroy settle before reporting a failure: one still
+            # running after this returns would race task_cleanup's destroy of
+            # the same VM.
+            return_exceptions=True,
         )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         if sdn_zone_id is not None:
             gone = await self.sdn_commands.tear_down_sdn_zone_and_vnet(
                 sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings
