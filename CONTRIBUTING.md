@@ -147,7 +147,9 @@ contains it.
 Both provisioning scripts embed the same `patch-pve-qemu.sh`, which builds stock
 `STOCK_VERSION` plus the commits in `QEMU_FIXES`. On any change to it, raise the
 `+aisiN` in `PATCHED_VERSION`, bump the version (see "Versioning") and the host
-contract `C=aisiN`, and build a host to check the patches apply.
+contract `C=aisiN`, and build a host to check the patches apply. A daily workflow
+(`.github/scripts/check-pve-qemu.sh`) opens an issue when Proxmox publishes a release
+the patch should move to.
 
 ## Design Notes
 
