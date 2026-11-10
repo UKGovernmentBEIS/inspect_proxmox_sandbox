@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from proxmoxsandbox._impl.async_proxmox import ProxmoxTaskError
 from proxmoxsandbox._impl.qemu_commands import _VM_ID_ATTEMPTS, QemuCommands
 from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
@@ -87,3 +88,60 @@ async def test_clone_does_not_retry_other_500s():
             preserve_tags=False,
         )
     assert api.request.await_count == 2
+
+
+def _qemu_with_clone_task_failures(exitstatuses: list[str]) -> QemuCommands:
+    """Nextid counts up from 4242; each clone's task ends with the next status."""
+    next_id = 4242
+    statuses = list(exitstatuses)
+
+    async def request(method, url, **kwargs):
+        nonlocal next_id
+        if url == "/cluster/nextid":
+            next_id += 1
+            return str(next_id - 1)
+        return "UPID:pve1:clone" if url.endswith("/clone") else "UPID:pve1:other"
+
+    async def wait_for_task(*, upid: str):
+        if upid == "UPID:pve1:clone" and statuses:
+            status = statuses.pop(0)
+            if status != "OK":
+                raise ProxmoxTaskError(upid, status)
+        return {"exitstatus": "OK"}
+
+    api = AsyncMock()
+    api.request = AsyncMock(side_effect=request)
+    api.wait_for_task = AsyncMock(side_effect=wait_for_task)
+    return QemuCommands(api, "pve1", "local", MagicMock())
+
+
+@pytest.mark.asyncio
+async def test_clone_retries_when_its_task_loses_the_id():
+    """Two clones can both pass the API's check; the loser's task then fails."""
+    qemu = _qemu_with_clone_task_failures(
+        ["unable to create VM 4242: config file already exists", "OK"]
+    )
+    with patch.object(qemu, "configure_network_and_tags", AsyncMock()):
+        vm_id = await qemu.clone_vm_and_start(
+            vm_config=_CONFIG,
+            vm_id_to_clone=100,
+            sdn_vnet_aliases={},
+            preserve_tags=False,
+        )
+    assert vm_id == 4243
+    assert list(qemu._tracked_vms) == [4243]
+
+
+@pytest.mark.asyncio
+async def test_clone_does_not_retry_other_task_failures():
+    qemu = _qemu_with_clone_task_failures(
+        ["clone failed: disk image 'local:4242/vm-4242-disk-0.qcow2' already exists"]
+    )
+    with pytest.raises(ProxmoxTaskError, match="clone failed"):
+        await qemu.clone_vm_and_start(
+            vm_config=_CONFIG,
+            vm_id_to_clone=100,
+            sdn_vnet_aliases={},
+            preserve_tags=False,
+        )
+    assert qemu._tracked_vms == {}

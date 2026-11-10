@@ -239,7 +239,15 @@ class QemuCommands(abc.ABC):
             # Polling for the ID to disappear is not: /cluster/nextid reuses
             # freed IDs, so another process can have a new VM under this ID
             # within seconds.
-            await self.async_proxmox.wait_for_task(upid=upid)
+            try:
+                await self.async_proxmox.wait_for_task(upid=upid)
+            except ProxmoxTaskError as e:
+                # Another delete of this VM (a second process's pre-clean
+                # sweep, say) got the config lock first: this task then finds
+                # the config gone, which is the outcome we wanted.
+                if f"qemu-server/{vm_id}.conf' does not exist" not in e.exitstatus:
+                    raise
+                self.logger.debug(f"VM {label} was deleted by another task")
 
     async def list_vms(self):
         with trace_action(self.logger, self.TRACE_NAME, "list all VMs"):
@@ -266,10 +274,19 @@ class QemuCommands(abc.ABC):
         return int(await self.async_proxmox.request("GET", "/cluster/nextid"))
 
     @staticmethod
-    def _is_vm_id_collision(exc: BaseException) -> bool:
-        # Both create (`unable to create VM 105 - VM 105 already exists on
-        # node 'pve'`) and clone (`unable to create VM 105: config file already
-        # exists`) reject a taken ID synchronously, before any task is forked.
+    def _is_vm_id_collision(exc: BaseException, vm_id: int) -> bool:
+        # Create (`unable to create VM 105 - VM 105 already exists on node
+        # 'pve'`) and clone (`unable to create VM 105: config file already
+        # exists`) reject a taken ID in the API call when they can. Clone
+        # checks again inside its worker, so two clones that both pass the
+        # first check leave the loser with a failed task carrying the same
+        # text. Match the whole phrase there: a clone that fails later can
+        # say "already exists" about a disk.
+        if isinstance(exc, ProxmoxTaskError):
+            return (
+                f"unable to create VM {vm_id}: config file already exists"
+                in exc.exitstatus
+            )
         return (
             isinstance(exc, httpx.HTTPStatusError)
             and exc.response.status_code == 500
@@ -289,8 +306,8 @@ class QemuCommands(abc.ABC):
             vm_id = await self.find_next_available_vm_id()
             try:
                 await create(vm_id)
-            except httpx.HTTPStatusError as e:
-                if attempt < _VM_ID_ATTEMPTS and self._is_vm_id_collision(e):
+            except (httpx.HTTPStatusError, ProxmoxTaskError) as e:
+                if attempt < _VM_ID_ATTEMPTS and self._is_vm_id_collision(e, vm_id):
                     self.logger.info(
                         f"VM ID {vm_id} was taken before we could use it "
                         f"(attempt {attempt}/{_VM_ID_ATTEMPTS}); retrying"
