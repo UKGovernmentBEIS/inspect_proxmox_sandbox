@@ -15,6 +15,7 @@ from proxmoxsandbox._impl.qga_responses import (
     FileRead,
     decode_file_read,
     parse_guest,
+    pve_rejected_file_read,
     tamper,
 )
 from proxmoxsandbox.schema import ProxmoxInstanceConfig
@@ -272,7 +273,12 @@ class AsyncProxmoxAPI:
                 ),
             )
             if response.is_error:
-                raise _http_status_error(response)
+                error = _http_status_error(response)
+                if pve_rejected_file_read(response.status_code, str(error)):
+                    raise tamper(
+                        vm_id, "file-read", "rejected by Proxmox", str(error)
+                    ) from error
+                raise error
             data = response.json()["data"]
         if modern:
             return decode_file_read(vm_id, data, count)

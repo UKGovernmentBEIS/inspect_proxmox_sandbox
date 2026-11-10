@@ -163,6 +163,25 @@ async def test_guest_error_text_is_bounded_before_becoming_an_exception():
     assert observed.error_length is not None and observed.error_length < 10_000
 
 
+# qemu-server >= 9.2.11 rejects these replies before they reach the provider.
+PVE_FILE_READ_REJECTIONS = [
+    "agent file-read: got invalid count '16777216'",
+    "agent file-read: mismatch between returned count and buffer length",
+]
+
+
+@pytest.mark.parametrize("message", PVE_FILE_READ_REJECTIONS)
+@pytest.mark.parametrize("operation", ["read_file", "exec"])
+async def test_proxmox_rejection_of_a_file_reply_is_reported_with_its_vm(
+    message: str, operation
+):
+    observed = await exercise(
+        Scenario(operation=operation, http_error=message, http_error_status=500)
+    )
+    assert observed.kind == "rejected"
+    assert observed.vm_id == 100
+
+
 @pytest.mark.parametrize(
     "reply", [{"content": 12}, {"content": "\u0100"}, {"truncated": "yes"}]
 )
