@@ -807,19 +807,33 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 # The wrapper wrote all three files before exiting, so read
                 # them concurrently; QGA round trips dominate exec latency.
-                stdout_read, stderr_read, returncode_read = await asyncio.gather(
-                    self._read_exec_output(f"{tmp_start}script.stdout"),
-                    self._read_exec_output(f"{tmp_start}script.stderr"),
-                    self._read_return_code(tmp_start),
-                    return_exceptions=True,
+                reads = (
+                    asyncio.ensure_future(
+                        self._read_exec_output(f"{tmp_start}script.stdout")
+                    ),
+                    asyncio.ensure_future(
+                        self._read_exec_output(f"{tmp_start}script.stderr")
+                    ),
+                    asyncio.ensure_future(self._read_return_code(tmp_start)),
                 )
-                if isinstance(stdout_read, BaseException):
-                    raise stdout_read
-                if isinstance(stderr_read, BaseException):
-                    raise stderr_read
-                stdout, stderr = stdout_read, stderr_read
+                returncode_read: int | ReturnCodeNotWritten
                 try:
-                    if isinstance(returncode_read, BaseException):
+                    # Awaited in this order so a failed stdout read is reported
+                    # at once and ahead of the others, whichever fails first.
+                    stdout = await reads[0]
+                    stderr = await reads[1]
+                    try:
+                        returncode_read = await reads[2]
+                    except ReturnCodeNotWritten as e:
+                        returncode_read = e
+                finally:
+                    # A read still pending here lost to an earlier failure;
+                    # left alone it would keep retrying against the agent.
+                    for read in reads:
+                        read.cancel()
+                    await asyncio.gather(*reads, return_exceptions=True)
+                try:
+                    if isinstance(returncode_read, ReturnCodeNotWritten):
                         raise returncode_read
                     returncode = returncode_read
                     exec_response = ExecResult(

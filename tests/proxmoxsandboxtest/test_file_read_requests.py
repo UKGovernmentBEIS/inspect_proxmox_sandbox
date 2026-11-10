@@ -9,19 +9,26 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 class _Peer:
     def __init__(self):
         self.paths: list[str] = []
+        self.rejected_ticket: str | None = None
+        self.tickets_issued = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.paths.append(path)
         if path.endswith("/access/ticket"):
+            self.tickets_issued += 1
+            ticket = f"t{self.tickets_issued}"
             return httpx.Response(
-                200, json={"data": {"ticket": "t", "CSRFPreventionToken": "c"}}
+                200, json={"data": {"ticket": ticket, "CSRFPreventionToken": "c"}}
             )
         if path.endswith("/version"):
             return httpx.Response(
                 200, json={"data": {"release": "9.2", "repoid": "x", "version": "9.2"}}
             )
         if path.endswith("/agent/file-read"):
+            cookie = request.headers["Cookie"]
+            if cookie == f"PVEAuthCookie={self.rejected_ticket}":
+                return httpx.Response(401, json={"data": None})
             return httpx.Response(
                 200, json={"data": {"content": "aGk=", "truncated": False}}
             )
@@ -61,3 +68,17 @@ async def test_later_file_reads_are_a_single_request(peer: _Peer):
     peer.paths.clear()
     assert await api.read_file_capped("n", 1, "/f", 16) == (b"hi", False)
     assert [p.rsplit("/", 1)[-1] for p in peer.paths] == ["file-read"]
+
+
+async def test_file_read_logs_in_again_when_the_ticket_is_rejected(peer: _Peer):
+    api = _api()
+    await api.read_file_capped("n", 1, "/f", 16)
+    peer.rejected_ticket = api.ticket
+    peer.paths.clear()
+    assert await api.read_file_capped("n", 1, "/f", 16) == (b"hi", False)
+    assert [p.rsplit("/", 1)[-1] for p in peer.paths] == [
+        "file-read",
+        "ticket",
+        "version",
+        "file-read",
+    ]

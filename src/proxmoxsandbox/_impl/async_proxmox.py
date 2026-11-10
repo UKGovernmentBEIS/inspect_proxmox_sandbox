@@ -271,22 +271,30 @@ class AsyncProxmoxAPI:
             if not self.ticket or self._ticket_near_expiry():
                 await self._login(client)
             modern = self.release_at_least(9, 2)
-            response = await client.get(
-                f"{self.api_base_url}{path}",
-                headers={
-                    **self.extra_headers,
-                    "Cookie": f"PVEAuthCookie={self.ticket}",
-                    # Opt out of pveproxy response compression: it truncates
-                    # large incompressible bodies mid-transfer, surfacing as an
-                    # upstream "597 Broken pipe".
-                    "Accept-Encoding": "identity",
-                },
-                params=(
-                    {"file": filepath, "count": count, "decode": 0}
-                    if modern
-                    else {"file": filepath}
-                ),
-            )
+
+            async def send() -> httpx.Response:
+                return await client.get(
+                    f"{self.api_base_url}{path}",
+                    headers={
+                        **self.extra_headers,
+                        "Cookie": f"PVEAuthCookie={self.ticket}",
+                        # Opt out of pveproxy response compression: it truncates
+                        # large incompressible bodies mid-transfer, surfacing as
+                        # an upstream "597 Broken pipe".
+                        "Accept-Encoding": "identity",
+                    },
+                    params=(
+                        {"file": filepath, "count": count, "decode": 0}
+                        if modern
+                        else {"file": filepath}
+                    ),
+                )
+
+            response = await send()
+            if response.status_code == 401:
+                # Proxmox can reject a ticket we still think is fresh
+                await self._login(client)
+                response = await send()
             if response.is_error:
                 error = _http_status_error(response)
                 if pve_rejected_file_read(response.status_code, str(error)):
