@@ -8,6 +8,7 @@ from typing import Iterator, List, Tuple
 
 import httpx
 from inspect_ai.util import (
+    SandboxUnavailableError,
     trace_action,
 )
 
@@ -82,8 +83,21 @@ def healthcheck_transport_budget(interval: float) -> Iterator[None]:
         _healthcheck_budget.reset(token)
 
 
-class GuestAgentCommunicationTimeoutError(TimeoutError):
-    """The provider exhausted its wait for guest-agent communication."""
+class GuestExecNotStartedError(SandboxUnavailableError):
+    """The guest agent could not be reached before any command was launched.
+
+    Nothing ran, so the caller may safely issue the command again. Inspect maps
+    the base class to a `sandbox_unavailable` tool error and keeps the sample
+    running; a TimeoutError here would instead tell the model its command ran
+    and timed out.
+    """
+
+    def __init__(self, vm_id: int, cause: BaseException):
+        self.vm_id = vm_id
+        super().__init__(
+            f"VM {vm_id}: the guest agent could not be reached to start the "
+            f"command, so nothing was launched ({type(cause).__name__}: {cause})"
+        )
 
 
 class GuestExecIncompleteError(RuntimeError):

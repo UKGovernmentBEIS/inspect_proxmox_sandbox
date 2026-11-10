@@ -17,9 +17,10 @@ from inspect_ai.util import (
 from proxmoxsandbox._impl import exec_linux, exec_windows
 from proxmoxsandbox._impl.agent_commands import (
     AgentCommands,
-    GuestAgentCommunicationTimeoutError,
     GuestExecIncompleteError,
+    GuestExecNotStartedError,
     HealthcheckTransportExhaustedError,
+    is_transient_qga_error,
 )
 from proxmoxsandbox._impl.deadline import remaining_budget, within_budget
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
@@ -229,12 +230,15 @@ class GuestExecutor:
                 if isinstance(exc, TimeoutError) and launch_error is not None:
                     exc = launch_error
                 raise GuestExecIncompleteError(self.vm_id, pid, script_path) from exc
-            if isinstance(exc, TimeoutError):
-                raise GuestAgentCommunicationTimeoutError(
-                    f"VM {self.vm_id}: command preparation exceeded its "
-                    "execution waiting allowance"
-                ) from exc
-            raise
+            if isinstance(exc, httpx.HTTPStatusError) and not is_transient_qga_error(
+                exc
+            ):
+                # The agent answered and rejected a request; that is not the
+                # sandbox being unreachable.
+                raise
+            # Preparation exhausted its transport retries or waiting allowance
+            # before any launch, so the command never ran.
+            raise GuestExecNotStartedError(self.vm_id, exc) from exc
 
         # Returning the confirmed result must not depend on disposable-file cleanup.
         # The claim and terminal record are deliberately absent from this list.

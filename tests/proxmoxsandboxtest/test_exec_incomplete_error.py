@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from inspect_ai.model import ChatMessageAssistant, ChatMessageTool, execute_tools
 from inspect_ai.tool import ToolCall, ToolDef
@@ -9,7 +10,10 @@ from inspect_ai.util import SandboxEnvironment
 from inspect_ai.util._anyio import inner_exception
 from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
 
-from proxmoxsandbox._impl.agent_commands import GuestExecIncompleteError
+from proxmoxsandbox._impl.agent_commands import (
+    GuestExecIncompleteError,
+    GuestExecNotStartedError,
+)
 from proxmoxsandbox._impl.deadline import within_budget
 
 
@@ -48,6 +52,34 @@ async def test_inspect_preserves_unresolved_execution(incomplete, pid):
         assert message.error is not None
         assert message.error.type == "timeout"
         assert message.error.message == "Command timed out before completing."
+    provider.exec.assert_awaited_once()
+
+
+async def test_inspect_lets_the_model_retry_a_command_that_never_started():
+    failure = GuestExecNotStartedError(130, httpx.ConnectError("API host unreachable"))
+    provider = MagicMock(spec=SandboxEnvironment)
+    provider.exec = AsyncMock(side_effect=failure)
+    proxy = SandboxEnvironmentProxy(provider)
+
+    async def probe() -> str:
+        """Exercise a mocked sandbox without a model or guest."""
+        await proxy.exec(["echo", "test"])
+        raise AssertionError("the failing exec must not return")
+
+    messages = [
+        ChatMessageAssistant(
+            content="",
+            tool_calls=[ToolCall(id="probe", function="probe", arguments={})],
+        )
+    ]
+    output = await execute_tools(messages, [ToolDef(probe)], max_output=1024)
+    assert len(output.messages) == 1
+    message = output.messages[0]
+    assert isinstance(message, ChatMessageTool)
+    assert message.error is not None
+    assert message.error.type == "sandbox_unavailable"
+    assert "nothing was launched" in message.error.message
+    assert "ConnectError" in message.error.message
     provider.exec.assert_awaited_once()
 
 

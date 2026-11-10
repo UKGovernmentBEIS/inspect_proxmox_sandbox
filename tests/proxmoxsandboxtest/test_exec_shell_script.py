@@ -10,7 +10,11 @@ import httpx
 import pytest
 
 from proxmoxsandbox._impl import agent_commands, exec_linux
-from proxmoxsandbox._impl.agent_commands import AgentCommands, GuestExecIncompleteError
+from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
+    GuestExecIncompleteError,
+    GuestExecNotStartedError,
+)
 from proxmoxsandbox._impl.guest_exec import GuestExecResultError, GuestExecutor
 
 from .guest_agent_fixture import execution_stage
@@ -261,7 +265,7 @@ async def test_failed_staging_removes_partial_execution_data(
         return await request(method, path, json=json)
 
     monkeypatch.setattr(guest, "request", fail_upload)
-    with pytest.raises(httpx.HTTPStatusError) as raised:
+    with pytest.raises(GuestExecNotStartedError) as raised:
         await guest.executor(monkeypatch, tmp_path, retries=1).exec(
             ["echo", "payload"],
             input=b"x" * input_size if input_size else None,
@@ -270,7 +274,7 @@ async def test_failed_staging_removes_partial_execution_data(
         )
     await guest.settle()
 
-    assert raised.value is failure
+    assert raised.value.__cause__ is failure
     assert writes == fail_at
     assert guest.launches == []
     assert len(guest.cleanups) == 1

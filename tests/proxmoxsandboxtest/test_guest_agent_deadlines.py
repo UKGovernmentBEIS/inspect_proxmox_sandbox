@@ -50,7 +50,9 @@ def test_command_stops_waiting_for_a_stalled_guest_at_every_stage(stage):
         assert observed.kind == "exec"
         assert observed.returncode == 0
     else:
-        assert observed.kind == "timeout"
+        assert observed.kind == "unavailable"
+        assert observed.vm_id == 100
+        assert observed.launched is False
     assert observed.cancelled is True
 
 
@@ -94,13 +96,14 @@ def test_large_input_upload_cannot_restart_the_command_budget():
             fault=Fault(stage="upload", skip_requests=2),
         )
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "unavailable"
+    assert observed.launched is False
 
 
 @pytest.mark.parametrize("os_type", ["l26", "win11"])
 @pytest.mark.parametrize(
     ("timeout", "untimed_wait", "expected"),
-    [(600, None, "exec"), (None, "600", "exec"), (5, None, "timeout")],
+    [(600, None, "exec"), (None, "600", "exec"), (5, None, "unavailable")],
 )
 def test_slow_successful_uploads_share_the_overall_execution_allowance(
     os_type, timeout, untimed_wait, expected
@@ -134,7 +137,7 @@ def test_time_spent_on_earlier_upload_chunks_counts_toward_the_deadline():
             ],
         )
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "unavailable"
     assert observed.launched is False
 
 
@@ -152,7 +155,7 @@ def test_untimed_command_stops_waiting_even_when_upload_keeps_progressing(monkey
             ],
         )
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "unavailable"
     assert observed.launched is False
 
 
@@ -168,7 +171,7 @@ def test_large_exec_iso_transfer_shares_the_execution_deadline(stage):
             fault=Fault(stage=stage),
         )
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "unavailable"
     assert observed.launched is False
 
 
