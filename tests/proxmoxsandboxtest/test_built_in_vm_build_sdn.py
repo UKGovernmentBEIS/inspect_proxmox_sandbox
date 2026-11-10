@@ -2,7 +2,8 @@
 
 Collaborators are mocked. The harness records the order of the steps that
 matter to the zone: it cannot be removed while a build VM still has a NIC
-(and so an IPAM lease) in it.
+(and so an IPAM entry) in it. A failed build keeps its VM and the zone, both
+tracked, as the rest of a failed sample_init does.
 """
 
 from ipaddress import ip_address
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
+from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.sdn_commands import (
     BUILT_IN_IDS_PREFIX,
     IpamMapping,
@@ -22,6 +24,8 @@ IDS_START = f"{BUILT_IN_IDS_PREFIX}123"
 ZONE_ID = f"{IDS_START}z"
 VNET_ID = f"{IDS_START}v0"
 VM_ID = 100
+CLOUD_INIT_DONE = "....\nstatus: done"
+CLOUD_INIT_ERROR = "....\nstatus: error"
 LEASE = IpamMapping(
     vnet_id=VNET_ID,
     zone_id=ZONE_ID,
@@ -33,15 +37,19 @@ LEASE = IpamMapping(
 class Harness:
     """BuiltInVM over mocked collaborators, recording the order of key steps."""
 
-    def __init__(self, *, cloud_init_output: str = "....\nstatus: done"):
+    def __init__(self, *, cloud_init_output: str | dict[int, str] = CLOUD_INIT_DONE):
+        """VM IDs are handed out from VM_ID up, in the order builds ask.
+
+        `cloud_init_output` is one output for every build, or one per VM ID.
+        """
         self.events: List[Tuple[str, object]] = []
         self.create_requests: List[dict] = []
 
         async def request(method, path, **kwargs):
             if method == "GET" and path.endswith("/config?current=1"):
                 return {"template": 1}
-            if method == "POST" and path.endswith(f"/qemu/{VM_ID}/template"):
-                self.events.append(("template", VM_ID))
+            if method == "POST" and path.endswith("/template"):
+                self.events.append(("template", int(path.split("/")[-2])))
             if method == "POST" and path.endswith("/qemu"):
                 self.create_requests.append(kwargs["json"])
             return "UPID:test"
@@ -50,9 +58,14 @@ class Harness:
         async_proxmox.request = AsyncMock(side_effect=request)
         async_proxmox.wait_for_task = AsyncMock()
 
+        next_vm_id = VM_ID
+
         async def create_with_fresh_vm_id(create):
-            await create(VM_ID)
-            return VM_ID
+            nonlocal next_vm_id
+            vm_id = next_vm_id
+            next_vm_id += 1
+            await create(vm_id)
+            return vm_id
 
         async def remove_existing_nics(vm_id):
             self.events.append(("remove_nics", vm_id))
@@ -96,18 +109,32 @@ class Harness:
         self.built_in_vm.ensure_source_uploaded = AsyncMock()  # type: ignore[method-assign]
         self.built_in_vm.create_and_upload_cloudinit_iso = AsyncMock()  # type: ignore[method-assign]
 
+        async def exec_command(vm_id, command):
+            return vm_id  # stands in for the PID, so the status knows the VM
+
+        async def get_agent_exec_status(vm_id, pid):
+            out_data = (
+                cloud_init_output
+                if isinstance(cloud_init_output, str)
+                else cloud_init_output[vm_id]
+            )
+            return MagicMock(exited=1, out_data=out_data)
+
         self.agent_commands = MagicMock()
-        self.agent_commands.exec_command = AsyncMock(return_value=42)
+        self.agent_commands.exec_command = AsyncMock(side_effect=exec_command)
         self.agent_commands.get_agent_exec_status = AsyncMock(
-            return_value=MagicMock(exited=1, out_data=cloud_init_output)
+            side_effect=get_agent_exec_status
         )
 
-    async def build_debian(self) -> None:
+    async def build(self, *built_ins: str) -> None:
         with patch(
             "proxmoxsandbox._impl.built_in_vm.AgentCommands",
             return_value=self.agent_commands,
         ):
-            await self.built_in_vm.ensure_exists("debian13")
+            await self.built_in_vm.ensure_exists_many(built_ins)
+
+    async def build_debian(self) -> None:
+        await self.build("debian13")
 
     def event_names(self) -> List[str]:
         return [name for name, _ in self.events]
@@ -156,28 +183,64 @@ async def test_build_vm_is_tracked_until_it_is_a_template() -> None:
     h.qemu_commands.destroy_vm.assert_not_called()
 
 
-async def test_failed_build_destroys_its_vm_before_the_zone_goes() -> None:
-    h = Harness(cloud_init_output="....\nstatus: error")
+async def test_failed_build_keeps_its_vm_and_the_zone_tracked() -> None:
+    """Nothing is torn down: task_cleanup or the next pre-clean does that."""
+    h = Harness(cloud_init_output=CLOUD_INIT_ERROR)
 
     with pytest.raises(ValueError, match="cloud-init failed"):
         await h.build_debian()
 
-    assert h.event_names() == ["create_sdn", "destroy_vm", "tear_down"]
-    assert h.events[1][1] == VM_ID
-    h.qemu_commands.deregister_vm.assert_called_once_with(VM_ID)
-    h.sdn_commands.deregister_sdn_resources_for_zones.assert_called_once_with({ZONE_ID})
+    assert h.event_names() == ["create_sdn"]
+    assert h.qemu_commands.register_vm.call_args.kwargs["vm_id"] == VM_ID
+    h.qemu_commands.deregister_vm.assert_not_called()
+    h.qemu_commands.destroy_vm.assert_not_called()
+    h.qemu_commands.remove_existing_nics.assert_not_called()
+    h.sdn_commands.deregister_sdn_resources_for_zones.assert_not_called()
 
 
-async def test_vm_that_cannot_be_destroyed_stays_tracked_and_loses_its_lease() -> None:
-    """The build's own error is raised, and the zone still goes."""
-    h = Harness(cloud_init_output="....\nstatus: error")
-    h.qemu_commands.destroy_vm = AsyncMock(side_effect=RuntimeError("VM is locked"))
+async def test_template_built_beside_a_failed_build_has_no_nic_on_the_kept_zone() -> (
+    None
+):
+    """Its IPAM entry would stop task_cleanup deleting the zone's subnet."""
+    debian_vm_id, ubuntu_vm_id = VM_ID, VM_ID + 1
+    h = Harness(
+        cloud_init_output={
+            debian_vm_id: CLOUD_INIT_DONE,
+            ubuntu_vm_id: CLOUD_INIT_ERROR,
+        }
+    )
+
+    with pytest.raises(ValueError, match="cloud-init failed"):
+        await h.build("debian13", "ubuntu24.04")
+
+    assert h.events == [
+        ("create_sdn", (IDS_START, "auto")),
+        ("template", debian_vm_id),
+        ("remove_nics", debian_vm_id),
+    ]
+    h.qemu_commands.deregister_vm.assert_called_once_with(debian_vm_id)
+    registered = [c.kwargs["vm_id"] for c in h.qemu_commands.register_vm.call_args_list]
+    assert registered == [debian_vm_id, ubuntu_vm_id]
+
+
+async def test_zone_is_kept_when_its_creation_fails() -> None:
+    """create_sdn tracks the zone itself before its first request."""
+    h = Harness()
+    h.sdn_commands.create_sdn = AsyncMock(side_effect=RuntimeError("vnet rejected"))
+
+    with pytest.raises(RuntimeError, match="vnet rejected"):
+        await h.build_debian()
+
+    assert h.events == []
+    assert h.create_requests == []
+
+
+async def test_leases_left_in_the_zone_are_passed_to_its_teardown() -> None:
+    h = Harness()
     h.sdn_commands.read_zone_ipam_mappings = AsyncMock(return_value=[LEASE])
 
-    with pytest.raises(ValueError, match="cloud-init failed"):
-        await h.build_debian()
+    await h.build_debian()
 
-    h.qemu_commands.deregister_vm.assert_not_called()
     assert h.events[-1] == ("tear_down", (ZONE_ID, (LEASE,)))
 
 
@@ -192,34 +255,32 @@ async def test_zone_torn_down_when_lease_lookup_fails() -> None:
     assert h.events[-1] == ("tear_down", (ZONE_ID, ()))
 
 
-async def test_zone_teardown_error_does_not_replace_the_build_error() -> None:
-    h = Harness(cloud_init_output="....\nstatus: error")
-    h.sdn_commands.tear_down_sdn_zone_and_vnet = AsyncMock(
-        side_effect=RuntimeError("SDN apply failed")
-    )
-
-    with pytest.raises(ValueError, match="cloud-init failed"):
-        await h.build_debian()
-
-    h.sdn_commands.deregister_sdn_resources_for_zones.assert_not_called()
-
-
-async def test_zone_that_survives_teardown_stays_tracked() -> None:
+@pytest.mark.parametrize(
+    "tear_down",
+    [
+        AsyncMock(return_value=False),
+        AsyncMock(side_effect=RuntimeError("SDN apply failed")),
+    ],
+    ids=["zone survives", "teardown raises"],
+)
+async def test_zone_that_is_not_removed_stays_tracked(tear_down: AsyncMock) -> None:
     """The templates are built, so this is left to task_cleanup, not raised."""
     h = Harness()
-    h.sdn_commands.tear_down_sdn_zone_and_vnet = AsyncMock(return_value=False)
+    h.sdn_commands.tear_down_sdn_zone_and_vnet = tear_down
 
     await h.build_debian()
 
     h.sdn_commands.deregister_sdn_resources_for_zones.assert_not_called()
 
 
-async def test_zone_torn_down_when_its_creation_fails_part_way() -> None:
-    h = Harness()
-    h.sdn_commands.create_sdn = AsyncMock(side_effect=RuntimeError("vnet rejected"))
+async def test_task_cleanup_destroys_vms_before_zones() -> None:
+    """A failed build's VM holds an IPAM entry in the build zone until it goes."""
+    order: List[str] = []
+    qemu_commands, sdn_commands = MagicMock(), MagicMock()
+    qemu_commands.task_cleanup = AsyncMock(side_effect=lambda: order.append("vms"))
+    sdn_commands.task_cleanup = AsyncMock(side_effect=lambda: order.append("zones"))
+    infra = InfraCommands(MagicMock(), "pve", sdn_commands, qemu_commands, MagicMock())
 
-    with pytest.raises(RuntimeError, match="vnet rejected"):
-        await h.build_debian()
+    await infra.task_cleanup()
 
-    assert h.events == [("tear_down", (ZONE_ID, ()))]
-    assert h.create_requests == []
+    assert order == ["vms", "zones"]

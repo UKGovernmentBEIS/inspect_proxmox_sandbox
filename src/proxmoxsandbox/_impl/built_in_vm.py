@@ -19,7 +19,7 @@ from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import POLL_WAIT, AsyncProxmoxAPI
-from proxmoxsandbox._impl.qemu_commands import QemuCommands, vm_label
+from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import BUILT_IN_IDS_PREFIX, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox.schema import VmConfig, VmSourceConfig
@@ -343,7 +343,7 @@ runcmd:
 
         Each build is a VM boot plus an apt run, mostly waiting on the guest,
         so the set costs about one build's time. They share one build zone,
-        which is gone again by the time this returns or raises.
+        which is removed once they have all succeeded.
         """
         missing = sorted(set(built_in_names) - set(await self.known_builtins()))
         if not missing:
@@ -354,16 +354,15 @@ runcmd:
             ]
             try:
                 # Not gather: cancelling a gather cancels its children, and
-                # the cancel below would then be a second one, landing in a
-                # build that is part-way through destroying its VM.
+                # the cancel below would then be a second one, landing in
+                # whatever a build awaits while it unwinds.
                 finished, _ = await asyncio.wait(
                     builds, return_when=asyncio.FIRST_EXCEPTION
                 )
             finally:
                 # A build that outlives a failed sibling would carry on after
                 # sample_init has released the instance, under the next
-                # sample's pre-clean. The zone also cannot go until every
-                # build VM has: a NIC's lease keeps its subnet from deletion.
+                # sample's pre-clean.
                 for build in builds:
                     build.cancel()
                 await asyncio.gather(*builds, return_exceptions=True)
@@ -557,9 +556,9 @@ runcmd:
         """Import, boot, cloud-init and template a VM, with `vnet_id` as its uplink.
 
         The finished template has no NIC: clones are given theirs from their
-        own sample's SDN, and `vnet_id` is gone once the build is over. A
-        build that fails or is cancelled destroys its VM, so that the zone
-        `vnet_id` is in can be removed.
+        own sample's SDN, and `vnet_id` is gone once the builds are over. A
+        build that fails or is cancelled leaves its VM as it is, tracked, like
+        anything else a failed sample_init made.
         """
         name = f"inspect-{built_in}"
 
@@ -589,9 +588,8 @@ runcmd:
                         "tablet": 0,
                         "start": False,
                         "agent": "enabled=1",
-                        # Tagged from creation, so that a build VM this
-                        # process loses track of is still found by
-                        # cleanup_no_id.
+                        # Tagged from creation: cleanup_no_id finds a
+                        # failed build's VM by tag.
                         "tags": f"inspect,builtin-{built_in}",
                     },
                 )
@@ -600,40 +598,24 @@ runcmd:
             # import work starts, so the ID is ours once the call returns and
             # a failed import task is not an ID collision.
             vm_id = await self.qemu_commands._create_with_fresh_vm_id(create)
-            # Tracked until it is a template, so task_cleanup destroys a build
-            # that was interrupted before it could destroy its own VM.
+            # Tracked until it is a template: task_cleanup destroys a failed
+            # build's VM, and has to before the build zone can go, because a
+            # NIC's IPAM entry keeps its subnet from being deleted.
             self.qemu_commands.register_vm(
                 vm_id=vm_id,
                 vm_config=VmConfig(
                     name=name, vm_source_config=VmSourceConfig(built_in=built_in)
                 ),
             )
-            try:
-                await self._provision_template(
-                    vm_id,
-                    built_in=built_in,
-                    create_upid=upid,
-                    user_data=user_data,
-                    disk_gib=disk_gib,
-                    cloud_init_timeout=cloud_init_timeout,
-                )
-            except BaseException:
-                await self._destroy_failed_build(vm_id, name)
-                raise
-            self.qemu_commands.deregister_vm(vm_id)
-
-    async def _destroy_failed_build(self, vm_id: int, name: str) -> None:
-        label = vm_label(name=name, vm_id=vm_id)
-        try:
-            await self.qemu_commands.destroy_vm(vm_id=vm_id, name=name)
-        except Exception as e:
-            # Not raised: the caller is already raising the build's own error.
-            self.logger.warning(
-                f"failed to destroy half-built template VM {label}, "
-                f"leaving it for task_cleanup: {e}"
+            await self._provision_template(
+                vm_id,
+                built_in=built_in,
+                create_upid=upid,
+                user_data=user_data,
+                disk_gib=disk_gib,
+                cloud_init_timeout=cloud_init_timeout,
             )
-            return
-        self.qemu_commands.deregister_vm(vm_id)
+            self.qemu_commands.deregister_vm(vm_id)
 
     async def _provision_template(
         self,
@@ -767,8 +749,9 @@ runcmd:
 
         await remove_cdrom()
 
-        # Also releases the NIC's lease in the build zone's IPAM. A subnet
-        # with a lease in it cannot be deleted.
+        # Also releases the NIC's IPAM entry in the build zone. A subnet with
+        # one in it cannot be deleted, including by the task_cleanup that
+        # removes the zone after a sibling build failed.
         await self.qemu_commands.remove_existing_nics(next_available_vm_id)
 
     @contextlib.asynccontextmanager
@@ -776,34 +759,33 @@ runcmd:
         """The SDN zone built-in templates are built in; yields its VNET ID.
 
         An `auto` SDN like a sample's default: DHCP for the guests, SNAT for
-        their apt runs, and a subnet that overlaps no other zone's. It exists
-        only inside the `async with`. Its name matches `is_ephemeral_zone`,
-        so one left behind by a killed process is swept by `cleanup_no_id`.
+        their apt runs, and a subnet that overlaps no other zone's. It is
+        removed when the `async with` body finishes. If the body raises, the
+        zone stays, tracked, with the failed build's VM still on it:
+        task_cleanup removes both, or --no-sandbox-cleanup holds them up, and
+        the next sample_init's pre-clean sweeps them by tag and zone name.
         """
         proxmox_ids_start = await self.sdn_commands.find_proxmox_ids_start(
             prefix=BUILT_IN_IDS_PREFIX
         )
-        try:
-            _, vnet_aliases = await self.sdn_commands.create_sdn(
-                proxmox_ids_start=proxmox_ids_start, sdn_config="auto"
-            )
-            yield vnet_aliases[0][0]
-        finally:
-            # Also after a create_sdn that failed part-way: the zone can
-            # exist without its VNET or subnet.
-            await self._tear_down_build_sdn(f"{proxmox_ids_start}z")
+        sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
+            proxmox_ids_start=proxmox_ids_start, sdn_config="auto"
+        )
+        if sdn_zone_id is None:
+            raise RuntimeError("create_sdn returned no zone for an auto SDN")
+        yield vnet_aliases[0][0]
+        await self._tear_down_build_sdn(sdn_zone_id)
 
     async def _tear_down_build_sdn(self, sdn_zone_id: str) -> None:
         """Remove the build zone, logging rather than raising if it survives.
 
-        Raising here would replace the error of the build that failed. A zone
-        that survives stays tracked for task_cleanup, and the next sample's
-        pre-clean sweeps it by name.
+        The templates are built by now. A zone that survives stays tracked
+        for task_cleanup, and the next sample's pre-clean sweeps it by name.
         """
         gone = False
         try:
             try:
-                # Only a build VM that could not be destroyed still has one.
+                # Every template's NIC is gone by now, so normally none.
                 leases = await self.sdn_commands.read_zone_ipam_mappings(
                     zone_ids={sdn_zone_id}
                 )

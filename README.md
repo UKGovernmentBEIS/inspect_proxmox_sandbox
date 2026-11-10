@@ -562,7 +562,7 @@ See [ctf4.py](./src/proxmoxsandbox/experimental/ctf4.py) for an example capture-
 Every VM created by this sandbox provider is tagged `inspect`. 
 (Tags will also be duplicated if they exist on a VM already, for `existing_backup_name`- and `existing_vm_template_tag`-type VMs)
 
-SDN zones have the pattern `[3 letters from eval task name][random 3 digits][z]`. VNets are similar and can be identified from their containing zone. Built-in VM templates are built in a zone of the same shape with the prefix `bi` instead of the task name letters. It is removed when the builds finish, whether or not they succeeded.
+SDN zones have the pattern `[3 letters from eval task name][random 3 digits][z]`. VNets are similar and can be identified from their containing zone. Built-in VM templates are built in a zone of the same shape with the prefix `bi` instead of the task name letters. It is removed once the templates are built. If a build fails, the zone and the half-built VM are left like any other sandbox resource: removed at the end of the task, or kept under `--no-sandbox-cleanup`.
 
 Some resources will persist after the eval is complete:
 
