@@ -38,6 +38,7 @@ _VM_ID_ATTEMPTS = 5
 # pvedaemon also occasionally fails to fork the task at all ("got no worker
 # upid - start worker failed", HTTP 500); nothing has started then either.
 _START_ATTEMPTS = 3
+_WORKER_START_ATTEMPTS = 4
 
 
 def vm_label(*, name: str, vm_id: int) -> str:
@@ -201,7 +202,7 @@ class QemuCommands(abc.ABC):
     async def destroy_vm(self, *, vm_id: int, name: str) -> None:
         label = vm_label(name=name, vm_id=vm_id)
         with trace_action(self.logger, self.TRACE_NAME, f"stop VM {label}"):
-            upid = await self.async_proxmox.request(
+            upid = await self._request_task(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
             # The stop task ends when the QEMU process has gone, so the status
@@ -232,7 +233,7 @@ class QemuCommands(abc.ABC):
             await is_not_running()
 
         with trace_action(self.logger, self.TRACE_NAME, f"delete VM {label}"):
-            upid = await self.async_proxmox.request(
+            upid = await self._request_task(
                 "DELETE", f"/nodes/{self.node}/qemu/{vm_id}"
             )
             # The destroy task completing is the evidence the VM is gone.
@@ -339,14 +340,35 @@ class QemuCommands(abc.ABC):
                 await asyncio.sleep(2 * attempt)
 
     @staticmethod
-    def _is_retryable_start(exc: Exception) -> bool:
-        if isinstance(exc, ProxmoxTaskError):
-            return True
+    def _is_worker_start_failure(exc: Exception) -> bool:
+        # pvedaemon's "500 got no worker upid - start worker failed": the
+        # task was never forked, so the request can be sent again.
         return (
             isinstance(exc, httpx.HTTPStatusError)
             and exc.response.status_code == 500
             and "start worker failed" in exc.response.text
         )
+
+    @classmethod
+    def _is_retryable_start(cls, exc: Exception) -> bool:
+        return isinstance(exc, ProxmoxTaskError) or cls._is_worker_start_failure(exc)
+
+    async def _request_task(self, method: str, path: str) -> str:
+        """Send a request that forks a task; retry if pvedaemon could not fork it."""
+        for attempt in range(1, _WORKER_START_ATTEMPTS + 1):
+            try:
+                return await self.async_proxmox.request(method, path)
+            except httpx.HTTPStatusError as e:
+                if attempt == _WORKER_START_ATTEMPTS or not (
+                    self._is_worker_start_failure(e)
+                ):
+                    raise
+                self.logger.warning(
+                    f"{method} {path}: Proxmox could not start a worker; "
+                    f"retrying ({attempt}/{_WORKER_START_ATTEMPTS})"
+                )
+                await asyncio.sleep(attempt)
+        raise AssertionError("unreachable")
 
     def _convert_sdn_vnet_aliases(
         self, sdn_vnet_aliases: VnetAliases
