@@ -16,11 +16,6 @@ from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox.schema import VmConfig, check_nic_vlan
 
-# "nested-virt" is Proxmox's vendor-neutral alias for vmx (Intel) / svm (AMD),
-# added in qemu-server 9.0.27 (PVE 9.1). Proxmox only accepts VM-specific CPU
-# flags from a fixed list, so "-vmx" itself is rejected.
-NO_NESTED_VIRT_FLAGS = "flags=-nested-virt"
-
 
 def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
     """The Proxmox `cpu` option for a CPU model, hiding vmx/svm from the guest.
@@ -29,8 +24,7 @@ def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
     own KVM, reaching the host kernel's nested-virtualisation code.
     """
     model = cpu or "host"
-    return model if nested_virt else f"{model},{NO_NESTED_VIRT_FLAGS}"
-
+    return model if nested_virt else f"{model},flags=-nested-virt"
 
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
