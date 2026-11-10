@@ -26,6 +26,7 @@ def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
     model = cpu or "host"
     return model if nested_virt else f"{model},flags=-nested-virt"
 
+
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
