@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from proxmoxsandbox._impl.infra_commands import InfraCommands
+from proxmoxsandbox._impl.infra_commands import _DESTROY_CONCURRENCY, InfraCommands
 from proxmoxsandbox._impl.sdn_commands import (
     STATIC_SDN_START,
     IpamMapping,
@@ -162,3 +162,28 @@ async def test_delete_sdn_and_vms_waits_for_every_destroy_before_raising():
 
     assert slow_destroy_finished
     infra.sdn_commands.tear_down_sdn_zone_and_vnet.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_sdn_and_vms_bounds_concurrent_destroys():
+    in_flight = 0
+    peak = 0
+
+    async def destroy_vm(*, vm_id: int, name: str) -> None:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+
+    infra = MagicMock()
+    infra.qemu_commands.destroy_vm = destroy_vm
+
+    await InfraCommands.delete_sdn_and_vms(
+        infra,
+        sdn_zone_id=None,
+        ipam_mappings=(),
+        vms={vm_id: MagicMock() for vm_id in range(100, 119)},
+    )
+
+    assert peak == _DESTROY_CONCURRENCY
