@@ -351,8 +351,8 @@ async def test_cleanup_after_interrupted_sample(
 
     One booted sandbox covers both: sample_cleanup(interrupted=True) must leave
     everything in place, task_cleanup must then destroy exactly what was tracked,
-    and cli_cleanup afterwards must find nothing (templates and the static SDN
-    must survive the sweep). The CLI's own destroy path is then exercised on a
+    and cli_cleanup afterwards must find nothing (templates must survive the
+    sweep). The CLI's own destroy path is then exercised on a
     zone plus a non-sandbox VM made outside sample_init, so nothing tracks them
     and no guest-agent boot is waited for.
     """
@@ -410,7 +410,7 @@ async def test_cleanup_after_interrupted_sample(
     assert await vm_ids() == {vm["vmid"] for vm in existing_vms}
     assert await zones() == existing_zones
 
-    # A clean host: the sweep must leave templates and the static SDN alone.
+    # A clean host: the sweep must leave templates alone.
     await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
     assert await vm_ids() == {vm["vmid"] for vm in existing_vms}
     assert await zones() == existing_zones

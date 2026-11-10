@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Built-in VM templates are built in an ephemeral SDN zone instead of a permanent `inspvmz` zone. An existing `inspvmz` zone is not removed automatically; it can be deleted manually once unused.
+- Built-in VM templates are built in a temporary SDN zone (`bi` + 3 digits + `z`) that is removed when the builds finish, instead of a permanent `inspvmz` zone, and the finished template has no NIC. A host image taken after a build no longer carries a zone with an SNAT rule naming the build host. A failed or cancelled build destroys its half-built VM. An `inspvmz` zone from an earlier version is left alone; see "Identifying created resources" in the README for removing it. A VM cloned from a built-in template by `existing_vm_template_tag` with `nics=None` now has no NIC
 - Proxmox task and VM-state polls start at 0.1 s and are at most 2 s apart (the first poll used to wait 1 s, and the gap was uncapped), and a VM is only reported stopped, deleted or converted to a template once its Proxmox task has finished
 - A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
 - VM creation retries when another process takes the VM ID between `/cluster/nextid` and the create; VM start retries a failed start task

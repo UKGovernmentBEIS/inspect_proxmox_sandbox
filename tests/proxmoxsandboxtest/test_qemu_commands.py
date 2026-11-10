@@ -58,10 +58,9 @@ async def test_none_nic_from_template_tag(
     auto_sdn_vnet_aliases: VnetAliases,
     built_in_vm: BuiltInVM,
 ):
-    """nics=None on existing_vm_template_tag inherits the template's NICs.
+    """nics=None on existing_vm_template_tag leaves the template's NICs as they are.
 
-    Built-in templates carry none (their build-time NIC is removed), so the
-    clone gets none either, even though an SDN with a VNET is available.
+    A built-in template has none, unless a release up to 0.12 built it.
     """
     await built_in_vm.ensure_exists("ubuntu24.04")
 
@@ -76,8 +75,11 @@ async def test_none_nic_from_template_tag(
         built_in_vm_ids=await built_in_vm.known_builtins(),
     )
 
+    template_vm_id = (await built_in_vm.known_builtins())["ubuntu24.04"]
+    assert await qemu_commands.vm_bridges(new_vm_id) == await qemu_commands.vm_bridges(
+        template_vm_id
+    )
     new_vm = await qemu_commands.read_vm(new_vm_id)
-    assert not any(key.startswith("net") for key in new_vm)
     assert "inspect" in new_vm["tags"]
     assert "builtin-ubuntu24.04" in new_vm["tags"]
 

@@ -143,6 +143,8 @@ async def test_cleanup_targets_provider_zone_via_regex():
         ("abc123zz", False),
         # Conforming substring not at the start.
         ("xabc123z", False),
+        # The permanent zone releases up to 0.12 built templates in.
+        ("inspvmz", False),
         # Generic user-named zones.
         ("user_zone", False),
         ("a254c5f5", False),
@@ -186,19 +188,28 @@ async def test_cleanup_skips_zone_with_matching_prefix_only():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_skips_user_zone_with_vnet():
-    """A user zone is not swept by cleanup_no_id even when it has VNETs."""
+@pytest.mark.parametrize(
+    ("zone_id", "vnet_id"),
+    [
+        ("user_zone", "uservnet"),
+        # Hosts that built a template with a release up to 0.12 still have
+        # this zone, and those templates still have a NIC on its VNET.
+        ("inspvmz", "inspvmv0"),
+    ],
+)
+async def test_cleanup_skips_zone_it_does_not_own(zone_id: str, vnet_id: str):
+    """A zone outside the ephemeral pattern is not swept, VNETs or not."""
     infra = _make_infra(
         vms=[],
-        zones=[{"zone": "user_zone", "type": "simple"}],
-        vnets=[{"vnet": "uservnet", "zone": "user_zone"}],
+        zones=[{"zone": zone_id, "type": "simple"}],
+        vnets=[{"vnet": vnet_id, "zone": zone_id}],
     )
 
     await infra.cleanup_no_id(skip_confirmation=True)
 
     # No deletion call at all when nothing is targeted.
     assert not infra.sdn_commands.tear_down_sdn_zones_and_vnets.called, (
-        "user zone must not be torn down"
+        f"{zone_id} must not be torn down"
     )
 
 
