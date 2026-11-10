@@ -35,6 +35,9 @@ VnetAliases: TypeAlias = List[Tuple[str, str | None]]
 # prefix match would let a pre-existing zone such as `abc123za` be swept and
 # deleted as if the provider owned it. Use `is_ephemeral_zone()` rather than
 # matching this directly.
+# `inspvmz` must stay outside the pattern: versions up to 0.12 built templates
+# in that permanent zone, hosts still have it, and those templates still have
+# a NIC on its VNET.
 ZONE_REGEX = r"^[a-z0-9]{1,3}[0-9]{3}z$"
 
 
@@ -315,10 +318,8 @@ class SdnCommands(abc.ABC):
             raise ValueError("Invalid zone ID")
 
         # Register before the first request so a failure anywhere below (zone,
-        # VNET, subnet, apply) leaves the zone tracked. The static zone is
-        # meant to outlive the task.
-        if is_ephemeral_zone(sdn_zone_id):
-            self.register_sdn_zone(sdn_zone_id)
+        # VNET, subnet, apply) leaves the zone tracked.
+        self.register_sdn_zone(sdn_zone_id)
 
         with trace_action(self.logger, self.TRACE_NAME, f"create sdn  {sdn_zone_id=}"):
             zone_create_json: ProxmoxJsonDataType = {

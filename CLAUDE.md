@@ -41,6 +41,9 @@ user asked for cleanup, and `--no-sandbox-cleanup` should hold a half-built
 range up), releases the instance, and relies on the next `sample_init`'s
 pre-clean to sweep the leftovers. A pre-clean that cannot finish fails that
 sample too, rather than building a second sample next to the leftovers.
+A built-in template build is the one part of `sample_init` that does tear
+down after itself: its build VM and build zone go whether it succeeded,
+failed or was cancelled.
 
 ### Inspect AI Lifecycle Integration
 Inspect calls these methods in order:
