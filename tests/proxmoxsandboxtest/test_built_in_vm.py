@@ -11,7 +11,6 @@ rebuilt here under --runslow. Without it, a host that has no Kali template
 still builds one (through the same code) the first time a test asks for it.
 """
 
-import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,7 +52,7 @@ async def rebuild(request: pytest.FixtureRequest) -> Rebuild:
 
     existing_vm_ids = {vm["vmid"] for vm in await infra.qemu_commands.list_vms()}
 
-    await asyncio.gather(*(built_in_vm.ensure_exists(name) for name in built_ins))
+    await built_in_vm.ensure_exists_many(built_ins)
 
     all_vms = await infra.qemu_commands.list_vms()
     return Rebuild(

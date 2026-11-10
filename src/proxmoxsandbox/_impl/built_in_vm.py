@@ -3,6 +3,7 @@ import asyncio
 import os
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from io import BytesIO
 from ipaddress import ip_address, ip_network
 from logging import getLogger
@@ -97,9 +98,6 @@ class BuiltInVM(abc.ABC):
         self.storage_commands = storage_commands
         self.node = node
         self.image_storage = image_storage
-        # Guards the unreserved-ID VM create and the static SDN create when
-        # several built-ins are built concurrently on one host.
-        self._create_lock = asyncio.Lock()
         self.cache_dir = platformdirs.user_cache_path(
             appname="inspect_proxmox_sandbox", ensure_exists=True
         )
@@ -348,6 +346,29 @@ runcmd:
 
         return existing_content
 
+    async def ensure_exists_many(self, built_in_names: Iterable[str]) -> None:
+        """Build whichever of these built-ins the host lacks, concurrently.
+
+        Each build is a VM boot plus an apt run, mostly waiting on the guest,
+        so the set costs about one build's time.
+        """
+        missing = sorted(set(built_in_names) - set(await self.known_builtins()))
+        if not missing:
+            return
+        # Before the builds start: each checks for the zone itself, and two
+        # that both found it missing would both try to create it.
+        await self.ensure_static_sdn_exists()
+        builds = [asyncio.ensure_future(self.ensure_exists(name)) for name in missing]
+        try:
+            await asyncio.gather(*builds)
+        finally:
+            # A build that outlives a failed sibling would carry on after
+            # sample_init has released the instance, under the next sample's
+            # pre-clean.
+            for build in builds:
+                build.cancel()
+            await asyncio.gather(*builds, return_exceptions=True)
+
     async def ensure_exists(self, built_in_name: str) -> None:
         if built_in_name is None:
             raise ValueError("built_in_name must be set")
@@ -445,12 +466,27 @@ runcmd:
 
                 # tar -xf as a subprocess; awaited rather than check_call so
                 # the event loop (other builds' polls) keeps running meanwhile
+                tar_command = [
+                    "tar",
+                    "-xf",
+                    str(download_path),
+                    "-C",
+                    str(self.cache_dir),
+                ]
                 tar = await asyncio.create_subprocess_exec(
-                    "tar", "-xf", str(download_path), "-C", str(self.cache_dir)
+                    *tar_command, stderr=asyncio.subprocess.PIPE
                 )
-                if await tar.wait() != 0:
+                try:
+                    _, tar_stderr = await tar.communicate()
+                except asyncio.CancelledError:
+                    # Left running, it would still be writing disk.raw when a
+                    # retry starts its own extract onto the same path.
+                    tar.kill()
+                    await tar.wait()
+                    raise
+                if tar.returncode != 0:
                     raise subprocess.CalledProcessError(
-                        tar.returncode or -1, ["tar", "-xf", str(download_path)]
+                        tar.returncode or -1, tar_command, stderr=tar_stderr
                     )
 
                 # rename the output disk.raw to something better:
@@ -515,19 +551,15 @@ runcmd:
         name = f"inspect-{built_in}"
 
         with trace_action(self.logger, TRACE_NAME, f"build template {built_in=}"):
-            # /cluster/nextid reserves nothing, so concurrent builds hold the
-            # lock from reading it until the create call has returned (PVE
-            # writes the VM config, with a "create" lock, before the import
-            # work starts, so the ID is taken from then on).
-            async with self._create_lock:
-                next_available_vm_id = (
-                    await self.qemu_commands.find_next_available_vm_id()
-                )
+            upid = ""
+
+            async def create(vm_id: int) -> None:
+                nonlocal upid
                 upid = await self.async_proxmox.request(
                     "POST",
                     f"/nodes/{self.node}/qemu",
                     json={
-                        "vmid": next_available_vm_id,
+                        "vmid": vm_id,
                         "name": name,
                         "node": self.node,
                         "cpu": "host",
@@ -546,6 +578,13 @@ runcmd:
                         "agent": "enabled=1",
                     },
                 )
+
+            # Only the POST is retried: PVE writes the VM config before the
+            # import work starts, so the ID is ours once the call returns and
+            # a failed import task is not an ID collision.
+            next_available_vm_id = await self.qemu_commands._create_with_fresh_vm_id(
+                create
+            )
             with trace_action(
                 self.logger,
                 TRACE_NAME,
@@ -678,36 +717,35 @@ runcmd:
             await remove_cdrom()
 
     async def ensure_static_sdn_exists(self):
-        async with self._create_lock:
-            existing_zones = await self.sdn_commands.list_sdn_zones()
+        existing_zones = await self.sdn_commands.list_sdn_zones()
 
-            exists_already = any(
-                zone_info["zone"] and zone_info["zone"] == f"{STATIC_SDN_START}z"
-                for zone_info in existing_zones
-            )
+        exists_already = any(
+            zone_info["zone"] and zone_info["zone"] == f"{STATIC_SDN_START}z"
+            for zone_info in existing_zones
+        )
 
-            if exists_already:
-                return
+        if exists_already:
+            return
 
-            await self.sdn_commands.create_sdn(
-                proxmox_ids_start=STATIC_SDN_START,
-                sdn_config=SdnConfig(
-                    vnet_configs=(
-                        VnetConfig(
-                            subnets=(
-                                SubnetConfig(
-                                    cidr=ip_network("192.168.99.0/24"),
-                                    gateway=ip_address("192.168.99.1"),
-                                    snat=True,
-                                    dhcp_ranges=(
-                                        DhcpRange(
-                                            start=ip_address("192.168.99.50"),
-                                            end=ip_address("192.168.99.100"),
-                                        ),
+        await self.sdn_commands.create_sdn(
+            proxmox_ids_start=STATIC_SDN_START,
+            sdn_config=SdnConfig(
+                vnet_configs=(
+                    VnetConfig(
+                        subnets=(
+                            SubnetConfig(
+                                cidr=ip_network("192.168.99.0/24"),
+                                gateway=ip_address("192.168.99.1"),
+                                snat=True,
+                                dhcp_ranges=(
+                                    DhcpRange(
+                                        start=ip_address("192.168.99.50"),
+                                        end=ip_address("192.168.99.100"),
                                     ),
                                 ),
-                            )
-                        ),
-                    )
-                ),
-            )
+                            ),
+                        )
+                    ),
+                )
+            ),
+        )
