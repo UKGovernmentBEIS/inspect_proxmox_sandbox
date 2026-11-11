@@ -392,8 +392,7 @@ class SdnCommands(abc.ABC):
                     "GET", f"/cluster/sdn/vnets/{vnet}/subnets"
                 )
             except httpx.HTTPStatusError as e:
-                # Another process tearing down its zone between our listing
-                # and this read; its CIDRs are no longer in use.
+                # Another process tore its zone down after we listed it
                 if e.response.status_code == 500 and "does not exist" in str(e):
                     continue
                 raise

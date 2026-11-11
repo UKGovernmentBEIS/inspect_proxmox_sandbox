@@ -2,10 +2,9 @@
 
 ## Unreleased
 
-- Proxmox task and VM-state polls start at 0.1 s and are at most 2 s apart (the first poll used to wait 1 s, and the gap was uncapped), and a VM is only reported stopped, deleted or converted to a template once its Proxmox task has finished
 - A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
-- VM creation retries when another process takes the VM ID between `/cluster/nextid` and the create; VM start retries a failed start task
-- `exec` reads its stdout, stderr and exit code concurrently and does not ping the guest agent before each file read any more, about 1 s less per command
+- Two processes creating VMs on one Proxmox host no longer fail when both are given the same VM ID
+- `exec` takes about 1 s less per command
 
 ## 0.13.0
 

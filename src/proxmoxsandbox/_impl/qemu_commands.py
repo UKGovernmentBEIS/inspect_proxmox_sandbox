@@ -34,20 +34,13 @@ def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
-# A ping to an agent that is not up yet blocks ~3 s inside Proxmox, so the
-# gap between pings only needs to be short.
+# A ping to an agent that is not up blocks ~3 s inside Proxmox
 _POLL_MAX_WAIT = POLL_MAX_WAIT
 _POLL_WAIT = POLL_WAIT
-# /cluster/nextid does not reserve the ID it returns, so another process
-# (a second eval, a parallel test worker) can create that VM between our read
-# and our create. Each collision costs one round trip; a long run of them
-# means something is wrong, not unlucky.
+# /cluster/nextid reserves nothing, so another process can take the ID first
 _VM_ID_ATTEMPTS = 5
-# A start that overlaps another process's SDN apply can fail: the apply
-# rewrites the running SDN config and restarts every zone's dnsmasq, and
-# pve-bridge reads both. That window is a few seconds long. Under load
-# pvedaemon also occasionally fails to fork the task at all ("got no worker
-# upid - start worker failed", HTTP 500); nothing has started then either.
+# A start can fail while another process applies SDN config (a window of a
+# few seconds), or when pvedaemon cannot fork the task at all
 _START_ATTEMPTS = 3
 _WORKER_START_ATTEMPTS = 4
 
@@ -216,10 +209,8 @@ class QemuCommands(abc.ABC):
             upid = await self._request_task(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
-            # The stop task ends when the QEMU process has gone, so the status
-            # poll below usually passes first time. A failed stop task (e.g.
-            # the VM does not exist) is left for the poll and the delete to
-            # report, since callers match on their errors.
+            # A failed stop (e.g. the VM does not exist) is left for the poll and the
+            # delete to report: callers match on their errors
             try:
                 await self.async_proxmox.wait_for_task(upid=upid)
             except ProxmoxTaskError as e:
@@ -247,16 +238,12 @@ class QemuCommands(abc.ABC):
             upid = await self._request_task(
                 "DELETE", f"/nodes/{self.node}/qemu/{vm_id}"
             )
-            # The destroy task completing is the evidence the VM is gone.
-            # Polling for the ID to disappear is not: /cluster/nextid reuses
-            # freed IDs, so another process can have a new VM under this ID
-            # within seconds.
+            # Not a poll for the ID to disappear: /cluster/nextid reuses freed IDs, so
+            # another process can have a new VM under it within seconds
             try:
                 await self.async_proxmox.wait_for_task(upid=upid)
             except ProxmoxTaskError as e:
-                # Another delete of this VM (a second process's pre-clean
-                # sweep, say) got the config lock first: this task then finds
-                # the config gone, which is the outcome we wanted.
+                # Another delete of this VM got the config lock first; the VM is gone
                 if f"qemu-server/{vm_id}.conf' does not exist" not in e.exitstatus:
                     raise
                 self.logger.debug(f"VM {label} was deleted by another task")
@@ -287,13 +274,9 @@ class QemuCommands(abc.ABC):
 
     @staticmethod
     def _is_vm_id_collision(exc: BaseException, vm_id: int) -> bool:
-        # Create (`unable to create VM 105 - VM 105 already exists on node
-        # 'pve'`) and clone (`unable to create VM 105: config file already
-        # exists`) reject a taken ID in the API call when they can. Clone
-        # checks again inside its worker, so two clones that both pass the
-        # first check leave the loser with a failed task carrying the same
-        # text. Match the whole phrase there: a clone that fails later can
-        # say "already exists" about a disk.
+        # Clone checks the ID again inside its worker, so the loser of two clones
+        # gets a failed task. Match the whole phrase there: a clone that fails
+        # later can say "already exists" about a disk.
         if isinstance(exc, ProxmoxTaskError):
             return (
                 f"unable to create VM {vm_id}: config file already exists"
@@ -352,8 +335,7 @@ class QemuCommands(abc.ABC):
 
     @staticmethod
     def _is_worker_start_failure(exc: Exception) -> bool:
-        # pvedaemon's "500 got no worker upid - start worker failed": the
-        # task was never forked, so the request can be sent again.
+        # The task was never forked, so the request can be sent again
         return (
             isinstance(exc, httpx.HTTPStatusError)
             and exc.response.status_code == 500
