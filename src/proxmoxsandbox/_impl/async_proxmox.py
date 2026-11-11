@@ -383,10 +383,7 @@ class AsyncProxmoxAPI:
     ) -> dict[str, Any]:
         """Poll until the task has finished; returns its final status record.
 
-        Raises ProxmoxTaskError unless the task's exitstatus is OK (or
-        "WARNINGS: n"): a start whose QEMU exited or a clone that broke would
-        otherwise go unnoticed until a later step timed out waiting for the
-        VM state the task should have produced.
+        Raises ProxmoxTaskError unless the exitstatus is OK or "WARNINGS: n".
         """
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")

@@ -293,9 +293,7 @@ class QemuCommands(abc.ABC):
     ) -> int:
         """Run `create` with a newly allocated VM ID, retrying on an ID collision.
 
-        `create` must not have made anything on the host when it raises the
-        collision: Proxmox rejects a taken ID before creating the config, so
-        there is nothing to clean up and the next attempt uses the next free ID.
+        `create` must leave nothing on the host when it raises the collision.
         """
         for attempt in range(1, _VM_ID_ATTEMPTS + 1):
             vm_id = await self.find_next_available_vm_id()
