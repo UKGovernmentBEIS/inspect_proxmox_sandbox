@@ -37,6 +37,8 @@ from proxmoxsandbox.schema import (
     VmConfig,
 )
 
+# A 19-VM range posting every stop and delete at once got
+# "500 got no worker upid - start worker failed" from Proxmox
 _DESTROY_CONCURRENCY = 4
 
 
@@ -278,8 +280,6 @@ class InfraCommands(abc.ABC):
         ipam_mappings: Sequence[IpamMapping],
         vms: dict[int, VmConfig],
     ):
-        # Four at a time: a 19-VM range posting every stop and delete together got
-        # "500 got no worker upid - start worker failed" from Proxmox
         slots = asyncio.Semaphore(_DESTROY_CONCURRENCY)
 
         async def destroy(vm_id: int, vm_config: VmConfig) -> None:
@@ -288,7 +288,7 @@ class InfraCommands(abc.ABC):
 
         results = await asyncio.gather(
             *(destroy(vm_id, vm_config) for vm_id, vm_config in vms.items()),
-            # A destroy still running after we raise would race task_cleanup's
+            # A destroy still running after we raise would race task_cleanup
             return_exceptions=True,
         )
         for result in results:
@@ -345,9 +345,6 @@ class InfraCommands(abc.ABC):
             ipam_mappings.append(ipam_mapping)
         return ipam_mappings
 
-    async def find_proxmox_ids_start(self, task_name_start: str) -> str:
-        return await self.sdn_commands.find_proxmox_ids_start(prefix=task_name_start)
-
     async def find_all_zones(self, vnet_ids: Collection[str]) -> Set[str]:
         return set(
             [
@@ -375,9 +372,9 @@ class InfraCommands(abc.ABC):
         # Only zones matching the provider's ephemeral-zone naming convention
         # are eligible for sweep — `create_sdn` enforces this convention at
         # creation (sdn_commands.create_sdn). Pre-existing user zones
-        # (referenced via sdn_config=None) do not match, and must
-        # not be deleted even when an `inspect`-tagged VM is plugged into one
-        # of their VNETs.
+        # (referenced via sdn_config=None) do not match, and must not be
+        # deleted even when an `inspect`-tagged VM is plugged into one of
+        # their VNETs.
         # Zones that VMs we created are plugged into. Filtered to provider
         # zones only, so attaching a sandbox VM to a user-pre-existing VNET
         # does not drag the user's zone into the deletion set.

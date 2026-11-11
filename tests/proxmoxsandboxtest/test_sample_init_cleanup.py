@@ -37,7 +37,7 @@ def _make_infra_mock(**overrides):
     """Create a mock InfraCommands with sensible defaults.
 
     Pass keyword arguments to override specific attributes, e.g.:
-        _make_infra_mock(find_proxmox_ids_start=AsyncMock(side_effect=Exception("boom")))
+        _make_infra_mock(create_sdn_and_vms=AsyncMock(side_effect=Exception("boom")))
     """
     infra = MagicMock()
     infra.sdn_commands = MagicMock()
@@ -45,10 +45,9 @@ def _make_infra_mock(**overrides):
     infra.qemu_commands = MagicMock()
     infra.qemu_commands.list_vms = AsyncMock(return_value=[])
     infra.built_in_vm = AsyncMock()
-    infra.built_in_vm.ensure_exists = AsyncMock()
     infra.async_proxmox = AsyncMock()
     infra.node = "pve1"
-    infra.find_proxmox_ids_start = AsyncMock(return_value="test123")
+    infra.sdn_commands.find_proxmox_ids_start = AsyncMock(return_value="test123")
     infra.create_sdn_and_vms = AsyncMock()
     infra.cleanup_no_id = AsyncMock()
     infra.deregister_resources = MagicMock()
@@ -141,10 +140,9 @@ async def test_sample_init_no_cleanup_on_early_failure(
     """A failure before anything is created releases the instance untouched."""
     os.environ["PROXMOX_CONFIG_FILE"] = simple_config_file
 
-    infra = _make_infra_mock(
-        find_proxmox_ids_start=AsyncMock(
-            side_effect=Exception("API connection failed")
-        ),
+    infra = _make_infra_mock()
+    infra.sdn_commands.find_proxmox_ids_start = AsyncMock(
+        side_effect=Exception("API connection failed")
     )
     p1, p2, p3 = _patch_infra(infra)
 
@@ -192,11 +190,9 @@ async def test_sample_init_precheck_cleans_dirty_instance(
             {"vnet": "tlo123v1", "zone": "tlo123z"},
         ]
     )
-    infra = _make_infra_mock(
-        sdn_commands=sdn_mock,
-        find_proxmox_ids_start=AsyncMock(
-            side_effect=Exception("Stopping after pre-check")
-        ),
+    infra = _make_infra_mock(sdn_commands=sdn_mock)
+    infra.sdn_commands.find_proxmox_ids_start = AsyncMock(
+        side_effect=Exception("Stopping after pre-check")
     )
     p1, p2, p3 = _patch_infra(infra)
 
@@ -244,11 +240,9 @@ async def test_sample_init_precheck_notices_leftover_vms(
 
     qemu_mock = MagicMock()
     qemu_mock.list_vms = AsyncMock(return_value=vms)
-    infra = _make_infra_mock(
-        qemu_commands=qemu_mock,
-        find_proxmox_ids_start=AsyncMock(
-            side_effect=Exception("Stopping after pre-check")
-        ),
+    infra = _make_infra_mock(qemu_commands=qemu_mock)
+    infra.sdn_commands.find_proxmox_ids_start = AsyncMock(
+        side_effect=Exception("Stopping after pre-check")
     )
     p1, p2, p3 = _patch_infra(infra)
 
@@ -281,7 +275,7 @@ async def test_sample_init_precheck_ignores_pre_existing_vnets(
 
     sdn_mock = MagicMock()
     # Pre-existing user vnets in user-named zones; none matches ZONE_REGEX.
-    # Includes the permanent zone of 0.12 and earlier, and a user zone whose
+    # Includes the permanent zone of 0.13 and earlier, and a user zone whose
     # prefix would match an unanchored pattern
     sdn_mock.read_all_vnets = AsyncMock(
         return_value=[
@@ -290,11 +284,9 @@ async def test_sample_init_precheck_ignores_pre_existing_vnets(
             {"vnet": "abc123v", "zone": "abc123za"},
         ]
     )
-    infra = _make_infra_mock(
-        sdn_commands=sdn_mock,
-        find_proxmox_ids_start=AsyncMock(
-            side_effect=Exception("Stopping after pre-check")
-        ),
+    infra = _make_infra_mock(sdn_commands=sdn_mock)
+    infra.sdn_commands.find_proxmox_ids_start = AsyncMock(
+        side_effect=Exception("Stopping after pre-check")
     )
     p1, p2, p3 = _patch_infra(infra)
 
@@ -351,7 +343,7 @@ async def test_sample_init_precheck_cleanup_failure_fails_the_sample(
                 await ProxmoxSandboxEnvironment.sample_init("test_task", config, {})
 
             assert infra.cleanup_no_id.called
-            assert not infra.find_proxmox_ids_start.called, (
+            assert not infra.sdn_commands.find_proxmox_ids_start.called, (
                 "sample_init must stop before allocating IDs for new VMs"
             )
             assert not infra.create_sdn_and_vms.called

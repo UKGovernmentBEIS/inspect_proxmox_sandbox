@@ -4,7 +4,6 @@ from typing import Dict
 import pytest
 from inspect_ai.util import SandboxEnvironment
 
-from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
@@ -19,7 +18,7 @@ from proxmoxsandbox.schema import (
     VnetConfig,
 )
 
-from .proxmox_sandbox_utils import setup_sandbox
+from .proxmox_sandbox_utils import reset_pool_state, setup_sandbox
 
 CURRENT_DIR = Path(__file__).parent
 
@@ -337,7 +336,7 @@ async def test_ova() -> None:
         )
 
 
-async def test_cleanup_after_interrupted_sample(
+async def test_task_cleanup_then_cli_cleanup(
     qemu_commands: QemuCommands,
     sdn_commands: SdnCommands,
 ) -> None:
@@ -351,9 +350,15 @@ async def test_cleanup_after_interrupted_sample(
         )
     )
 
+    async def vm_ids() -> set[int]:
+        return {vm["vmid"] for vm in await qemu_commands.list_vms()}
+
+    async def zones() -> list[dict]:
+        return sorted(await sdn_commands.list_sdn_zones(), key=lambda x: x["zone"])
+
     existing_vms = await qemu_commands.list_vms()
-    existing_zones = await sdn_commands.list_sdn_zones()
-    existing_zones.sort(key=lambda x: x["zone"])
+    existing_vm_ids = {vm["vmid"] for vm in existing_vms}
+    existing_zones = await zones()
 
     # can happen if something else (e.g. an interrupted test run) left inspect VMs
     # behind; abort rather than trying to work around it
@@ -362,16 +367,10 @@ async def test_cleanup_after_interrupted_sample(
     ]
     assert not existing_sweepable, f"unexpected pre-existing VMs: {existing_sweepable}"
 
-    async def vm_ids() -> set[int]:
-        return {vm["vmid"] for vm in await qemu_commands.list_vms()}
-
-    async def zones() -> list:
-        return sorted(await sdn_commands.list_sdn_zones(), key=lambda x: x["zone"])
-
     task_name = "ttc"
     _, envs_dict = await setup_sandbox(task_name, sandbox_env_config)
 
-    assert len(await vm_ids()) == len(existing_vms) + 1
+    assert len(await vm_ids()) == len(existing_vm_ids) + 1
     assert len(await zones()) == len(existing_zones) + 1
 
     # Simulate Ctrl-C: sample_cleanup is called with interrupted=True,
@@ -383,7 +382,7 @@ async def test_cleanup_after_interrupted_sample(
         interrupted=True,
     )
 
-    assert len(await vm_ids()) == len(existing_vms) + 1
+    assert len(await vm_ids()) == len(existing_vm_ids) + 1
     assert len(await zones()) == len(existing_zones) + 1
 
     # Now task_cleanup runs (as Inspect would after Ctrl-C)
@@ -393,25 +392,23 @@ async def test_cleanup_after_interrupted_sample(
         cleanup=True,
     )
 
-    assert await vm_ids() == {vm["vmid"] for vm in existing_vms}
+    assert await vm_ids() == existing_vm_ids
     assert await zones() == existing_zones
 
     # A clean host: the sweep must leave templates alone.
     await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
-    assert await vm_ids() == {vm["vmid"] for vm in existing_vms}
+    assert await vm_ids() == existing_vm_ids
     assert await zones() == existing_zones
 
     # Forget what this process tracked: the CLI has to find the VM by tag and
     # the zone by name, as after a crash
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
+    reset_pool_state()
     await setup_sandbox("tcc", sandbox_env_config)
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
-    assert len(await vm_ids()) == len(existing_vms) + 1
+    reset_pool_state()
+    assert len(await vm_ids()) == len(existing_vm_ids) + 1
     assert len(await zones()) == len(existing_zones) + 1
 
     await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
 
-    assert await vm_ids() == {vm["vmid"] for vm in existing_vms}
+    assert await vm_ids() == existing_vm_ids
     assert await zones() == existing_zones

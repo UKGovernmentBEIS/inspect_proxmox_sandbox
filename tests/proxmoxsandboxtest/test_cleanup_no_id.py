@@ -143,7 +143,7 @@ async def test_cleanup_targets_provider_zone_via_regex():
         ("abc123zz", False),
         # Conforming substring not at the start.
         ("xabc123z", False),
-        # The permanent zone releases up to 0.12 built templates in.
+        # The permanent zone releases up to 0.13 built templates in.
         ("inspvmz", False),
         # Generic user-named zones.
         ("user_zone", False),
@@ -192,7 +192,7 @@ async def test_cleanup_skips_zone_with_matching_prefix_only():
     ("zone_id", "vnet_id"),
     [
         ("user_zone", "uservnet"),
-        # Hosts that built a template with 0.12 or earlier still have this zone
+        # Hosts that built a template with 0.13 or earlier still have this zone
         ("inspvmz", "inspvmv0"),
     ],
 )

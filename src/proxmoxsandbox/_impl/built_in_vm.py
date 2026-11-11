@@ -1,6 +1,5 @@
 import abc
 import asyncio
-import contextlib
 import os
 import subprocess
 import tempfile
@@ -8,7 +7,7 @@ from collections.abc import Iterable
 from io import BytesIO
 from logging import getLogger
 from pathlib import Path
-from typing import AsyncIterator, BinaryIO, Dict, cast, get_args
+from typing import BinaryIO, Dict, cast, get_args
 from urllib.parse import urlparse
 
 import httpx
@@ -182,8 +181,7 @@ runcmd:
   - [ systemctl, mask, systemd-networkd-wait-online.service ]
 # systemd-networkd-wait-online.service causes startup delays
 # and makes it annoying to debug network issues
-# "quiet": under nested virtualisation every printk byte to the serial console
-# is a trap (ubuntu24.04 kernel+initrd 3.7 s -> 2.8 s)
+# "quiet": under nested virtualisation every printk byte to the serial console is a trap
   - - sh
     - -c
     - |
@@ -283,11 +281,6 @@ runcmd:
         await attach_to_vm()
 
     # for test code only
-    async def clear_builtins(self) -> None:
-        for built_in in SOURCE_IMAGE_NAMES:
-            await self.clear_builtin(built_in)
-
-    # for test code only
     async def clear_builtin(self, built_in: str) -> None:
         """Remove one built-in's template and its uploaded source image."""
         source_image_name = SOURCE_IMAGE_NAMES[built_in]
@@ -340,28 +333,24 @@ runcmd:
         missing = sorted(set(built_in_names) - set(await self.known_builtins()))
         if not missing:
             return
-        async with self.build_sdn() as vnet_id:
-            builds = [
-                asyncio.ensure_future(self._build(name, vnet_id)) for name in missing
-            ]
-            try:
-                # asyncio.wait, not gather: the builds must be cancelled only once
-                finished, _ = await asyncio.wait(
-                    builds, return_when=asyncio.FIRST_EXCEPTION
-                )
-            finally:
-                # A build outliving a failed sibling would run on under the next
-                # sample's pre-clean
-                for build in builds:
-                    build.cancel()
-                await asyncio.gather(*builds, return_exceptions=True)
-            for build in finished:
-                build.result()
-
-    async def ensure_exists(self, built_in_name: str) -> None:
-        if built_in_name is None:
-            raise ValueError("built_in_name must be set")
-        await self.ensure_exists_many([built_in_name])
+        sdn_zone_id, vnet_id = await self._create_build_sdn()
+        builds = [asyncio.create_task(self._build(name, vnet_id)) for name in missing]
+        try:
+            # asyncio.wait, not gather: a cancelled gather cancels the builds itself
+            finished, _ = await asyncio.wait(
+                builds, return_when=asyncio.FIRST_EXCEPTION
+            )
+        finally:
+            # A build outliving a failed sibling would run on under the next
+            # sample's pre-clean
+            for build in builds:
+                build.cancel()
+            await asyncio.gather(*builds, return_exceptions=True)
+        for build in finished:
+            build.result()
+        # Not in a finally: a failed build's VM is still on the zone, and
+        # task_cleanup removes both
+        await self._tear_down_build_sdn(sdn_zone_id)
 
     async def _build(self, built_in_name: str, vnet_id: str) -> None:
         if built_in_name == "ubuntu24.04":
@@ -423,11 +412,7 @@ runcmd:
             built_in, source_image_name, source_image_source_url
         )
 
-        await self.startup_vm(
-            built_in,
-            f"import/{source_image_name}",
-            vnet_id=vnet_id,
-        )
+        await self.startup_vm(built_in, f"import/{source_image_name}", vnet_id=vnet_id)
 
     async def ensure_exists_from_xz(
         self,
@@ -476,9 +461,9 @@ runcmd:
                     tar.kill()
                     await tar.wait()
                     raise
-                if tar.returncode != 0:
+                if tar.returncode:
                     raise subprocess.CalledProcessError(
-                        tar.returncode or -1, tar_command, stderr=tar_stderr
+                        tar.returncode, tar_command, stderr=tar_stderr
                     )
 
                 # rename the output disk.raw to something better:
@@ -540,210 +525,182 @@ runcmd:
         disk_gib: int | None = None,
         cloud_init_timeout: int = CLOUD_INIT_TIMEOUT,
     ) -> None:
-        """Import, boot, cloud-init and template a VM, with `vnet_id` as its uplink.
-
-        The finished template has no NIC. A build that fails or is cancelled
-        leaves its VM as it is, tracked.
-        """
         name = f"inspect-{built_in}"
 
         with trace_action(self.logger, TRACE_NAME, f"build template {built_in=}"):
-            upid = ""
 
             async def create(vm_id: int) -> None:
-                nonlocal upid
-                upid = await self.async_proxmox.request(
-                    "POST",
-                    f"/nodes/{self.node}/qemu",
-                    json={
-                        "vmid": vm_id,
-                        "name": name,
-                        "node": self.node,
-                        "cpu": proxmox_cpu("host", nested_virt=False),
-                        "memory": 8192,
-                        "cores": 2,
-                        "ostype": "l26",
-                        "scsi0": f"{self.image_storage}:0,"
-                        + f"import-from={LOCAL_STORAGE}:{import_source},"
-                        + "format=qcow2,cache=writeback",
-                        "scsihw": "virtio-scsi-single",
-                        "net0": f"virtio,bridge={vnet_id}",
-                        "serial0": "socket",
-                        "vga": "none",
-                        "tablet": 0,
-                        "start": False,
-                        "agent": "enabled=1",
-                        # Tagged from creation: cleanup_no_id finds a
-                        # failed build's VM by tag.
-                        "tags": f"inspect,builtin-{built_in}",
-                    },
-                )
+                with trace_action(
+                    self.logger,
+                    TRACE_NAME,
+                    f"create VM from import {built_in=} {vm_id=}",
+                ):
+                    upid = await self.async_proxmox.request(
+                        "POST",
+                        f"/nodes/{self.node}/qemu",
+                        json={
+                            "vmid": vm_id,
+                            "name": name,
+                            "node": self.node,
+                            "cpu": proxmox_cpu("host", nested_virt=False),
+                            "memory": 8192,
+                            "cores": 2,
+                            "ostype": "l26",
+                            "scsi0": f"{self.image_storage}:0,"
+                            + f"import-from={LOCAL_STORAGE}:{import_source},"
+                            + "format=qcow2,cache=writeback",
+                            "scsihw": "virtio-scsi-single",
+                            "net0": f"virtio,bridge={vnet_id}",
+                            "serial0": "socket",
+                            "vga": "none",
+                            "tablet": 0,
+                            "start": False,
+                            "agent": "enabled=1",
+                            # cleanup_no_id finds a failed build's VM by tag
+                            "tags": f"inspect,builtin-{built_in}",
+                        },
+                    )
+                    # Tracked until it is a template: task_cleanup has to destroy
+                    # a failed build's VM before the build zone can go
+                    self.qemu_commands.register_vm(
+                        vm_id=vm_id,
+                        vm_config=VmConfig(
+                            name=name,
+                            vm_source_config=VmSourceConfig(built_in=built_in),
+                        ),
+                    )
+                    await self.async_proxmox.wait_for_task(upid=upid)
 
-            # Only the POST is retried: the ID is ours once it returns, and a failed
-            # import task is not a collision
-            vm_id = await self.qemu_commands._create_with_fresh_vm_id(create)
-            # Tracked until it is a template, so task_cleanup destroys a failed
-            # build's VM before the zone: its IPAM entry blocks the subnet delete
-            self.qemu_commands.register_vm(
-                vm_id=vm_id,
-                vm_config=VmConfig(
-                    name=name, vm_source_config=VmSourceConfig(built_in=built_in)
-                ),
+            next_available_vm_id = await self.qemu_commands.create_with_fresh_vm_id(
+                create
             )
-            await self._provision_template(
-                vm_id,
-                built_in=built_in,
-                create_upid=upid,
-                user_data=user_data,
-                disk_gib=disk_gib,
-                cloud_init_timeout=cloud_init_timeout,
-            )
-            self.qemu_commands.deregister_vm(vm_id)
 
-    async def _provision_template(
-        self,
-        next_available_vm_id: int,
-        *,
-        built_in: str,
-        create_upid: str,
-        user_data: str,
-        disk_gib: int | None,
-        cloud_init_timeout: int,
-    ) -> None:
-        name = f"inspect-{built_in}"
+            if disk_gib is not None:
+                # cloud-init's growpart/resizefs pick this up on first boot
+                with trace_action(
+                    self.logger, TRACE_NAME, f"resize disk {next_available_vm_id=}"
+                ):
+                    upid = await self.async_proxmox.request(
+                        "PUT",
+                        f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
+                        json={"disk": "scsi0", "size": f"{disk_gib}G"},
+                    )
+                    await self.async_proxmox.wait_for_task(upid=upid)
 
-        with trace_action(
-            self.logger,
-            TRACE_NAME,
-            f"create VM from import {built_in=} {next_available_vm_id=}",
-        ):
-            await self.async_proxmox.wait_for_task(upid=create_upid)
-
-        if disk_gib is not None:
-            # cloud-init's growpart/resizefs pick this up on first boot
             with trace_action(
-                self.logger, TRACE_NAME, f"resize disk {next_available_vm_id=}"
+                self.logger, TRACE_NAME, f"cloud-init ISO {next_available_vm_id=}"
             ):
-                upid = await self.async_proxmox.request(
-                    "PUT",
-                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
-                    json={"disk": "scsi0", "size": f"{disk_gib}G"},
+                await self.create_and_upload_cloudinit_iso(
+                    vm_id=next_available_vm_id,
+                    user_data=user_data,
                 )
-                await self.async_proxmox.wait_for_task(upid=upid)
 
-        with trace_action(
-            self.logger, TRACE_NAME, f"cloud-init ISO {next_available_vm_id=}"
-        ):
-            await self.create_and_upload_cloudinit_iso(
+            with trace_action(
+                self.logger, TRACE_NAME, f"start VM {next_available_vm_id=}"
+            ):
+                await self.qemu_commands.start(vm_id=next_available_vm_id)
+            # The guest installs its agent in cloud-init's package run, so
+            # this is a wait for that download and gets the same budget.
+            await self.qemu_commands.await_vm(
                 vm_id=next_available_vm_id,
-                user_data=user_data,
+                requires_guest_agent=True,
+                name=name,
+                agent_timeout=cloud_init_timeout,
             )
 
-        with trace_action(self.logger, TRACE_NAME, f"start VM {next_available_vm_id=}"):
-            await self.qemu_commands.start(vm_id=next_available_vm_id)
-        # The guest installs its agent in cloud-init's package run, so this
-        # is a wait for that download and gets the same budget.
-        await self.qemu_commands.await_vm(
-            vm_id=next_available_vm_id,
-            requires_guest_agent=True,
-            name=name,
-            agent_timeout=cloud_init_timeout,
-        )
+            # now wait for cloud-init to finish
 
-        # now wait for cloud-init to finish
-
-        agent_commands = AgentCommands(self.async_proxmox, self.node)
-        cloud_init_pid = await agent_commands.exec_command(
-            vm_id=next_available_vm_id,
-            command=["cloud-init", "status", "--wait"],
-        )
-
-        @tenacity.retry(
-            # Uncapped, this backoff reaches gaps of tens of minutes
-            wait=tenacity.wait_exponential(multiplier=0.1, max=5, exp_base=1.3),
-            stop=tenacity.stop_after_delay(cloud_init_timeout),
-            retry=tenacity.retry_if_result(lambda x: x is False),
-        )
-        async def wait_for_cloud_init() -> bool:
-            exec_status = await agent_commands.get_agent_exec_status(
-                vm_id=next_available_vm_id, pid=cloud_init_pid
+            agent_commands = AgentCommands(self.async_proxmox, self.node)
+            cloud_init_pid = await agent_commands.exec_command(
+                vm_id=next_available_vm_id,
+                command=["cloud-init", "status", "--wait"],
             )
-            if exec_status.exited == 1:
-                out_data = exec_status.out_data or ""
-                # `cloud-init status --wait` prints progress dots before the
-                # final status line, so match the trailing token, not the whole
-                # output (status: error/degraded still fall through to the raise).
-                if out_data.strip().endswith("status: done"):
-                    return True
-                else:
-                    raise ValueError(f"cloud-init failed: {out_data}")
-            else:
-                return False
-
-        with trace_action(
-            self.logger, TRACE_NAME, f"wait for cloud-init {next_available_vm_id=}"
-        ):
-            await wait_for_cloud_init()
-
-        await self.async_proxmox.request(
-            "POST",
-            f"/nodes/{self.node}/qemu/{next_available_vm_id}/status/shutdown",
-        )
-
-        await self.qemu_commands.await_vm(
-            vm_id=next_available_vm_id,
-            requires_guest_agent=True,
-            name=name,
-            status_for_wait="stopped",
-        )
-
-        with trace_action(
-            self.logger, TRACE_NAME, f"convert to template {next_available_vm_id=}"
-        ):
-            upid = await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
-            )
-            # template=1 is set before the disks are renamed to base-*; a clone in
-            # between fails with "Linked clone feature is not supported"
-            await self.async_proxmox.wait_for_task(upid=upid)
 
             @tenacity.retry(
-                wait=POLL_WAIT,
-                stop=tenacity.stop_after_delay(VM_TIMEOUT),
+                # Uncapped, this backoff reaches gaps of tens of minutes
+                wait=tenacity.wait_exponential(multiplier=0.1, max=5, exp_base=1.3),
+                stop=tenacity.stop_after_delay(cloud_init_timeout),
                 retry=tenacity.retry_if_result(lambda x: x is False),
             )
-            async def is_template() -> bool:
-                current_config = await self.async_proxmox.request(
-                    "GET",
-                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
+            async def wait_for_cloud_init() -> bool:
+                exec_status = await agent_commands.get_agent_exec_status(
+                    vm_id=next_available_vm_id, pid=cloud_init_pid
                 )
-                return current_config.get("template") == 1
+                if exec_status.exited == 1:
+                    out_data = exec_status.out_data or ""
+                    # `cloud-init status --wait` prints progress dots before the
+                    # final status line, so match the trailing token, not the whole
+                    # output (status: error/degraded still fall through to the raise).
+                    if out_data.strip().endswith("status: done"):
+                        return True
+                    else:
+                        raise ValueError(f"cloud-init failed: {out_data}")
+                else:
+                    return False
 
-            await is_template()
+            with trace_action(
+                self.logger, TRACE_NAME, f"wait for cloud-init {next_available_vm_id=}"
+            ):
+                await wait_for_cloud_init()
 
-        @tenacity.retry(
-            wait=tenacity.wait_exponential(min=1, exp_base=1.3),
-            stop=tenacity.stop_after_delay(30),
-        )
-        async def remove_cdrom() -> None:
             await self.async_proxmox.request(
                 "POST",
-                f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
-                json={"ide2": "none,media=cdrom"},
+                f"/nodes/{self.node}/qemu/{next_available_vm_id}/status/shutdown",
             )
 
-        await remove_cdrom()
+            await self.qemu_commands.await_vm(
+                vm_id=next_available_vm_id,
+                requires_guest_agent=True,
+                name=name,
+                status_for_wait="stopped",
+            )
 
-        # Also releases the NIC's IPAM entry, which blocks deleting the subnet
-        await self.qemu_commands.remove_existing_nics(next_available_vm_id)
+            with trace_action(
+                self.logger, TRACE_NAME, f"convert to template {next_available_vm_id=}"
+            ):
+                upid = await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
+                )
+                # template=1 is set before the disks are renamed to base-*; a clone in
+                # between fails with "Linked clone feature is not supported"
+                await self.async_proxmox.wait_for_task(upid=upid)
 
-    @contextlib.asynccontextmanager
-    async def build_sdn(self) -> AsyncIterator[str]:
-        """The SDN zone built-in templates are built in; yields its VNET ID.
+                @tenacity.retry(
+                    wait=POLL_WAIT,
+                    stop=tenacity.stop_after_delay(VM_TIMEOUT),
+                    retry=tenacity.retry_if_result(lambda x: x is False),
+                )
+                async def is_template() -> bool:
+                    current_config = await self.async_proxmox.request(
+                        "GET",
+                        f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
+                    )
+                    return current_config.get("template") == 1
 
-        Removed when the `async with` body finishes. If the body raises, the zone
-        stays, tracked, with the failed build's VM still on it.
+                await is_template()
+
+            @tenacity.retry(
+                wait=tenacity.wait_exponential(min=1, exp_base=1.3),
+                stop=tenacity.stop_after_delay(30),
+            )
+            async def remove_cdrom() -> None:
+                await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
+                    json={"ide2": "none,media=cdrom"},
+                )
+
+            await remove_cdrom()
+
+            # A NIC's IPAM entry stops Proxmox deleting the build zone's subnet
+            await self.qemu_commands.remove_existing_nics(next_available_vm_id)
+            self.qemu_commands.deregister_vm(next_available_vm_id)
+
+    async def _create_build_sdn(self) -> tuple[str, str]:
+        """Create the zone built-in templates are built in; return (zone ID, VNET ID).
+
+        An `auto` SDN like a sample's default: DHCP, and SNAT for the apt runs.
         """
         proxmox_ids_start = await self.sdn_commands.find_proxmox_ids_start(
             prefix=BUILT_IN_IDS_PREFIX
@@ -751,37 +708,33 @@ runcmd:
         sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
             proxmox_ids_start=proxmox_ids_start, sdn_config="auto"
         )
-        if sdn_zone_id is None:
-            raise RuntimeError("create_sdn returned no zone for an auto SDN")
-        yield vnet_aliases[0][0]
-        await self._tear_down_build_sdn(sdn_zone_id)
+        assert sdn_zone_id is not None  # only sdn_config=None returns no zone
+        return sdn_zone_id, vnet_aliases[0][0]
 
     async def _tear_down_build_sdn(self, sdn_zone_id: str) -> None:
-        """Remove the build zone, logging rather than raising if it survives.
-
-        The templates are built by now. A zone that survives stays tracked
-        for task_cleanup, and the next sample's pre-clean sweeps it by name.
-        """
-        gone = False
+        """Remove the build zone; if it survives, log and leave it tracked."""
         try:
-            try:
-                # Every template's NIC is gone by now, so normally none.
-                leases = await self.sdn_commands.read_zone_ipam_mappings(
-                    zone_ids={sdn_zone_id}
-                )
-            except Exception as e:
-                self.logger.warning(
-                    f"failed to read IPAM leases in build zone {sdn_zone_id}: {e}"
-                )
-                leases = []
+            leases = await self.sdn_commands.read_zone_ipam_mappings(
+                zone_ids={sdn_zone_id}
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"failed to read IPAM leases in build zone {sdn_zone_id}: {e}"
+            )
+            leases = []
+        try:
             gone = await self.sdn_commands.tear_down_sdn_zone_and_vnet(
                 sdn_zone_id=sdn_zone_id, ipam_mappings=leases
             )
         except Exception as e:
-            self.logger.warning(f"failed to tear down build zone {sdn_zone_id}: {e}")
-        if gone:
-            self.sdn_commands.deregister_sdn_resources_for_zones({sdn_zone_id})
-        else:
+            self.logger.warning(
+                f"failed to tear down build zone {sdn_zone_id}; "
+                f"leaving it for task_cleanup: {e}"
+            )
+            return
+        if not gone:
             self.logger.warning(
                 f"build zone {sdn_zone_id} was not removed; leaving it for task_cleanup"
             )
+            return
+        self.sdn_commands.deregister_sdn_resources_for_zones({sdn_zone_id})

@@ -27,15 +27,12 @@ from proxmoxsandbox.schema import (
 # The alias may be None for a given ID.
 VnetAliases: TypeAlias = List[Tuple[str, str | None]]
 
-# Ephemeral zones the provider creates are named exactly
-# `{prefix}{000-999}z`, where the prefix is `task_name[:3]` sanitised to
-# [a-z0-9] for a sample's zone, or `BUILT_IN_IDS_PREFIX` for the zone a
-# built-in template is built in. This pattern is the ownership boundary for
-# automatic, non-interactive cleanup, so it must be anchored at both ends — a
-# prefix match would let a pre-existing zone such as `abc123za` be swept and
-# deleted as if the provider owned it. Use `is_ephemeral_zone()` rather than
-# matching this directly.
-# `inspvmz` must stay outside the pattern: templates built up to 0.12 are on it.
+# Ephemeral zones are named exactly `{prefix}{000-999}z`: the prefix is
+# `task_name[:3]` sanitised to [a-z0-9], or BUILT_IN_IDS_PREFIX for a template
+# build zone. Anchored at both ends because it is the ownership boundary for
+# automatic cleanup: a prefix match would sweep a pre-existing `abc123za`.
+# Use `is_ephemeral_zone()` rather than matching this directly.
+# `inspvmz` must stay outside the pattern: templates built up to 0.13 are on it.
 ZONE_REGEX = r"^[a-z0-9]{1,3}[0-9]{3}z$"
 
 
@@ -183,9 +180,7 @@ class SdnCommands(abc.ABC):
                 new_cidrs.append(str(subnet.cidr))
 
         # See https://forum.proxmox.com/threads/sdn-simple-zones-and-overlapping-ip-ranges.162739/
-        if overlaps := self.find_existing_cidr_overlaps(
-            existing_cidrs, new_cidrs
-        ) + self.find_self_cidr_overlaps(new_cidrs):
+        if overlaps := self.find_existing_cidr_overlaps(existing_cidrs, new_cidrs):
             raise ValueError(f"Duplicate IP ranges found: {overlaps}")
 
     def simple_vnet_config(

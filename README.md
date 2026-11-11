@@ -580,7 +580,7 @@ Some resources will persist after the eval is complete:
 - uploaded OVAs are left in place
 - cloud-init ISOs are left in place
 
-A host that built a template with version 0.12.0 or earlier also has a permanent SDN zone `inspvmz` (VNet `inspvmv0`, subnet `192.168.99.0/24` with SNAT), and those templates still have a NIC on it. The provider no longer uses the zone and never deletes it. Clones of a `built_in` template get their NICs from the sample's own SDN whether or not the template has one, so the zone can be deleted by hand; delete the templates' `net0` first, since a NIC's IPAM entry stops Proxmox deleting the subnet.
+A host that built a template with version 0.13.0 or earlier also has a permanent SDN zone `inspvmz` (VNet `inspvmv0`, subnet `192.168.99.0/24` with SNAT), and those templates still have a NIC on it. The provider no longer uses the zone and never deletes it. Clones of a `built_in` template get their NICs from the sample's own SDN whether or not the template has one, so the zone can be deleted by hand; delete the templates' `net0` first, since a NIC's IPAM entry stops Proxmox deleting the subnet.
 
 Environment cleanup is partially implemented. There is no way to tag all the resources
 created by a particular eval. Therefore the cleanup process for `inspect sandbox cleanup proxmox` 

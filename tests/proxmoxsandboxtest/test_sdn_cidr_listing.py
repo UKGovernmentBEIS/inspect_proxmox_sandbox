@@ -7,16 +7,13 @@ import pytest
 
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
 
+from .proxmox_sandbox_utils import http_500
+
 
 def _gone(vnet: str) -> httpx.HTTPStatusError:
-    text = f"sdn vnet '{vnet}' does not exist"
-    request = httpx.Request("GET", "https://pve/api2/json/x")
-    return httpx.HTTPStatusError(
-        text, request=request, response=httpx.Response(500, text=text, request=request)
-    )
+    return http_500(f"sdn vnet '{vnet}' does not exist", method="GET")
 
 
-@pytest.mark.asyncio
 async def test_vnet_deleted_between_list_and_subnet_read_is_skipped():
     api = AsyncMock()
     api.request = AsyncMock(
@@ -36,19 +33,13 @@ async def test_vnet_deleted_between_list_and_subnet_read_is_skipped():
     assert await SdnCommands(api).read_all_simple_zone_cidrs() == ["10.2.0.0/24"]
 
 
-@pytest.mark.asyncio
 async def test_other_errors_reading_subnets_propagate():
     api = AsyncMock()
-    request = httpx.Request("GET", "https://pve/api2/json/x")
     api.request = AsyncMock(
         side_effect=[
             [{"zone": "aaa111z", "type": "simple"}],
             [{"vnet": "aaa111v0", "zone": "aaa111z"}],
-            httpx.HTTPStatusError(
-                "boom",
-                request=request,
-                response=httpx.Response(500, text="boom", request=request),
-            ),
+            http_500("boom", method="GET"),
         ]
     )
     with pytest.raises(httpx.HTTPStatusError, match="boom"):
