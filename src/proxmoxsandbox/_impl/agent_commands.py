@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import time
 from logging import getLogger
 from typing import List, Tuple
 
@@ -250,9 +251,7 @@ class AgentCommands:
         await self.async_proxmox.wait_for_task(upid=upid)
         await self._await_config_lock_after_rollback(vm_id)
 
-    async def _await_config_lock_after_rollback(
-        self, vm_id: int, timeout: float = _ROLLBACK_LOCK_TIMEOUT
-    ) -> None:
+    async def _await_config_lock_after_rollback(self, vm_id: int) -> None:
         """Wait until the VM's config lock can be taken again after a rollback.
 
         After a rollback, Proxmox's `qm cleanup` for the old QEMU holds the lock
@@ -260,7 +259,7 @@ class AgentCommands:
         rollback or stop of the VM fails with "can't lock file ... got timeout".
         Resuming a running VM takes the same lock and does nothing else.
         """
-        deadline = asyncio.get_running_loop().time() + timeout
+        deadline = time.monotonic() + _ROLLBACK_LOCK_TIMEOUT
         while True:
             upid = await self.async_proxmox.request(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/resume"
@@ -268,18 +267,18 @@ class AgentCommands:
             exitstatus = await self._task_exitstatus(upid)
             if exitstatus == "OK":
                 return
-            if (
-                "can't lock file" not in exitstatus
-                or asyncio.get_running_loop().time() >= deadline
-            ):
+            if "can't lock file" not in exitstatus:
                 raise RuntimeError(
-                    f"VM {vm_id}: config lock still not free {timeout:g}s after "
-                    f"a snapshot rollback; last resume task {upid}: {exitstatus}"
+                    f"VM {vm_id}: resume after a snapshot rollback failed: {exitstatus}"
+                )
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"VM {vm_id}: config lock still held {_ROLLBACK_LOCK_TIMEOUT:g}s "
+                    f"after a snapshot rollback: {exitstatus}"
                 )
 
     async def _task_exitstatus(self, upid: str) -> str:
-        # Read the exit status directly rather than through wait_for_task: a
-        # lock timeout here is an expected result, not a failure to raise
+        # wait_for_task does not return the exit status
         node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
         while True:
             status = await self.async_proxmox.request(

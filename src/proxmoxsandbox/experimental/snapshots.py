@@ -23,7 +23,7 @@ sample text
 
 
 # Snapshots created so far in this sample: ids 1..count exist
-SNAPSHOT_COUNT_KEY = "current_snapshot_id"
+_SNAPSHOT_COUNT_KEY = "snapshot_count"
 
 
 @tool
@@ -35,7 +35,7 @@ def create_snapshot() -> Tool:
         Returns:
           The number of snapshot, which can be used to rollback
         """
-        new_snapshot_id = store().get(SNAPSHOT_COUNT_KEY, 0) + 1
+        new_snapshot_id = store().get(_SNAPSHOT_COUNT_KEY, 0) + 1
         try:
             await (
                 sandbox()
@@ -45,7 +45,7 @@ def create_snapshot() -> Tool:
         except TypeError as e:
             raise ValueError("This tool only works with VM sandboxes") from e
         # Only after the create returned: a failed create must not use up the id
-        store().set(SNAPSHOT_COUNT_KEY, new_snapshot_id)
+        store().set(_SNAPSHOT_COUNT_KEY, new_snapshot_id)
         return new_snapshot_id
 
     return do_create_snapshot
@@ -62,7 +62,7 @@ def rollback_to_snapshot() -> Tool:
         Returns:
             bool: Always True
         """
-        if not 1 <= snapshot_id <= store().get(SNAPSHOT_COUNT_KEY, 0):
+        if not 1 <= snapshot_id <= store().get(_SNAPSHOT_COUNT_KEY, 0):
             raise ToolError(
                 f"No snapshot {snapshot_id}: create_snapshot has not returned that id"
             )

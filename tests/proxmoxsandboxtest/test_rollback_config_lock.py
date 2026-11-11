@@ -2,12 +2,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from proxmoxsandbox._impl import agent_commands as agent_commands_module
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 
 LOCK_TIMEOUT = "can't lock file '/var/lock/qemu-server/lock-101.conf' - got timeout"
 
 
-def _agent_commands(resume_exitstatuses: list[str]) -> tuple[AgentCommands, list]:
+def _agent_commands(
+    resume_exitstatuses: list[str],
+) -> tuple[AgentCommands, list[tuple[str, str]]]:
     """AgentCommands on a fake API whose resume tasks end with the given statuses."""
     calls: list[tuple[str, str]] = []
     statuses = iter(resume_exitstatuses)
@@ -28,7 +31,7 @@ def _agent_commands(resume_exitstatuses: list[str]) -> tuple[AgentCommands, list
     return AgentCommands(api, "proxmox"), calls
 
 
-def _resumes(calls: list) -> int:
+def _resumes(calls: list[tuple[str, str]]) -> int:
     return sum(1 for _, path in calls if path.endswith("/status/resume"))
 
 
@@ -40,11 +43,14 @@ async def test_rollback_returns_once_the_config_lock_is_free() -> None:
     assert _resumes(calls) == 3
 
 
-async def test_rollback_raises_if_the_config_lock_stays_held() -> None:
+async def test_rollback_raises_if_the_config_lock_stays_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(agent_commands_module, "_ROLLBACK_LOCK_TIMEOUT", 0)
     agent_commands, calls = _agent_commands([LOCK_TIMEOUT] * 3)
 
-    with pytest.raises(RuntimeError, match="config lock still not free"):
-        await agent_commands._await_config_lock_after_rollback(101, timeout=0)
+    with pytest.raises(RuntimeError, match="config lock still held"):
+        await agent_commands.rollback_to_snapshot(101, "inspect1")
     assert _resumes(calls) == 1
 
 
