@@ -9,16 +9,11 @@ from proxmoxsandbox._impl.async_proxmox import ProxmoxTaskError
 from proxmoxsandbox._impl.qemu_commands import _VM_ID_ATTEMPTS, QemuCommands
 from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
-
-def _error_500(text: str) -> httpx.HTTPStatusError:
-    request = httpx.Request("POST", "https://pve/api2/json/x")
-    return httpx.HTTPStatusError(
-        text, request=request, response=httpx.Response(500, text=text, request=request)
-    )
+from .proxmox_sandbox_utils import http_500
 
 
 def _collision(vm_id: int) -> httpx.HTTPStatusError:
-    return _error_500(f"unable to create VM {vm_id}: config file already exists")
+    return http_500(f"unable to create VM {vm_id}: config file already exists")
 
 
 def _qemu_with_ids(next_ids: list[str], clone_failures: int) -> QemuCommands:
@@ -39,14 +34,12 @@ def _qemu_with_ids(next_ids: list[str], clone_failures: int) -> QemuCommands:
         return "UPID:pve1:other"
 
     api.request = AsyncMock(side_effect=request)
-    qemu = QemuCommands(api, "pve1", "local", MagicMock())
-    return qemu
+    return QemuCommands(api, "pve1", "local", MagicMock())
 
 
 _CONFIG = VmConfig(vm_source_config=VmSourceConfig(existing_vm_template_tag="t"))
 
 
-@pytest.mark.asyncio
 async def test_clone_retries_with_next_id_on_collision():
     qemu = _qemu_with_ids(["4242", "4243"], clone_failures=1)
     with patch.object(qemu, "configure_network_and_tags", AsyncMock()):
@@ -61,7 +54,6 @@ async def test_clone_retries_with_next_id_on_collision():
     assert list(qemu._tracked_vms) == [4243]
 
 
-@pytest.mark.asyncio
 async def test_clone_gives_up_after_repeated_collisions():
     ids = [str(5000 + i) for i in range(_VM_ID_ATTEMPTS)]
     qemu = _qemu_with_ids(ids, clone_failures=_VM_ID_ATTEMPTS)
@@ -75,10 +67,9 @@ async def test_clone_gives_up_after_repeated_collisions():
     assert qemu._tracked_vms == {}
 
 
-@pytest.mark.asyncio
 async def test_clone_does_not_retry_other_500s():
     api = AsyncMock()
-    api.request = AsyncMock(side_effect=["4242", _error_500("storage full")])
+    api.request = AsyncMock(side_effect=["4242", http_500("storage full")])
     qemu = QemuCommands(api, "pve1", "local", MagicMock())
     with pytest.raises(httpx.HTTPStatusError, match="storage full"):
         await qemu.clone_vm_and_start(
@@ -107,7 +98,6 @@ def _qemu_with_clone_task_failures(exitstatuses: list[str]) -> QemuCommands:
             status = statuses.pop(0)
             if status != "OK":
                 raise ProxmoxTaskError(upid, status)
-        return {"exitstatus": "OK"}
 
     api = AsyncMock()
     api.request = AsyncMock(side_effect=request)
@@ -115,7 +105,6 @@ def _qemu_with_clone_task_failures(exitstatuses: list[str]) -> QemuCommands:
     return QemuCommands(api, "pve1", "local", MagicMock())
 
 
-@pytest.mark.asyncio
 async def test_clone_retries_when_its_task_loses_the_id():
     """Two clones can both pass the API's check; the loser's task then fails."""
     qemu = _qemu_with_clone_task_failures(
@@ -132,7 +121,6 @@ async def test_clone_retries_when_its_task_loses_the_id():
     assert list(qemu._tracked_vms) == [4243]
 
 
-@pytest.mark.asyncio
 async def test_clone_does_not_retry_other_task_failures():
     qemu = _qemu_with_clone_task_failures(
         ["clone failed: disk image 'local:4242/vm-4242-disk-0.qcow2' already exists"]
