@@ -275,8 +275,8 @@ async def test_exec_without_timeout_is_bounded(hostile_env, monkeypatch):
 async def test_exec_with_timeout_is_bounded_when_agent_stalls(hostile_env):
     """exec(timeout=5) must return in bounded time when every status poll hangs.
 
-    PVE times each guest command out after 5s, and the provider retries those
-    as transient; without a deadline that is ~10 minutes per poll.
+    The agent budget is shrunk from 180 s, so the bound shown is the budget and
+    not the retries.
     """
     started = time.monotonic()
     with pytest.raises(TimeoutError):
