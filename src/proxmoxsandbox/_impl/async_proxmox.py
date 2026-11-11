@@ -374,7 +374,7 @@ class AsyncProxmoxAPI:
     ) -> dict[str, Any]:
         """Poll until the task has finished; returns its final status record.
 
-        Raises ProxmoxTaskError unless the exitstatus is OK or "WARNINGS: n".
+        Does not raise on a failed task: callers that care read `exitstatus`.
         """
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")
