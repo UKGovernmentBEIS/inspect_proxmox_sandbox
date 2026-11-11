@@ -33,10 +33,8 @@ def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
-# /cluster/nextid reserves nothing, so another process can take the ID first
+# /cluster/nextid reserves nothing, so concurrent creates can read the same ID
 _VM_ID_ATTEMPTS = 5
-# A start fails while another process applies SDN config, a window of a few seconds
-_START_ATTEMPTS = 3
 # pvedaemon could not fork the task
 _WORKER_START_ATTEMPTS = 4
 
@@ -235,15 +233,7 @@ class QemuCommands(abc.ABC):
             upid = await self._request_task(
                 "DELETE", f"/nodes/{self.node}/qemu/{vm_id}"
             )
-            # Not a poll for the ID to disappear: /cluster/nextid reuses freed IDs, so
-            # another process can have a new VM under it within seconds
-            try:
-                await self.async_proxmox.wait_for_task(upid=upid)
-            except ProxmoxTaskError as e:
-                # Another delete of this VM got the config lock first; the VM is gone
-                if f"qemu-server/{vm_id}.conf' does not exist" not in e.exitstatus:
-                    raise
-                self.logger.debug(f"VM {label} was deleted by another task")
+            await self.async_proxmox.wait_for_task(upid=upid)
 
     async def list_vms(self):
         with trace_action(self.logger, self.TRACE_NAME, "list all VMs"):
@@ -270,20 +260,9 @@ class QemuCommands(abc.ABC):
         return int(await self.async_proxmox.request("GET", "/cluster/nextid"))
 
     @staticmethod
-    def _is_vm_id_collision(exc: BaseException, vm_id: int) -> bool:
-        # Clone checks the ID again inside its worker, so the loser of two clones
-        # gets a failed task. Match the whole phrase there: a clone that fails
-        # later can say "already exists" about a disk.
-        if isinstance(exc, ProxmoxTaskError):
-            return (
-                f"unable to create VM {vm_id}: config file already exists"
-                in exc.exitstatus
-            )
-        return (
-            isinstance(exc, httpx.HTTPStatusError)
-            and exc.response.status_code == 500
-            and "already exists" in exc.response.text
-        )
+    def _is_vm_id_collision(exc: httpx.HTTPStatusError) -> bool:
+        # `unable to create VM 105 - VM 105 already exists on node 'pve'`
+        return exc.response.status_code == 500 and "already exists" in exc.response.text
 
     async def create_with_fresh_vm_id(
         self, create: Callable[[int], Awaitable[None]]
@@ -299,8 +278,8 @@ class QemuCommands(abc.ABC):
             try:
                 await create(vm_id)
                 return vm_id
-            except (httpx.HTTPStatusError, ProxmoxTaskError) as e:
-                if attempt == _VM_ID_ATTEMPTS or not self._is_vm_id_collision(e, vm_id):
+            except httpx.HTTPStatusError as e:
+                if attempt == _VM_ID_ATTEMPTS or not self._is_vm_id_collision(e):
                     raise
                 self.logger.info(
                     f"VM ID {vm_id} was taken before we could use it "
@@ -308,23 +287,10 @@ class QemuCommands(abc.ABC):
                 )
 
     async def start(self, vm_id: int) -> None:
-        attempt = 0
-        while True:
-            attempt += 1
-            upid = await self._request_task(
-                "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/start"
-            )
-            try:
-                await self.async_proxmox.wait_for_task(upid=upid)
-                return
-            except ProxmoxTaskError as e:
-                if attempt == _START_ATTEMPTS:
-                    raise
-                self.logger.warning(
-                    f"VM {vm_id} start failed ({e}); "
-                    f"retrying ({attempt}/{_START_ATTEMPTS})"
-                )
-                await asyncio.sleep(2 * attempt)
+        upid = await self._request_task(
+            "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/start"
+        )
+        await self.async_proxmox.wait_for_task(upid=upid)
 
     @staticmethod
     def _is_worker_start_failure(exc: Exception) -> bool:
