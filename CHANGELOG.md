@@ -7,7 +7,18 @@
 - VM creation retries when another process takes the VM ID between `/cluster/nextid` and the create; VM start retries a failed start task
 - `exec` reads its stdout, stderr and exit code concurrently and does not ping the guest agent before each file read any more, about 1 s less per command
 - Built-in templates named by one config are built concurrently, and they boot with a quiet console (`quiet` on the kernel command line)
+
+## 0.13.0
+
+- **Breaking:** guest VMs no longer get nested virtualisation by default. Evals that need it must set `VmConfig(nested_virt=True)`. Requires Proxmox VE 9.1 or later (qemu-server 9.0.27).
+- **Breaking:** `VmConfig.cpu` now applies to every VM. It was previously only used when importing an OVA for the first time; clones of built-in, cached OVA and `existing_vm_template_tag` templates kept the template's `cpu`. An `existing_vm_template_tag` VM with `cpu` unset now gets `host`. A `cpu` containing `flags=` is rejected.
 - Fix: a guest file read that Proxmox itself rejects as a malformed guest-agent reply (qemu-server 9.2.11+: "agent file-read: got invalid count" or "mismatch between returned count and buffer length") raises `GuestAgentTamperError` straight away, instead of being retried as a transient error for up to 10 minutes and then raising `httpx.HTTPStatusError`
+
+## 0.12.1
+
+- Security: the bundled provisioning scripts build `pve-qemu-kvm` `11.1.3-1+aisi4`, adding six upstream AHCI/IDE fixes to stock 11.1.3-1, among them a use-after-free when a guest ejects the AHCI controller during a read ([QEMU issue][qemu-4069]). Hosts built since stock 11.1.x reached `pve-no-subscription` skipped the patch and run stock QEMU. Rebuild existing hosts; new ones carry contract `aisi4`.
+
+[qemu-4069]: https://gitlab.com/qemu-project/qemu/-/work_items/4069
 
 ## 0.12.0
 
