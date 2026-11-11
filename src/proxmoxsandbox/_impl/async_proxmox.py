@@ -260,8 +260,7 @@ class AsyncProxmoxAPI:
             verify=self.verify_tls,
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
-            # Login discovers the version, which picks the file-read variant.
-            # No agent ping first: each agent call costs ~200 ms inside Proxmox.
+            # Login discovers the version, which picks the file-read variant
             if not self.ticket or self._ticket_near_expiry():
                 await self._login(client)
             modern = self.release_at_least(9, 2)
