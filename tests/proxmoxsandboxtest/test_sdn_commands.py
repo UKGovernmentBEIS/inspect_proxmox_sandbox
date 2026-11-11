@@ -7,9 +7,6 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.sdn_commands import IpamMapping, SdnCommands
 from proxmoxsandbox.schema import DhcpRange, SdnConfig, SubnetConfig, VnetConfig
 
-# Only the tests that reach Proxmox are marked req_proxmox; config validation
-# is checked against an SdnCommands that has no host behind it.
-
 
 @pytest.fixture
 def offline_sdn_commands() -> SdnCommands:
