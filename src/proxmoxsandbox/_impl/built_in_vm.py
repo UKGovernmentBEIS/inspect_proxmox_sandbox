@@ -473,7 +473,7 @@ runcmd:
                 try:
                     _, tar_stderr = await tar.communicate()
                 except asyncio.CancelledError:
-                    # Left running, it would still be writing disk.raw when a retry extracts
+                    # Left running, it would still be writing disk.raw under a retry
                     tar.kill()
                     await tar.wait()
                     raise
