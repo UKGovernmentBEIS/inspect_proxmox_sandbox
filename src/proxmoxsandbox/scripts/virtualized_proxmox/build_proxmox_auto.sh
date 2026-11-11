@@ -192,15 +192,17 @@ set -euxo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-PATCHED_VERSION="11.0.5-0+aisi1"
-PVE_QEMU_BASE_COMMIT="c3b7a675a52c11a1c4a5873ff2bd1696df7bf98c"
-QEMU_COMMIT="19def23adfcece2bc138cda371aa08299d574fe4"
-AHCI_FIX_COMMIT="a2fbf1785b7a464d61c0f60c4ad0a86d82925e5d"
+STOCK_VERSION="11.1.3-1"
+PVE_QEMU_BASE_COMMIT="ae7733cb6e3abe422144906f92a3b00387402672"
+QEMU_FIXES="d7f16bad8f0263ca01c1da61d5d69ee79fca837f a2fbf1785b7a464d61c0f60c4ad0a86d82925e5d 1332990194b53f5ca6a4fe7ac93cf4ad6eecfa9c 2713717148f538577e5f2a5d4d9dc272f7a8dc4b 795af987ce4cbac260582189cff2394a27eff7cb 5bdc12fed592a1673f64ca1e8243046632f83a26"
+PATCHED_VERSION="${STOCK_VERSION}+aisi4"
 BUILD_DIR="/root/pve-qemu-build"
 
+# Skip only on an exact match. A version comparison would skip whenever stock
+# outranks PATCHED_VERSION, whether or not stock carries QEMU_FIXES.
 INSTALLED_VERSION="$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)"
-if dpkg --compare-versions "$INSTALLED_VERSION" ge "$PATCHED_VERSION"; then
-    echo "pve-qemu-kvm $INSTALLED_VERSION already carries the backported fixes, nothing to do"
+if [ "$INSTALLED_VERSION" = "$PATCHED_VERSION" ]; then
+    echo "pve-qemu-kvm $PATCHED_VERSION already installed, nothing to do"
     exit 0
 fi
 
@@ -213,57 +215,30 @@ git clone https://git.proxmox.com/git/pve-qemu.git "$BUILD_DIR"
 cd "$BUILD_DIR"
 git checkout "$PVE_QEMU_BASE_COMMIT"
 sed -i 's|url = ../mirror_qemu|url = https://gitlab.com/qemu-project/qemu.git|' .gitmodules
-git update-index --cacheinfo "160000,$QEMU_COMMIT,qemu"
-sed -i -E '/^extra\/00(03|0[6-9]|1[1-9]|2[0-5])-/d' debian/patches/series
-patches="debian/patches/extra"
-git init -q /root/qemu-ahci-fix
-git -C /root/qemu-ahci-fix fetch -q --depth=3 \
-    https://gitlab.com/qemu-project/qemu.git "$AHCI_FIX_COMMIT"
-git -C /root/qemu-ahci-fix format-patch -1 --stdout --no-signature FETCH_HEAD~1 \
-    > "$patches/0027-hw-ide-ahci-refuse-a-PIO-transfer-with-no-command-he.patch"
-git -C /root/qemu-ahci-fix format-patch -1 --stdout --no-signature FETCH_HEAD \
-    > "$patches/0028-hw-ide-ahci-clear-cur_cmd-when-the-command-list-is-u.patch"
-rm -rf /root/qemu-ahci-fix
-
-anchor="extra/0026-hw-scsi-lsi53c895a-gracefully-handle-re-entrant-DMA.patch"
-grep -qxF "$anchor" debian/patches/series
-sed -i "\|^$anchor\$|a\\
-extra/0027-hw-ide-ahci-refuse-a-PIO-transfer-with-no-command-he.patch\\
-extra/0028-hw-ide-ahci-clear-cur_cmd-when-the-command-list-is-u.patch" debian/patches/series
 sed -i 's/clean -xdfi/clean -xdff/' Makefile
+git init -q /root/qemu-fixes
+for c in $QEMU_FIXES; do
+    git -C /root/qemu-fixes fetch -q --depth=2 https://gitlab.com/qemu-project/qemu.git "$c"
+    git -C /root/qemu-fixes format-patch -1 --stdout --no-signature "$c" \
+        > "debian/patches/extra/aisi-$c.patch"
+    echo "extra/aisi-$c.patch" >> debian/patches/series
+done
+rm -rf /root/qemu-fixes
+# 5bdc12fed592's context has master's ahci_reset_port(..., IDEResetKind kind); 11.1.3 lacks the argument
+sed -i 's/^ static void ahci_reset_port(AHCIState \*s, int port, IDEResetKind kind)$/ static void ahci_reset_port(AHCIState *s, int port)/' \
+    debian/patches/extra/aisi-5bdc12fed592a1673f64ca1e8243046632f83a26.patch
 
 mv debian/changelog debian/changelog.orig
-cat > debian/changelog <<'CHANGELOG_END'
-pve-qemu-kvm (11.0.5-0+aisi1) trixie; urgency=high
-
-  * rebase onto upstream QEMU 11.0.5, which carries the virtio-net RSC
-    fixes (CVE-2026-66900, CVE-2026-63321), the VAPIC fixes and the
-    io-channel-socket zero-length write fix (CVE-2026-84788); drop the
-    stable patches it already includes.
-  * backport the AHCI fixes refusing a PIO transfer with no command header
-    and clearing cur_cmd when the command list is unmapped (upstream qemu
-    commits d7f16bad8f and a2fbf1785b).
-
- -- AISI <coretech@dsit.gov.uk>  Wed, 30 Sep 2026 14:00:00 +0000
-
-pve-qemu-kvm (11.0.3-3+aisi2) trixie; urgency=high
-
-  * backport VAPIC region confinement, the matching MemoryRegion unref fix
-    and the io-channel-socket zero-length write fix (CVE-2026-84788) from
-    pve-qemu master, ahead of the official 11.1.1-1 release.
-
- -- AISI <coretech@dsit.gov.uk>  Wed, 30 Sep 2026 10:00:00 +0000
-
-pve-qemu-kvm (11.0.3-3+aisi1) trixie; urgency=high
-
-  * backport scsi-disk WRITE SAME out-of-bounds read fix and MODE SELECT
-    block size quirk from pve-qemu master (upstream qemu commits merged
-    2026-08-27), ahead of the official 11.1.1-1 release.
-
- -- AISI <coretech@dsit.gov.uk>  Thu, 17 Sep 2026 13:55:04 +0000
-
-CHANGELOG_END
-cat debian/changelog.orig >> debian/changelog
+{
+    echo "pve-qemu-kvm ($PATCHED_VERSION) trixie; urgency=high"
+    echo
+    echo "  * backport upstream qemu commits:"
+    for c in $QEMU_FIXES; do echo "    $c"; done
+    echo
+    echo " -- AISI <coretech@dsit.gov.uk>  $(date -R)"
+    echo
+    cat debian/changelog.orig
+} > debian/changelog
 rm debian/changelog.orig
 
 mk-build-deps -ir -t 'apt-get -o DPkg::Lock::Timeout=600 -y --no-install-recommends' debian/control
@@ -271,7 +246,7 @@ make deb
 
 dpkg -i "pve-qemu-kvm_${PATCHED_VERSION}_amd64.deb"
 apt-mark hold pve-qemu-kvm
-/usr/bin/qemu-system-x86_64 -M q35 -device scsi-hd,help | grep -F quirk_mode_page_set_block_size
+[ "$(dpkg-query --showformat '${Version}' --show pve-qemu-kvm)" = "$PATCHED_VERSION" ]
 
 apt-get -o DPkg::Lock::Timeout=600 -y purge pve-qemu-kvm-build-deps
 apt-get -o DPkg::Lock::Timeout=600 -y autoremove
@@ -335,7 +310,7 @@ STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
 cat > "$STAMP" << 'STAMP_CONTRACT'
 #!/bin/bash
 set -euo pipefail
-C=aisi3
+C=aisi4
 F=/usr/share/perl5/PVE/pvecfg.pm
 before=$(md5sum < "$F")
 sed -i -E "s/\.aisi[0-9]+//g

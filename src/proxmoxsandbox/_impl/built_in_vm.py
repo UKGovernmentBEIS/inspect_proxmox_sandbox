@@ -17,7 +17,7 @@ from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import POLL_WAIT, AsyncProxmoxAPI
-from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.qemu_commands import QemuCommands, proxmox_cpu
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox.schema import (
@@ -528,7 +528,7 @@ runcmd:
                     "vmid": next_available_vm_id,
                     "name": name,
                     "node": self.node,
-                    "cpu": "host",
+                    "cpu": proxmox_cpu("host", nested_virt=False),
                     "memory": 8192,
                     "cores": 2,
                     "ostype": "l26",
