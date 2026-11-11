@@ -2,7 +2,7 @@ import re
 import time
 from logging import getLogger
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import tenacity
@@ -180,35 +180,15 @@ class AsyncProxmoxAPI:
             verify=self.verify_tls,
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
-            # Get a fresh ticket if we don't have one or it's approaching expiry
-            if not self.ticket or self._ticket_near_expiry():
-                await self._login(client)
-
-            if self.csrf_token is None:
-                raise ValueError("CSRF token was not set by login")
-
-            headers = self._prepare_headers(method, content_type)
-
-            response = await client.request(
+            await self._ensure_ticket(client)
+            response = await self._send(
+                client,
                 method,
-                f"{self.api_base_url}{path}",
-                headers=headers,
+                path,
+                content_type=content_type,
                 json=json,
                 content=body_content,
             )
-            # If we get a 401, our ticket might have expired (2 hour lifetime)
-            # Try to login once and retry the request
-            if response.status_code == 401:
-                await self._login(client)
-                headers = self._prepare_headers(method, content_type)
-
-                response = await client.request(
-                    method,
-                    f"{self.api_base_url}{path}",
-                    headers=headers,
-                    json=json,
-                    content=body_content,
-                )
 
             if response.is_error and raise_errors:
                 raise _http_status_error(response)
@@ -216,6 +196,40 @@ class AsyncProxmoxAPI:
                 if response.is_error:
                     return response.json()
             return response.json()["data"]
+
+    async def _ensure_ticket(self, client: httpx.AsyncClient) -> None:
+        if not self.ticket or self._ticket_near_expiry():
+            await self._login(client)
+
+    async def _send(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        *,
+        content_type: str | None = None,
+        headers: Dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Send with the current ticket; log in and send once more on a 401."""
+
+        async def send() -> httpx.Response:
+            return await client.request(
+                method,
+                f"{self.api_base_url}{path}",
+                headers={
+                    **self._prepare_headers(method, content_type),
+                    **(headers or {}),
+                },
+                **kwargs,
+            )
+
+        response = await send()
+        # Proxmox can reject a ticket we still think is fresh
+        if response.status_code == 401:
+            await self._login(client)
+            response = await send()
+        return response
 
     def _prepare_headers(self, method: str, content_type: str | None):
         # Extra headers first, so the Proxmox auth headers below always win.
@@ -261,33 +275,22 @@ class AsyncProxmoxAPI:
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
             # Login discovers the version, which picks the file-read variant
-            if not self.ticket or self._ticket_near_expiry():
-                await self._login(client)
+            await self._ensure_ticket(client)
             modern = self.release_at_least(9, 2)
-
-            async def send() -> httpx.Response:
-                return await client.get(
-                    f"{self.api_base_url}{path}",
-                    headers={
-                        **self.extra_headers,
-                        "Cookie": f"PVEAuthCookie={self.ticket}",
-                        # Opt out of pveproxy response compression: it truncates
-                        # large incompressible bodies mid-transfer, surfacing as
-                        # an upstream "597 Broken pipe".
-                        "Accept-Encoding": "identity",
-                    },
-                    params=(
-                        {"file": filepath, "count": count, "decode": 0}
-                        if modern
-                        else {"file": filepath}
-                    ),
-                )
-
-            response = await send()
-            if response.status_code == 401:
-                # Proxmox can reject a ticket we still think is fresh
-                await self._login(client)
-                response = await send()
+            response = await self._send(
+                client,
+                "GET",
+                path,
+                # Opt out of pveproxy response compression: it truncates large
+                # incompressible bodies mid-transfer, surfacing as an upstream
+                # "597 Broken pipe".
+                headers={"Accept-Encoding": "identity"},
+                params=(
+                    {"file": filepath, "count": count, "decode": 0}
+                    if modern
+                    else {"file": filepath}
+                ),
+            )
             if response.is_error:
                 error = _http_status_error(response)
                 if pve_rejected_file_read(response.status_code, str(error)):
@@ -362,8 +365,7 @@ class AsyncProxmoxAPI:
                 # landed, so the read timeout only has to cover that hand-off.
                 timeout=httpx.Timeout(connect=30, read=300, write=60, pool=60),
             ) as client:
-                if not self.ticket or self._ticket_near_expiry():
-                    await self._login(client)
+                await self._ensure_ticket(client)
 
                 with file.open("rb") as file_handle:
                     response = await client.post(
