@@ -12,9 +12,8 @@ import httpx
 import pytest
 import tenacity
 
+from proxmoxsandbox._impl.async_proxmox import POLL_MAX_WAIT, POLL_WAIT
 from proxmoxsandbox._impl.qemu_commands import (
-    _POLL_MAX_WAIT,
-    _POLL_WAIT,
     GuestAgentUnavailableError,
     QemuCommands,
     VmNotRunningError,
@@ -86,10 +85,10 @@ def test_poll_backoff_is_capped():
     for attempt in range(1, 100):
         state = tenacity.RetryCallState(None, None, (), {})
         state.attempt_number = attempt
-        waits.append(_POLL_WAIT(state))
+        waits.append(POLL_WAIT(state))
     assert waits[:3] == pytest.approx([0.1, 0.13, 0.169])
     assert waits == sorted(waits)
-    assert max(waits) == _POLL_MAX_WAIT
+    assert max(waits) == POLL_MAX_WAIT
 
 
 async def test_await_agent_sleeps_follow_the_poll_schedule(monkeypatch):
@@ -106,7 +105,7 @@ async def test_await_agent_sleeps_follow_the_poll_schedule(monkeypatch):
     with pytest.raises(GuestAgentUnavailableError):
         await qemu.await_agent(100, name="vm-100", timeout=_TWO_ATTEMPTS)
     assert sleeps == pytest.approx([0.1])
-    assert max(sleeps) <= _POLL_MAX_WAIT
+    assert max(sleeps) <= POLL_MAX_WAIT
 
 
 async def test_await_agent_raises_actionable_error_on_timeout():
