@@ -105,7 +105,6 @@ async def test_await_agent_sleeps_follow_the_poll_schedule(monkeypatch):
     with pytest.raises(GuestAgentUnavailableError):
         await qemu.await_agent(100, name="vm-100", timeout=_TWO_ATTEMPTS)
     assert sleeps == pytest.approx([0.1])
-    assert max(sleeps) <= POLL_MAX_WAIT
 
 
 async def test_await_agent_raises_actionable_error_on_timeout():

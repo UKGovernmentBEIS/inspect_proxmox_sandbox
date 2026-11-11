@@ -2,7 +2,7 @@ import re
 import time
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import tenacity
@@ -22,8 +22,7 @@ from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
-# First gap 0.1 s, capped at 2 s. tenacity's `multiplier` sets the first gap;
-# `min` is only a floor.
+# tenacity's multiplier sets the first gap; min is only a floor
 POLL_MAX_WAIT = 2.0
 POLL_WAIT = tenacity.wait_exponential(multiplier=0.1, max=POLL_MAX_WAIT, exp_base=1.3)
 
@@ -384,8 +383,8 @@ class AsyncProxmoxAPI:
         self,
         *,
         upid: str,
-    ) -> dict[str, Any]:
-        """Poll until the task has finished; returns its final status record.
+    ) -> None:
+        """Poll until the task has finished.
 
         Raises ProxmoxTaskError unless the exitstatus is OK or "WARNINGS: n".
         """
@@ -398,15 +397,10 @@ class AsyncProxmoxAPI:
             stop=tenacity.stop_after_delay(1200),
             retry=tenacity.retry_if_result(lambda x: x is None),
         )
-        async def _wait_for_task() -> dict[str, Any] | None:
+        async def _exitstatus() -> str | None:
             response = await self.request("GET", f"/nodes/{node}/tasks/{upid}/status")
-            if response.get("exitstatus") is None:
-                return None
-            return response
+            return response.get("exitstatus")
 
-        status = await _wait_for_task()
-        assert status is not None  # tenacity raises RetryError rather than return None
-        exitstatus = str(status["exitstatus"])
+        exitstatus = str(await _exitstatus())
         if exitstatus != "OK" and not exitstatus.startswith("WARNINGS"):
             raise ProxmoxTaskError(upid, exitstatus)
-        return status
