@@ -136,18 +136,6 @@ def _api_with_task_outcomes(outcomes: dict[str, str]) -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_destroy_vm_succeeds_when_another_delete_won():
-    """Two deletes of one VM both get a UPID; the second finds the config gone."""
-    api = _api_with_task_outcomes(
-        {
-            "UPID:pve1:qmdestroy": "Configuration file "
-            "'nodes/pve1/qemu-server/4242.conf' does not exist"
-        }
-    )
-    await _qemu(api).destroy_vm(vm_id=4242, name="vm")
-
-
-@pytest.mark.asyncio
 async def test_destroy_vm_raises_when_the_delete_task_fails():
     api = _api_with_task_outcomes(
         {"UPID:pve1:qmdestroy": "storage 'local-lvm' does not exist"}

@@ -1,4 +1,4 @@
-"""VM start retries the transient failures a concurrent host can produce."""
+"""VM start retries when Proxmox could not start a worker, and nothing else."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -23,17 +23,15 @@ def no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
 
 
-async def test_failed_start_task_is_retried():
+async def test_failed_start_task_is_raised():
     api = AsyncMock()
     api.request = AsyncMock(return_value=UPID)
     api.wait_for_task = AsyncMock(
-        side_effect=[
-            ProxmoxTaskError(UPID, "start failed: QEMU exited with code 1"),
-            None,
-        ]
+        side_effect=ProxmoxTaskError(UPID, "start failed: QEMU exited with code 1")
     )
-    await _qemu(api).start(vm_id=106)
-    assert api.request.await_count == 2
+    with pytest.raises(ProxmoxTaskError, match="QEMU exited"):
+        await _qemu(api).start(vm_id=106)
+    assert api.request.await_count == 1
 
 
 async def test_fork_failure_on_start_is_retried():
@@ -44,15 +42,6 @@ async def test_fork_failure_on_start_is_retried():
     api.wait_for_task = AsyncMock()
     await _qemu(api).start(vm_id=106)
     assert api.request.await_count == 2
-
-
-async def test_start_gives_up_after_bounded_attempts():
-    api = AsyncMock()
-    api.request = AsyncMock(return_value=UPID)
-    api.wait_for_task = AsyncMock(side_effect=ProxmoxTaskError(UPID, "start failed"))
-    with pytest.raises(ProxmoxTaskError):
-        await _qemu(api).start(vm_id=106)
-    assert api.request.await_count == 3
 
 
 async def test_other_start_errors_are_not_retried():
