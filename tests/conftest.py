@@ -7,7 +7,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--runslow",
         action="store_true",
-        default=False,
         help="also run tests marked `slow` (e.g. the Kali built-in)",
     )
 

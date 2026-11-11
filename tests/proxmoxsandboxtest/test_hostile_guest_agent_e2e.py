@@ -12,8 +12,6 @@ import httpx
 import pytest
 from inspect_ai.util._sandbox.limits import override_max_exec_output_size
 
-from proxmoxsandbox import _proxmox_sandbox_environment as sandbox_environment
-from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
@@ -21,7 +19,7 @@ from proxmoxsandbox._proxmox_sandbox_environment import (
 )
 from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
-from .proxmox_sandbox_utils import setup_sandbox
+from .proxmox_sandbox_utils import reset_pool_state, setup_sandbox
 
 pytestmark = pytest.mark.req_proxmox
 
@@ -160,10 +158,10 @@ async def _await_shim_generation(
         await asyncio.sleep(1)
 
 
-async def _install_shim(env: ProxmoxSandboxEnvironment, generation: int) -> None:
+async def _install_shim(env: ProxmoxSandboxEnvironment) -> None:
     """Swap qemu-ga for the shim, using the honest agent to do it."""
     await env.write_file(SHIM_PATH, SHIM_SOURCE)
-    await env.write_file(REPLIES_PATH, json.dumps(_replies({}, generation)))
+    await env.write_file(REPLIES_PATH, json.dumps(_replies({}, 0)))
     # Deferred so this exec (and its rm -f cleanup) finish over the honest
     # agent before it goes away.
     res = await env.exec(
@@ -178,7 +176,7 @@ async def _install_shim(env: ProxmoxSandboxEnvironment, generation: int) -> None
         timeout=30,
     )
     assert res.success, res
-    await _await_shim_generation(env, generation, time.monotonic() + 120)
+    await _await_shim_generation(env, 0, time.monotonic() + 120)
 
 
 async def _reconfigure_shim(
@@ -213,11 +211,9 @@ async def _reconfigure_shim(
 @pytest.fixture(scope="module", autouse=True)
 def reset_global_pool_state():
     # Shadows conftest's per-test reset: hostile_vm's teardown needs the pool
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
+    reset_pool_state()
     yield
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
+    reset_pool_state()
 
 
 _shim_generations = itertools.count(1)
@@ -244,7 +240,7 @@ async def hostile_vm() -> AsyncGenerator[ProxmoxSandboxEnvironment, None]:
     try:
         env = envs["default"]
         assert isinstance(env, ProxmoxSandboxEnvironment)
-        await _install_shim(env, generation=0)
+        await _install_shim(env)
         yield env
     finally:
         await ProxmoxSandboxEnvironment.sample_cleanup(
@@ -260,10 +256,10 @@ async def hostile_env(
     overrides = request.param
     # _replies overwrites osinfo, so such a case would assert nothing
     assert "guest-get-osinfo" not in overrides
-    # The shim would take the provider's next write for one to its own file.
+    # The shim treats any write to this handle as a write to its replies file
     file_open = overrides.get("guest-file-open") or {}
     assert file_open.get("return") != SHIM_CONTROL_HANDLE
-    await _reconfigure_shim(hostile_vm, request.param, next(_shim_generations))
+    await _reconfigure_shim(hostile_vm, overrides, next(_shim_generations))
     return hostile_vm
 
 
@@ -374,7 +370,9 @@ async def test_exec_with_timeout_is_bounded_when_agent_stalls(hostile_env, monke
     The agent budget is shrunk from 180 s, so the bound shown is the budget and
     not the retries.
     """
-    monkeypatch.setattr(sandbox_environment, "_EXEC_AGENT_BUDGET_SECONDS", 30)
+    monkeypatch.setattr(
+        "proxmoxsandbox._proxmox_sandbox_environment._EXEC_AGENT_BUDGET_SECONDS", 30
+    )
     started = time.monotonic()
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(hostile_env.exec(["true"], timeout=5), 300)

@@ -38,6 +38,8 @@ from proxmoxsandbox.schema import (
     VmConfig,
 )
 
+# A 19-VM range posting every stop and delete at once got
+# "500 got no worker upid - start worker failed" from Proxmox
 _DESTROY_CONCURRENCY = 4
 
 
@@ -279,8 +281,6 @@ class InfraCommands(abc.ABC):
         ipam_mappings: Sequence[IpamMapping],
         vms: dict[int, VmConfig],
     ):
-        # Four at a time: a 19-VM range posting every stop and delete together got
-        # "500 got no worker upid - start worker failed" from Proxmox
         slots = asyncio.Semaphore(_DESTROY_CONCURRENCY)
 
         async def destroy(vm_id: int, vm_config: VmConfig) -> None:
@@ -289,7 +289,7 @@ class InfraCommands(abc.ABC):
 
         results = await asyncio.gather(
             *(destroy(vm_id, vm_config) for vm_id, vm_config in vms.items()),
-            # A destroy still running after we raise would race task_cleanup's
+            # A destroy still running after we raise would race task_cleanup
             return_exceptions=True,
         )
         for result in results:

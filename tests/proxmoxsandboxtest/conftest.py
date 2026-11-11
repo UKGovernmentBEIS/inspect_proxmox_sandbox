@@ -28,6 +28,8 @@ from proxmoxsandbox.schema import (
     _load_single_instance_from_env,
 )
 
+from .proxmox_sandbox_utils import reset_pool_state
+
 # Set PROXMOX_WINDOWS_TEMPLATE_TAG to run tests against a Windows VM.
 # The value should match the tag on an existing Proxmox VM template.
 # The template must be tagged with "inspect;<tag>" and have the QEMU
@@ -43,15 +45,12 @@ def reset_global_pool_state():
     class-level, so they persist for the whole session. initialize() is a no-op
     for a pool_id that already exists, so a 'default' pool left behind by an
     earlier test (e.g. an e2e test built from PROXMOX_HOST) would otherwise be
-    reused by a later test that meant to build its own config. Every pool
-    consumer is function-scoped and re-runs task_init, so resetting around each
-    test is safe and removes the need for per-test bookkeeping.
+    reused by a later test that meant to build its own config. Modules that
+    share a module-scoped sandbox shadow this fixture with a module-scoped one.
     """
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
+    reset_pool_state()
     yield
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
+    reset_pool_state()
 
 
 @pytest.fixture
@@ -227,5 +226,4 @@ async def proxmox_sandbox_environment(
     finally:
         # The module-scoped reset does not run between OS params, and a failed
         # cleanup leaves the next param's sample_init waiting on an empty pool
-        ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-        InfraCommands._instances.clear()
+        reset_pool_state()

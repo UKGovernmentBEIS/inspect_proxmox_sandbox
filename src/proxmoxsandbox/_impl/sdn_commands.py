@@ -180,9 +180,7 @@ class SdnCommands(abc.ABC):
                 new_cidrs.append(str(subnet.cidr))
 
         # See https://forum.proxmox.com/threads/sdn-simple-zones-and-overlapping-ip-ranges.162739/
-        if overlaps := self.find_existing_cidr_overlaps(
-            existing_cidrs, new_cidrs
-        ) + self.find_self_cidr_overlaps(new_cidrs):
+        if overlaps := self.find_existing_cidr_overlaps(existing_cidrs, new_cidrs):
             raise ValueError(f"Duplicate IP ranges found: {overlaps}")
 
     def simple_vnet_config(

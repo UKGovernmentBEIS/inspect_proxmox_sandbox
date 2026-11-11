@@ -696,7 +696,6 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             poll_timeout = _exec_untimed_wait()
 
         @tenacity.retry(
-            # multiplier, not min, sets the first gap (see POLL_WAIT)
             wait=tenacity.wait_exponential(
                 multiplier=0.1, max=_EXEC_POLL_MAX_INTERVAL_SECONDS, exp_base=1.3
             ),
@@ -806,39 +805,36 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             else:
                 # Concurrently: QGA round trips dominate exec latency
                 reads = (
-                    asyncio.ensure_future(
+                    asyncio.create_task(
                         self._read_exec_output(f"{tmp_start}script.stdout")
                     ),
-                    asyncio.ensure_future(
+                    asyncio.create_task(
                         self._read_exec_output(f"{tmp_start}script.stderr")
                     ),
-                    asyncio.ensure_future(self._read_return_code(tmp_start)),
+                    asyncio.create_task(self._read_return_code(tmp_start)),
                 )
-                returncode_read: int | ReturnCodeNotWritten
+                written_returncode: int | None
                 try:
                     # In this order, so a stdout failure is reported first and at once
                     stdout = await reads[0]
                     stderr = await reads[1]
                     try:
-                        returncode_read = await reads[2]
-                    except ReturnCodeNotWritten as e:
-                        returncode_read = e
+                        written_returncode = await reads[2]
+                    except ReturnCodeNotWritten:
+                        written_returncode = None
                 finally:
                     # Left pending, a read would keep retrying against the agent
                     for read in reads:
                         read.cancel()
                     await asyncio.gather(*reads, return_exceptions=True)
-                try:
-                    if isinstance(returncode_read, ReturnCodeNotWritten):
-                        raise returncode_read
-                    returncode = returncode_read
+                if written_returncode is not None:
                     exec_response = ExecResult(
-                        success=returncode == 0,
-                        returncode=returncode,
+                        success=written_returncode == 0,
+                        returncode=written_returncode,
                         stdout=stdout,
                         stderr=stderr,
                     )
-                except ReturnCodeNotWritten:
+                else:
                     # exec exited but the wrapper never wrote its returncode file:
                     # it was killed before completion.
                     signal_num = exec_status.signal

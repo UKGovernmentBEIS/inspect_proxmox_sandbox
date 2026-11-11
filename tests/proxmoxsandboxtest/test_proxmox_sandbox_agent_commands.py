@@ -6,21 +6,19 @@ import pytest
 import tenacity
 from inspect_ai.util import OutputLimitExceededError, SandboxConnection
 
-from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
+
+from .proxmox_sandbox_utils import reset_pool_state
 
 pytestmark = pytest.mark.req_proxmox
 
 
 @pytest.fixture(scope="module", autouse=True)
 def reset_global_pool_state():
-    # Shadows conftest's per-test reset: the shared sandbox's teardown needs
-    # the pool
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
+    # Shadows conftest's per-test reset: the shared sandbox's teardown needs the pool
+    reset_pool_state()
     yield
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
+    reset_pool_state()
 
 
 async def test_exec_timeout_with_sigterm_handler_no_retryerror(

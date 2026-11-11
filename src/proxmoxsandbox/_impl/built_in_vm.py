@@ -190,8 +190,7 @@ runcmd:
   - [ systemctl, mask, systemd-networkd-wait-online.service ]
 # systemd-networkd-wait-online.service causes startup delays
 # and makes it annoying to debug network issues
-# "quiet": under nested virtualisation every printk byte to the serial console
-# is a trap (ubuntu24.04 kernel+initrd 3.7 s -> 2.8 s)
+# "quiet": under nested virtualisation every printk byte to the serial console is a trap
   - - sh
     - -c
     - |
@@ -291,11 +290,6 @@ runcmd:
         await attach_to_vm()
 
     # for test code only
-    async def clear_builtins(self) -> None:
-        for built_in in SOURCE_IMAGE_NAMES:
-            await self.clear_builtin(built_in)
-
-    # for test code only
     async def clear_builtin(self, built_in: str) -> None:
         """Remove one built-in's template and its uploaded source image."""
         source_image_name = SOURCE_IMAGE_NAMES[built_in]
@@ -350,7 +344,7 @@ runcmd:
             return
         # Up front: two builds that both found it missing would both create it
         await self.ensure_static_sdn_exists()
-        builds = [asyncio.ensure_future(self.ensure_exists(name)) for name in missing]
+        builds = [asyncio.create_task(self.ensure_exists(name)) for name in missing]
         try:
             await asyncio.gather(*builds)
         finally:
@@ -473,9 +467,9 @@ runcmd:
                     tar.kill()
                     await tar.wait()
                     raise
-                if tar.returncode != 0:
+                if tar.returncode:
                     raise subprocess.CalledProcessError(
-                        tar.returncode or -1, tar_command, stderr=tar_stderr
+                        tar.returncode, tar_command, stderr=tar_stderr
                     )
 
                 # rename the output disk.raw to something better:
@@ -540,45 +534,41 @@ runcmd:
         name = f"inspect-{built_in}"
 
         with trace_action(self.logger, TRACE_NAME, f"build template {built_in=}"):
-            upid = ""
 
             async def create(vm_id: int) -> None:
-                nonlocal upid
-                upid = await self.async_proxmox.request(
-                    "POST",
-                    f"/nodes/{self.node}/qemu",
-                    json={
-                        "vmid": vm_id,
-                        "name": name,
-                        "node": self.node,
-                        "cpu": proxmox_cpu("host", nested_virt=False),
-                        "memory": 8192,
-                        "cores": 2,
-                        "ostype": "l26",
-                        "scsi0": f"{self.image_storage}:0,"
-                        + f"import-from={LOCAL_STORAGE}:{import_source},"
-                        + "format=qcow2,cache=writeback",
-                        "scsihw": "virtio-scsi-single",
-                        "net0": f"virtio,bridge={STATIC_VNET_ID}",
-                        "serial0": "socket",
-                        "vga": "none",
-                        "tablet": 0,
-                        "start": False,
-                        "agent": "enabled=1",
-                    },
-                )
+                with trace_action(
+                    self.logger,
+                    TRACE_NAME,
+                    f"create VM from import {built_in=} {vm_id=}",
+                ):
+                    upid = await self.async_proxmox.request(
+                        "POST",
+                        f"/nodes/{self.node}/qemu",
+                        json={
+                            "vmid": vm_id,
+                            "name": name,
+                            "node": self.node,
+                            "cpu": proxmox_cpu("host", nested_virt=False),
+                            "memory": 8192,
+                            "cores": 2,
+                            "ostype": "l26",
+                            "scsi0": f"{self.image_storage}:0,"
+                            + f"import-from={LOCAL_STORAGE}:{import_source},"
+                            + "format=qcow2,cache=writeback",
+                            "scsihw": "virtio-scsi-single",
+                            "net0": f"virtio,bridge={STATIC_VNET_ID}",
+                            "serial0": "socket",
+                            "vga": "none",
+                            "tablet": 0,
+                            "start": False,
+                            "agent": "enabled=1",
+                        },
+                    )
+                    await self.async_proxmox.wait_for_task(upid=upid)
 
-            # Only the POST is retried: the ID is ours once it returns, and a failed
-            # import task is not a collision
-            next_available_vm_id = await self.qemu_commands._create_with_fresh_vm_id(
+            next_available_vm_id = await self.qemu_commands.create_with_fresh_vm_id(
                 create
             )
-            with trace_action(
-                self.logger,
-                TRACE_NAME,
-                f"create VM from import {built_in=} {next_available_vm_id=}",
-            ):
-                await self.async_proxmox.wait_for_task(upid=upid)
 
             if disk_gib is not None:
                 # cloud-init's growpart/resizefs pick this up on first boot
@@ -600,14 +590,14 @@ runcmd:
                     user_data=user_data,
                 )
 
-                upid = await self.async_proxmox.request(
-                    "POST",
-                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
-                    json={
-                        "tags": f"inspect,builtin-{built_in}",
-                    },
-                )
-                await self.async_proxmox.wait_for_task(upid=upid)
+            upid = await self.async_proxmox.request(
+                "POST",
+                f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
+                json={
+                    "tags": f"inspect,builtin-{built_in}",
+                },
+            )
+            await self.async_proxmox.wait_for_task(upid=upid)
 
             with trace_action(
                 self.logger, TRACE_NAME, f"start VM {next_available_vm_id=}"
@@ -715,28 +705,26 @@ runcmd:
             for zone_info in existing_zones
         )
 
-        if exists_already:
-            return
-
-        await self.sdn_commands.create_sdn(
-            proxmox_ids_start=STATIC_SDN_START,
-            sdn_config=SdnConfig(
-                vnet_configs=(
-                    VnetConfig(
-                        subnets=(
-                            SubnetConfig(
-                                cidr=ip_network("192.168.99.0/24"),
-                                gateway=ip_address("192.168.99.1"),
-                                snat=True,
-                                dhcp_ranges=(
-                                    DhcpRange(
-                                        start=ip_address("192.168.99.50"),
-                                        end=ip_address("192.168.99.100"),
+        if not exists_already:
+            await self.sdn_commands.create_sdn(
+                proxmox_ids_start=STATIC_SDN_START,
+                sdn_config=SdnConfig(
+                    vnet_configs=(
+                        VnetConfig(
+                            subnets=(
+                                SubnetConfig(
+                                    cidr=ip_network("192.168.99.0/24"),
+                                    gateway=ip_address("192.168.99.1"),
+                                    snat=True,
+                                    dhcp_ranges=(
+                                        DhcpRange(
+                                            start=ip_address("192.168.99.50"),
+                                            end=ip_address("192.168.99.100"),
+                                        ),
                                     ),
                                 ),
-                            ),
-                        )
-                    ),
-                )
-            ),
-        )
+                            )
+                        ),
+                    )
+                ),
+            )
