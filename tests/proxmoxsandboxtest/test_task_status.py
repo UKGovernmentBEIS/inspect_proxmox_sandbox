@@ -22,6 +22,15 @@ async def test_failed_task_raises_with_its_exitstatus():
     assert info.value.upid == UPID
 
 
-async def test_ok_and_warnings_tasks_return():
+async def test_ok_task_returns_without_logging(caplog: pytest.LogCaptureFixture):
     await _api([{"exitstatus": "OK"}]).wait_for_task(upid=UPID)
+    assert not caplog.records
+
+
+async def test_task_with_warnings_returns_and_is_logged(
+    caplog: pytest.LogCaptureFixture,
+):
     await _api([{"exitstatus": "WARNINGS: 2"}]).wait_for_task(upid=UPID)
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        ("WARNING", f"Proxmox task {UPID} finished with WARNINGS: 2")
+    ]
