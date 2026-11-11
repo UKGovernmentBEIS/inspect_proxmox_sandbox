@@ -138,7 +138,7 @@ async def ids_start() -> str:
 
 @pytest.fixture(scope="module")
 async def module_sdn_commands() -> SdnCommands:
-    """SdnCommands that the per-test reset of InfraCommands._instances does not clear."""
+    """SdnCommands outside InfraCommands._instances, which the per-test reset clears."""
     instance_config = _load_single_instance_from_env()
     return SdnCommands(AsyncProxmoxAPI.from_instance_config(instance_config))
 

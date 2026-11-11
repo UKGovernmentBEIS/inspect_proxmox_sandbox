@@ -13,7 +13,7 @@ from proxmoxsandbox.schema import DhcpRange, SdnConfig, SubnetConfig, VnetConfig
 
 @pytest.fixture
 def offline_sdn_commands() -> SdnCommands:
-    """SdnCommands with no host behind it: a request shows up as a connection failure."""
+    """SdnCommands with no host behind it: a request fails to connect."""
     return SdnCommands(AsyncProxmoxAPI("proxmox.invalid:8006", "nobody", "nothing"))
 
 
