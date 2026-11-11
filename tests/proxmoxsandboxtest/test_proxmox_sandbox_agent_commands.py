@@ -14,10 +14,8 @@ pytestmark = pytest.mark.req_proxmox
 
 @pytest.fixture(scope="module", autouse=True)
 def reset_global_pool_state():
-    # Shadows conftest's function-scoped autouse fixture: the shared
-    # proxmox_sandbox_environment's sample_cleanup at module teardown needs
-    # the pool created by task_init, so we must not clear pool state between
-    # tests.
+    # Shadows conftest's per-test reset: the shared sandbox's teardown needs
+    # the pool
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
     InfraCommands._instances.clear()
     yield

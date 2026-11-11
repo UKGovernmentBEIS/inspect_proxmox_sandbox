@@ -280,8 +280,7 @@ class SdnCommands(abc.ABC):
             await self.generate_sdn_config() if sdn_config == "auto" else sdn_config
         )
 
-        # Checks that need only the config come first, so a bad config fails
-        # before any request to Proxmox.
+        # Config-only checks first, so a bad config fails before any request
         if len(resolved_sdn_config.vnet_configs) > 10:
             raise ValueError(
                 f"Too many vnets; max 10, got {len(resolved_sdn_config.vnet_configs)}"
@@ -403,8 +402,7 @@ class SdnCommands(abc.ABC):
                     "GET", f"/cluster/sdn/vnets/{vnet}/subnets"
                 )
             except httpx.HTTPStatusError as e:
-                # Another process tearing down its zone between our listing
-                # and this read; its CIDRs are no longer in use.
+                # Another process tore its zone down after we listed it
                 if e.response.status_code == 500 and "does not exist" in str(e):
                     continue
                 raise
