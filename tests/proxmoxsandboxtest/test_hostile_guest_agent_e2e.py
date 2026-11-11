@@ -28,12 +28,9 @@ pytestmark = pytest.mark.req_proxmox
 # Proxmox synchronizes and pings before each command; those replies stay valid
 # so each test reaches its intended command response.
 #
-# The shim also answers a real file-open/write/close for its own replies file
-# (handle CONTROL_HANDLE) and reloads the replies on close, so one VM serves
-# every case: the host rewrites the replies through the shim with a plain
-# agent/file-write. Those branches match ahead of the reply table, so a case
-# may override file-open/write/close; hostile_env rejects the two overrides
-# that would break this.
+# The shim also answers a real file-open/write/close on its own replies file
+# and reloads it on close, so one VM serves every case. hostile_env rejects
+# the two overrides that would break this.
 SHIM_SOURCE = r"""
 import base64, json, os, sys, time
 
@@ -215,9 +212,7 @@ async def _reconfigure_shim(
 
 @pytest.fixture(scope="module", autouse=True)
 def reset_global_pool_state():
-    # Shadows conftest's function-scoped autouse fixture: hostile_vm's
-    # sample_cleanup at module teardown needs the pool created by task_init,
-    # so we must not clear pool state between cases.
+    # Shadows conftest's per-test reset: hostile_vm's teardown needs the pool
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
     InfraCommands._instances.clear()
     yield
@@ -267,8 +262,7 @@ async def hostile_env(
 ) -> ProxmoxSandboxEnvironment:
     """The shared shim VM, answering with this case's overrides."""
     overrides = request.param
-    # _replies replaces osinfo with the generation marker, so such a case
-    # would run against honest replies and assert nothing.
+    # _replies overwrites osinfo, so such a case would assert nothing
     assert "guest-get-osinfo" not in overrides
     # The shim would take the provider's next write for one to its own file.
     file_open = overrides.get("guest-file-open") or {}

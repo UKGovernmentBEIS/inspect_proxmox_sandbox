@@ -412,10 +412,8 @@ async def test_cleanup_after_interrupted_sample(
     assert await vm_ids() == {vm["vmid"] for vm in existing_vms}
     assert await zones() == existing_zones
 
-    # Leftovers of a process that has gone: a whole sandbox as sample_init
-    # builds it, booted so its guest holds a DHCP lease. Dropping the pool and
-    # instance registries forgets what this process tracked, so the CLI has to
-    # find the VM by tag and the zone by name.
+    # Forget what this process tracked: the CLI has to find the VM by tag and
+    # the zone by name, as after a crash
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
     InfraCommands._instances.clear()
     await setup_sandbox("tcc", sandbox_env_config)

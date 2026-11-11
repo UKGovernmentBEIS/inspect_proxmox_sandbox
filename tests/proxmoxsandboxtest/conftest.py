@@ -121,8 +121,7 @@ async def built_in_vm(infra_commands: InfraCommands) -> BuiltInVM:
     return infra_commands.built_in_vm
 
 
-# Drawn without replacement: module-scoped zones outlive the test that made
-# them, so a repeated number would collide with a zone that still exists.
+# Without replacement: module-scoped zones outlive the test that made them
 _ID_NUMBERS = iter(random.sample(range(100, 1000), 900))
 
 
@@ -239,8 +238,7 @@ async def proxmox_sandbox_environment(
             interrupted=False,
         )
     finally:
-        # The module-scoped reset does not run between the OS params. A
-        # cleanup that failed has withheld the instance, and the next param's
-        # sample_init would wait on the emptied pool forever.
+        # The module-scoped reset does not run between OS params, and a failed
+        # cleanup leaves the next param's sample_init waiting on an empty pool
         ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
         InfraCommands._instances.clear()

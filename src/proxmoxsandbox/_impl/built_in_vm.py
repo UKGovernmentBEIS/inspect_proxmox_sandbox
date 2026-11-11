@@ -190,11 +190,8 @@ runcmd:
   - [ systemctl, mask, systemd-networkd-wait-online.service ]
 # systemd-networkd-wait-online.service causes startup delays
 # and makes it annoying to debug network issues
-# "quiet" trims clone boot (measured on ubuntu24.04, 2 vCPU nested KVM:
-# kernel+initrd 3.7 s -> 2.8 s, userspace to guest agent 1.4 s -> 1.0 s):
-# under nested virtualisation every printk byte to the serial console is a
-# trap, and the boot log is ~50 KB. Warnings and errors still reach the
-# console; the journal has everything.
+# "quiet": under nested virtualisation every printk byte to the serial console
+# is a trap (ubuntu24.04 kernel+initrd 3.7 s -> 2.8 s)
   - - sh
     - -c
     - |
@@ -355,16 +352,14 @@ runcmd:
         missing = sorted(set(built_in_names) - set(await self.known_builtins()))
         if not missing:
             return
-        # Before the builds start: each checks for the zone itself, and two
-        # that both found it missing would both try to create it.
+        # Up front: two builds that both found it missing would both create it
         await self.ensure_static_sdn_exists()
         builds = [asyncio.ensure_future(self.ensure_exists(name)) for name in missing]
         try:
             await asyncio.gather(*builds)
         finally:
-            # A build that outlives a failed sibling would carry on after
-            # sample_init has released the instance, under the next sample's
-            # pre-clean.
+            # A build outliving a failed sibling would run on under the next
+            # sample's pre-clean
             for build in builds:
                 build.cancel()
             await asyncio.gather(*builds, return_exceptions=True)
@@ -464,8 +459,7 @@ runcmd:
                 download_path = Path(self.cache_dir) / download_filename
                 await download_to_file(source_image_source_url, download_path)
 
-                # tar -xf as a subprocess; awaited rather than check_call so
-                # the event loop (other builds' polls) keeps running meanwhile
+                # Not check_call: that would block other builds' polls
                 tar_command = [
                     "tar",
                     "-xf",
@@ -479,8 +473,7 @@ runcmd:
                 try:
                     _, tar_stderr = await tar.communicate()
                 except asyncio.CancelledError:
-                    # Left running, it would still be writing disk.raw when a
-                    # retry starts its own extract onto the same path.
+                    # Left running, it would still be writing disk.raw when a retry extracts
                     tar.kill()
                     await tar.wait()
                     raise
@@ -579,9 +572,8 @@ runcmd:
                     },
                 )
 
-            # Only the POST is retried: PVE writes the VM config before the
-            # import work starts, so the ID is ours once the call returns and
-            # a failed import task is not an ID collision.
+            # Only the POST is retried: the ID is ours once it returns, and a failed
+            # import task is not a collision
             next_available_vm_id = await self.qemu_commands._create_with_fresh_vm_id(
                 create
             )
@@ -643,8 +635,7 @@ runcmd:
             )
 
             @tenacity.retry(
-                # Uncapped, the backoff reaches tens of minutes per poll inside an
-                # hour; at 30 s a 25 min Kali run still sat finished for up to 30 s.
+                # Uncapped, this backoff reaches gaps of tens of minutes
                 wait=tenacity.wait_exponential(multiplier=0.1, max=5, exp_base=1.3),
                 stop=tenacity.stop_after_delay(cloud_init_timeout),
                 retry=tenacity.retry_if_result(lambda x: x is False),
@@ -689,9 +680,8 @@ runcmd:
                     "POST",
                     f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
                 )
-                # The config's template flag flips before the disks are renamed
-                # to base images; a clone in that window fails with "Linked
-                # clone feature is not supported", so wait for the task itself.
+                # template=1 is set before the disks are renamed to base-*; a clone in
+                # between fails with "Linked clone feature is not supported"
                 await self.async_proxmox.wait_for_task(upid=upid)
 
                 @tenacity.retry(

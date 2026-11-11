@@ -804,8 +804,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     stderr=exec_status.err_data,
                 )
             else:
-                # The wrapper wrote all three files before exiting, so read
-                # them concurrently; QGA round trips dominate exec latency.
+                # Concurrently: QGA round trips dominate exec latency
                 reads = (
                     asyncio.ensure_future(
                         self._read_exec_output(f"{tmp_start}script.stdout")
@@ -817,8 +816,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 )
                 returncode_read: int | ReturnCodeNotWritten
                 try:
-                    # Awaited in this order so a failed stdout read is reported
-                    # at once and ahead of the others, whichever fails first.
+                    # In this order, so a stdout failure is reported first and at once
                     stdout = await reads[0]
                     stderr = await reads[1]
                     try:
@@ -826,8 +824,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     except ReturnCodeNotWritten as e:
                         returncode_read = e
                 finally:
-                    # A read still pending here lost to an earlier failure;
-                    # left alone it would keep retrying against the agent.
+                    # Left pending, a read would keep retrying against the agent
                     for read in reads:
                         read.cancel()
                     await asyncio.gather(*reads, return_exceptions=True)
