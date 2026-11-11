@@ -2,7 +2,7 @@ import re
 import time
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 import tenacity
@@ -22,8 +22,7 @@ from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
-# First gap 0.1 s, capped at 2 s. tenacity's `multiplier` sets the first gap;
-# `min` is only a floor.
+# tenacity's multiplier sets the first gap; min is only a floor
 POLL_MAX_WAIT = 2.0
 POLL_WAIT = tenacity.wait_exponential(multiplier=0.1, max=POLL_MAX_WAIT, exp_base=1.3)
 
@@ -371,11 +370,7 @@ class AsyncProxmoxAPI:
         self,
         *,
         upid: str,
-    ) -> dict[str, Any]:
-        """Poll until the task has finished; returns its final status record.
-
-        Does not raise on a failed task: callers that care read `exitstatus`.
-        """
+    ) -> None:
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")
         node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
@@ -383,14 +378,10 @@ class AsyncProxmoxAPI:
         @tenacity.retry(
             wait=POLL_WAIT,
             stop=tenacity.stop_after_delay(1200),
-            retry=tenacity.retry_if_result(lambda x: x is None),
+            retry=tenacity.retry_if_result(lambda x: x is False),
         )
-        async def _wait_for_task() -> dict[str, Any] | None:
+        async def _wait_for_task() -> bool:
             response = await self.request("GET", f"/nodes/{node}/tasks/{upid}/status")
-            if response.get("exitstatus") is None:
-                return None
-            return response
+            return response.get("exitstatus") is not None
 
-        status = await _wait_for_task()
-        assert status is not None  # tenacity raises RetryError rather than return None
-        return status
+        await _wait_for_task()

@@ -197,7 +197,6 @@ class QemuCommands(abc.ABC):
             upid = await self.async_proxmox.request(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
-            # The status poll stays: wait_for_task does not check the exit status
             await self.async_proxmox.wait_for_task(upid=upid)
 
         # Only retry "still running". Stopping a missing VM still returns a
