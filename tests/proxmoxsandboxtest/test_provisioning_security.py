@@ -103,9 +103,10 @@ def test_host_guard_gates_api_and_guest_startup(provisioner: Path) -> None:
         "EGRESS_LOCKDOWN_UNIT",
         "EGRESS_LOCKDOWN_TIMER",
         "EGRESS_LOCKDOWN_HALT_UNIT",
+        "PVE_QEMU_PATCH",
     ],
 )
-def test_firewall_heredocs_identical(delimiter: str) -> None:
+def test_shared_heredocs_identical(delimiter: str) -> None:
     userdata = (EC2_SCRIPTS / "userdata.sh").read_text()
     virtualized = VIRTUALIZED_SCRIPT.read_text()
 
