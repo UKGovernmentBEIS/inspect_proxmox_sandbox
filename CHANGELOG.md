@@ -3,7 +3,6 @@
 ## Unreleased
 
 - A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
-- `exec` takes about 1 s less per command
 
 ## 0.13.0
 
