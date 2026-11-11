@@ -4,6 +4,7 @@ Collaborators are mocked; the harness records the order of the steps that
 matter to the zone.
 """
 
+import itertools
 from ipaddress import ip_address
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -51,20 +52,13 @@ class Harness:
         async_proxmox.request = AsyncMock(side_effect=request)
         async_proxmox.wait_for_task = AsyncMock()
 
-        next_vm_id = VM_ID
-
-        async def create_with_fresh_vm_id(create):
-            nonlocal next_vm_id
-            vm_id = next_vm_id
-            next_vm_id += 1
-            await create(vm_id)
-            return vm_id
-
         async def remove_existing_nics(vm_id):
             self.events.append(("remove_nics", vm_id))
 
         self.qemu_commands = MagicMock()
-        self.qemu_commands.create_with_fresh_vm_id = create_with_fresh_vm_id
+        self.qemu_commands.find_next_available_vm_id = AsyncMock(
+            side_effect=itertools.count(VM_ID)
+        )
         self.qemu_commands.start = AsyncMock()
         self.qemu_commands.await_vm = AsyncMock()
         self.qemu_commands.list_vms = AsyncMock(return_value=[])

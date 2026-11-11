@@ -3,7 +3,7 @@ import asyncio
 import os
 import subprocess
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from io import BytesIO
 from logging import getLogger
 from pathlib import Path
@@ -24,6 +24,8 @@ from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCom
 from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 VM_TIMEOUT = 1200
+# /cluster/nextid reserves nothing, so concurrent builds read the same ID
+_VM_ID_ATTEMPTS = 5
 CLOUD_INIT_TIMEOUT = 1200
 # 41 GiB used after install (39 GiB of it /usr), so ~20 GiB free for the eval
 KALI_DISK_GIB = 64
@@ -516,6 +518,28 @@ runcmd:
                 )
                 await self.async_proxmox.wait_for_task(upid=upid)
 
+    async def _create_with_fresh_vm_id(
+        self, create: Callable[[int], Awaitable[None]]
+    ) -> int:
+        """Run `create` with the next free VM ID; try the next if a build took it."""
+        attempt = 0
+        while True:
+            attempt += 1
+            vm_id = await self.qemu_commands.find_next_available_vm_id()
+            try:
+                await create(vm_id)
+                return vm_id
+            except httpx.HTTPStatusError as e:
+                # `unable to create VM 105 - VM 105 already exists on node 'pve'`,
+                # rejected before Proxmox writes anything
+                taken = (
+                    e.response.status_code == 500
+                    and "already exists" in e.response.text
+                )
+                if attempt == _VM_ID_ATTEMPTS or not taken:
+                    raise
+                self.logger.info(f"VM ID {vm_id} was taken by another build; retrying")
+
     async def startup_vm(
         self,
         built_in: str,
@@ -571,9 +595,7 @@ runcmd:
                     )
                     await self.async_proxmox.wait_for_task(upid=upid)
 
-            next_available_vm_id = await self.qemu_commands.create_with_fresh_vm_id(
-                create
-            )
+            next_available_vm_id = await self._create_with_fresh_vm_id(create)
 
             if disk_gib is not None:
                 # cloud-init's growpart/resizefs pick this up on first boot
