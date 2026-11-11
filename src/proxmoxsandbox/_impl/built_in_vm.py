@@ -583,8 +583,7 @@ runcmd:
             )
 
             @tenacity.retry(
-                # Uncapped, the backoff reaches tens of minutes per poll inside an
-                # hour; at 30 s a 25 min Kali run still sat finished for up to 30 s.
+                # Uncapped, this backoff reaches gaps of tens of minutes
                 wait=tenacity.wait_exponential(multiplier=0.1, max=5, exp_base=1.3),
                 stop=tenacity.stop_after_delay(cloud_init_timeout),
                 retry=tenacity.retry_if_result(lambda x: x is False),
@@ -623,9 +622,8 @@ runcmd:
                 "POST",
                 f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
             )
-            # The config's template flag flips before the disks are renamed to
-            # base images; a clone in that window fails with "Linked clone
-            # feature is not supported", so wait for the task itself.
+            # template=1 is set before the disks are renamed to base-*; a clone in
+            # between fails with "Linked clone feature is not supported"
             await self.async_proxmox.wait_for_task(upid=upid)
 
             @tenacity.retry(
