@@ -142,6 +142,13 @@ properties (guest isolation, network or host controls, VM defaults). Downstream 
 require a minimum provider version, so a fix can only be required once a version
 contains it.
 
+## Patched pve-qemu-kvm
+
+Both provisioning scripts embed the same `patch-pve-qemu.sh`, which builds stock
+`STOCK_VERSION` plus the commits in `QEMU_FIXES`. On any change to it, raise the
+`+aisiN` in `PATCHED_VERSION`, bump the version (see "Versioning") and the host
+contract `C=aisiN`, and build a host to check the patches apply.
+
 ## Design Notes
 
 All communication with Proxmox is via the AsyncProxmoxAPI class.
