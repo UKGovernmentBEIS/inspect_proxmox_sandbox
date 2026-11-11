@@ -22,12 +22,8 @@ from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
-# Backoff for polling Proxmox until a task finishes or a VM changes state.
-# tenacity's wait_exponential starts at `multiplier` (its `min` is only a
-# floor), so the first gap here is 0.1 s: clone, config, start and stop tasks
-# usually finish within a few hundred ms. The cap keeps long waits (SDN
-# reloads, slow guests) polling every couple of seconds rather than drifting
-# to 30 s gaps.
+# First gap 0.1 s, capped at 2 s. tenacity's `multiplier` sets the first gap;
+# `min` is only a floor.
 POLL_MAX_WAIT = 2.0
 POLL_WAIT = tenacity.wait_exponential(multiplier=0.1, max=POLL_MAX_WAIT, exp_base=1.3)
 

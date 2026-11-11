@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-- Proxmox task and VM-state polls start at 0.1 s and are at most 2 s apart (the first poll used to wait 1 s, and the gap was uncapped), and a VM is only reported stopped, deleted or converted to a template once its Proxmox task has finished
-
 ## 0.13.0
 
 - **Breaking:** guest VMs no longer get nested virtualisation by default. Evals that need it must set `VmConfig(nested_virt=True)`. Requires Proxmox VE 9.1 or later (qemu-server 9.0.27).

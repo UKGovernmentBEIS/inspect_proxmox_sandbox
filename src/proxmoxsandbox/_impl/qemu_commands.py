@@ -32,8 +32,7 @@ def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
-# A ping to an agent that is not up yet blocks ~3 s inside Proxmox, so the
-# gap between pings only needs to be short.
+# A ping to an agent that is not up blocks ~3 s inside Proxmox
 _POLL_MAX_WAIT = POLL_MAX_WAIT
 _POLL_WAIT = POLL_WAIT
 
@@ -202,9 +201,7 @@ class QemuCommands(abc.ABC):
             upid = await self.async_proxmox.request(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
-            # The stop task ends when the QEMU process has gone; the status
-            # poll below then usually passes first time. It stays because
-            # wait_for_task does not check the task's exit status.
+            # The status poll stays: wait_for_task does not check the exit status
             await self.async_proxmox.wait_for_task(upid=upid)
 
         # Only retry "still running". Stopping a missing VM still returns a
