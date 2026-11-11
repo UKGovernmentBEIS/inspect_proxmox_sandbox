@@ -204,7 +204,7 @@ runcmd:
 """  # noqa: E501
 
     # Not in packages: the Kali image has no qemu-guest-agent, so one apt transaction
-    # would keep the agent down past await_vm's 5 min ping window.
+    # would keep the agent down, and the build blind, for the whole install.
     # Must stay the last runcmd entry: cloud-init only reports the last command's exit
     # status, so a failed install would otherwise still produce "status: done".
     # apt-get clean drops ~13 GiB of cached .debs from the template
@@ -625,8 +625,13 @@ runcmd:
                 self.logger, TRACE_NAME, f"start VM {next_available_vm_id=}"
             ):
                 await self.qemu_commands.start(vm_id=next_available_vm_id)
+            # The guest installs its agent in cloud-init's package run, so
+            # this is a wait for that download and gets the same budget.
             await self.qemu_commands.await_vm(
-                vm_id=next_available_vm_id, requires_guest_agent=True, name=name
+                vm_id=next_available_vm_id,
+                requires_guest_agent=True,
+                name=name,
+                agent_timeout=cloud_init_timeout,
             )
 
             # now wait for cloud-init to finish
