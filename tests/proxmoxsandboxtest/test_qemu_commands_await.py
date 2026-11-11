@@ -241,3 +241,28 @@ async def test_vm_bridges_reads_every_nic_regardless_of_option_order():
         }
     )
     assert await qemu.vm_bridges(100) == {"tcc919v0", "tcc919v1"}
+
+
+def test_nested_virt_disabled_by_default():
+    json: dict = {}
+    _qemu().other_config_json(VmConfig(vm_source_config=_SOURCE), json)
+    assert json["cpu"] == "host,flags=-nested-virt"
+
+
+def test_nested_virt_disabled_for_explicit_cpu_model():
+    json: dict = {}
+    _qemu().other_config_json(VmConfig(vm_source_config=_SOURCE, cpu="qemu64"), json)
+    assert json["cpu"] == "qemu64,flags=-nested-virt"
+
+
+def test_nested_virt_can_be_enabled():
+    json: dict = {}
+    _qemu().other_config_json(
+        VmConfig(vm_source_config=_SOURCE, nested_virt=True), json
+    )
+    assert json["cpu"] == "host"
+
+
+def test_cpu_with_flags_rejected():
+    with pytest.raises(ValueError, match="nested_virt"):
+        VmConfig(vm_source_config=_SOURCE, cpu="host,flags=+nested-virt")

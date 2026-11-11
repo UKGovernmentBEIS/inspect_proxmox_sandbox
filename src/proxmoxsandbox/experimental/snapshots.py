@@ -22,8 +22,7 @@ sample text
 ]
 
 
-# Per-sample count of snapshots the tools have created, so ids 1..count exist.
-# The tools only act on the default sandbox, so one counter per sample is enough.
+# Snapshots created so far in this sample: ids 1..count exist
 SNAPSHOT_COUNT_KEY = "current_snapshot_id"
 
 

@@ -255,13 +255,10 @@ class AgentCommands:
     ) -> None:
         """Wait until the VM's config lock can be taken again after a rollback.
 
-        The rollback stops the old QEMU, so qmeventd runs `qm cleanup`. That
-        usually takes the config lock as soon as the rollback drops it, finds
-        the new QEMU running and holds the lock for 30 s before giving up
-        (cleanup in qemu-server's PVE/CLI/qm.pm). In that window any snapshot,
+        After a rollback, Proxmox's `qm cleanup` for the old QEMU holds the lock
+        for 30 s (cleanup in qemu-server's PVE/CLI/qm.pm), and any snapshot,
         rollback or stop of the VM fails with "can't lock file ... got timeout".
-        Resuming a running VM takes the same lock and otherwise does nothing, so
-        a resume task that ends OK means the lock is free.
+        Resuming a running VM takes the same lock and does nothing else.
         """
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
