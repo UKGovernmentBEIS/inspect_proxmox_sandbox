@@ -92,11 +92,7 @@ async def test_static_ip() -> None:
 
 
 async def test_built_in() -> None:
-    """Ubuntu and Debian built-ins boot as UEFI sandboxes with two NICs each.
-
-    Kali is covered by test_built_in_kali: its template bake and boot are an
-    order of magnitude slower than the other two, so it is opt-in.
-    """
+    """Ubuntu and Debian built-ins boot as UEFI sandboxes with two NICs each."""
     envs_dict: Dict[str, SandboxEnvironment] = {}
     sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
         sdn_config=SdnConfig(

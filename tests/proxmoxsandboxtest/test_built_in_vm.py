@@ -1,14 +1,6 @@
-"""Rebuilds the built-in templates from their upstream images.
+"""Rebuilds the Ubuntu and Debian templates and leaves them for the rest of the suite.
 
-The module removes only the templates it is about to rebuild and leaves the
-results in place, so the rest of the suite (which calls ensure_exists on
-first use) runs against them instead of building its own. The rebuilds run
-concurrently: each is mostly waiting on the guest's apt run, so the module
-costs about as much as its slowest build.
-
-Kali's kali-linux-everything install dwarfs the other two, so it is only
-rebuilt here under --runslow. Without it, a host that has no Kali template
-still builds one (through the same code) the first time a test asks for it.
+Kali is rebuilt only under --runslow.
 """
 
 from dataclasses import dataclass
