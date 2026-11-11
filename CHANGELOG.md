@@ -3,7 +3,6 @@
 ## Unreleased
 
 - A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
-- Two processes creating VMs on one Proxmox host no longer fail when both are given the same VM ID
 
 ## 0.13.0
 
