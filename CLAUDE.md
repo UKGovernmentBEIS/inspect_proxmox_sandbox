@@ -57,7 +57,7 @@ Inspect calls these methods in order:
 VMs with `is_sandbox=True` **must** have `qemu-guest-agent` installed and running. Without it, command execution fails silently or with opaque errors.
 
 ### VM ID Collisions
-`/cluster/nextid` returns the lowest free VM ID and reserves nothing, so two creators can read the same one. Create VMs through `QemuCommands._create_with_fresh_vm_id`, which retries with a new ID when Proxmox reports the collision. SDN zone IDs come from `find_proxmox_ids_start()` and have no such retry.
+`/cluster/nextid` returns the lowest free VM ID and reserves nothing, so two creators can read the same one. Create VMs through `QemuCommands.create_with_fresh_vm_id`, which retries with a new ID when Proxmox reports the collision. SDN zone IDs come from `find_proxmox_ids_start()` and have no such retry.
 
 ### Pydantic Frozen Models
 All config models use `frozen=True` — immutable after creation. You can't modify configs in place; create new instances instead.
@@ -89,5 +89,6 @@ The QEMU guest agent channel on Windows drops ~5-7% of calls. `agent_commands.py
 ## Performance Considerations
 
 - **VM Template Caching**: Templates are cached per Proxmox instance after first download — first run is slow
-- **Connection Pooling**: `AsyncProxmoxAPI` creates a new `httpx` client per request; measured at ~2.5 ms per request, it is not where exec latency goes. Each guest-agent API call costs ~200 ms inside Proxmox (a fresh socket to qemu-ga plus a pre-check ping), so the lever is the number of agent round trips per operation
+- **Connection Pooling**: `AsyncProxmoxAPI` creates a new `httpx` client per request, measured at ~2.5 ms per request
+- **Guest-agent round trips**: each agent API call costs ~200 ms inside Proxmox (a fresh socket to qemu-ga plus a pre-check ping), so exec latency is set by the number of agent calls per operation
 - **Concurrency**: Set `max_sandboxes` to number of available instances for optimal throughput; the pool's `default_concurrency()` does this automatically

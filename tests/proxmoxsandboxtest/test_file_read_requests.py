@@ -8,13 +8,13 @@ from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 
 class _Peer:
     def __init__(self):
-        self.paths: list[str] = []
+        self.requests: list[str] = []
         self.rejected_ticket: str | None = None
         self.tickets_issued = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        self.paths.append(path)
+        self.requests.append(path.rsplit("/", 1)[-1])
         if path.endswith("/access/ticket"):
             self.tickets_issued += 1
             ticket = f"t{self.tickets_issued}"
@@ -55,7 +55,7 @@ def _api() -> AsyncProxmoxAPI:
 async def test_first_file_read_logs_in_then_reads(peer: _Peer):
     api = _api()
     assert await api.read_file_capped("n", 1, "/f", 16) == (b"hi", False)
-    assert [p.rsplit("/", 1)[-1] for p in peer.paths] == [
+    assert peer.requests == [
         "ticket",
         "version",
         "file-read",
@@ -65,18 +65,18 @@ async def test_first_file_read_logs_in_then_reads(peer: _Peer):
 async def test_later_file_reads_are_a_single_request(peer: _Peer):
     api = _api()
     await api.read_file_capped("n", 1, "/f", 16)
-    peer.paths.clear()
+    peer.requests.clear()
     assert await api.read_file_capped("n", 1, "/f", 16) == (b"hi", False)
-    assert [p.rsplit("/", 1)[-1] for p in peer.paths] == ["file-read"]
+    assert peer.requests == ["file-read"]
 
 
 async def test_file_read_logs_in_again_when_the_ticket_is_rejected(peer: _Peer):
     api = _api()
     await api.read_file_capped("n", 1, "/f", 16)
     peer.rejected_ticket = api.ticket
-    peer.paths.clear()
+    peer.requests.clear()
     assert await api.read_file_capped("n", 1, "/f", 16) == (b"hi", False)
-    assert [p.rsplit("/", 1)[-1] for p in peer.paths] == [
+    assert peer.requests == [
         "file-read",
         "ticket",
         "version",

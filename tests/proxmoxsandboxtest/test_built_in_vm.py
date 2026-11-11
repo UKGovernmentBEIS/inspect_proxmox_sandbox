@@ -15,11 +15,6 @@ from proxmoxsandbox.schema import _load_single_instance_from_env
 pytestmark = pytest.mark.req_proxmox
 
 
-def _built_ins(config: pytest.Config) -> list[str]:
-    fast = ["ubuntu24.04", "debian13"]
-    return fast + (["kali2025.4"] if config.getoption("--runslow") else [])
-
-
 @dataclass(frozen=True)
 class Rebuild:
     built_ins: list[str]
@@ -29,7 +24,9 @@ class Rebuild:
 
 @pytest.fixture(scope="module")
 async def rebuild(request: pytest.FixtureRequest) -> Rebuild:
-    built_ins = _built_ins(request.config)
+    built_ins = ["ubuntu24.04", "debian13"]
+    if request.config.getoption("--runslow"):
+        built_ins.append("kali2025.4")
     instance_config = _load_single_instance_from_env()
     async_proxmox = AsyncProxmoxAPI.from_instance_config(instance_config)
     infra = InfraCommands.build(
