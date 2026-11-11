@@ -16,6 +16,17 @@ from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox.schema import VmConfig, check_nic_vlan
 
+
+def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
+    """The Proxmox `cpu` option for a CPU model, hiding vmx/svm from the guest.
+
+    With "host", the guest otherwise sees the host's vmx/svm and can run its
+    own KVM, reaching the host kernel's nested-virtualisation code.
+    """
+    model = cpu or "host"
+    return model if nested_virt else f"{model},flags=-nested-virt"
+
+
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
@@ -420,7 +431,6 @@ class QemuCommands(abc.ABC):
 
                 json_for_create: ProxmoxJsonDataType = {
                     "node": self.node,
-                    "cpu": vm_config.cpu if vm_config.cpu else "host",
                     "scsihw": "virtio-scsi-single",
                     "start": False,
                 }
@@ -665,6 +675,10 @@ class QemuCommands(abc.ABC):
         json_for_create["memory"] = vm_config.ram_mb
         json_for_create["cores"] = vm_config.vcpus
         json_for_create["name"] = vm_config.name
+        # Sent on every clone, not just at template creation, so a cached OVA
+        # template, a built-in or an existing_vm_template_tag template cannot
+        # carry its own cpu (usually "host", with nesting) into the sandbox.
+        json_for_create["cpu"] = proxmox_cpu(vm_config.cpu, vm_config.nested_virt)
         json_for_create["serial0"] = "socket"
         json_for_create["vga"] = vm_config.vga
         # Proxmox defaults the tablet on, so this must be sent explicitly.
