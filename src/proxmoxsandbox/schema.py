@@ -319,8 +319,16 @@ class VmConfig(BaseModel, frozen=True):
             accurately (useful for Windows with vga="std"). Defaults to False,
             overriding Proxmox's default of on.
         cpu: The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). If unset,
-            defaults to "host". Older guest kernels (notably FreeBSD/pfSense) can
-            panic on nested virtualization with "host"; use "qemu64" for those.
+            defaults to "host". Applied to every VM, overriding the cpu of the
+            template it is cloned from. Must not contain "flags="; use
+            nested_virt instead. Older guest kernels (notably FreeBSD/pfSense)
+            can panic on nested virtualization with "host"; use "qemu64" for
+            those.
+        nested_virt: if True, the guest sees the host's vmx/svm flag and can
+            run its own VMs (e.g. Windows Credential Guard / VBS). Defaults to
+            False, which adds flags=-nested-virt to cpu so the guest cannot reach
+            the host kernel's nested-virtualisation code. Needs Proxmox VE 9.1
+            or later (qemu-server 9.0.27) either way.
         depends_on: names of VMs that must be ready before this VM is created.
             Ready means the dependency's healthcheck passed if it has one,
             otherwise that Proxmox reports it running (and, if it needs a guest
@@ -362,6 +370,7 @@ class VmConfig(BaseModel, frozen=True):
     vga: Literal["none", "std"] = "none"
     tablet: bool = False
     cpu: Optional[str] = None
+    nested_virt: bool = False
     depends_on: Tuple[str, ...] = ()
     healthcheck: Optional[HealthCheck] = None
 
@@ -395,6 +404,19 @@ class VmConfig(BaseModel, frozen=True):
                 + "starting or ending with a hyphen)"
             )
         return name
+
+    @field_validator("cpu")
+    @classmethod
+    def _reject_cpu_flags(cls, cpu: Optional[str]) -> Optional[str]:
+        # The provider appends its own flags= to turn nested virtualisation
+        # off; a second flags= would either be rejected by Proxmox or, worse,
+        # let a config re-enable vmx/svm without setting nested_virt.
+        if cpu is not None and "flags=" in cpu:
+            raise ValueError(
+                f"cpu {cpu!r} must not set flags=; use nested_virt=True to "
+                + "expose vmx/svm to the guest"
+            )
+        return cpu
 
     @property
     def requires_guest_agent(self) -> bool:
