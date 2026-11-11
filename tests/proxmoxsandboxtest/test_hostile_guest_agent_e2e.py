@@ -225,11 +225,7 @@ _shim_generations = itertools.count(1)
 
 @pytest.fixture(scope="module")
 async def hostile_vm() -> AsyncGenerator[ProxmoxSandboxEnvironment, None]:
-    """One VM running the shim, shared by every case in the module.
-
-    The shim executes nothing, so a case leaves no state behind in the guest;
-    only the reply table differs between cases, and hostile_env swaps that.
-    """
+    """One VM running the shim, shared by every case in the module."""
     task_name = "test_hostile_guest_agent_e2e"
     template = os.getenv("PROXMOX_LINUX_TEMPLATE_TAG")
     config = (
@@ -375,10 +371,8 @@ async def test_exec_without_timeout_is_bounded(hostile_env, monkeypatch):
 async def test_exec_with_timeout_is_bounded_when_agent_stalls(hostile_env, monkeypatch):
     """exec(timeout=5) must return in bounded time when every status poll hangs.
 
-    PVE times each guest command out after 5s, and the provider retries those
-    as transient; without a deadline that is ~10 minutes per poll. The agent
-    budget is shrunk from 180 s so the test shows the bound is the budget, not
-    the retries, without sitting through the full budget.
+    The agent budget is shrunk from 180 s, so the bound shown is the budget and
+    not the retries.
     """
     monkeypatch.setattr(sandbox_environment, "_EXEC_AGENT_BUDGET_SECONDS", 30)
     started = time.monotonic()

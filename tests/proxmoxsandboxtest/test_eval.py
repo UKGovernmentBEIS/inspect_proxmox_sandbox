@@ -187,23 +187,10 @@ def task_for_test(line_count: int = 200_000) -> Task:
 
 
 def test_inspect_eval() -> None:
-    """A full `inspect eval` against a Proxmox sandbox.
+    """One `inspect eval`: a bash() tool call, then the ISO write fast path.
 
-    Covers Inspect's sandbox lifecycle (task_init/sample_init/sample_cleanup
-    driven by eval()), a bash() tool call answered from the guest, and the ISO
-    write fast path probed in-guest. For the latter it goes beyond "did the
-    bytes arrive" — it captures guest dmesg/device state before and after the
-    write, so we'd notice kernel-level trouble (AHCI errors, "Can't open
-    blockdev", I/O errors) even on runs where the fallback masked a real
-    failure. Asserts:
-
-      1. The bash tool's `uname -a` output came from the Ubuntu guest.
-      2. In-guest sha256/wc all match the host's expectation.
-      3. The fast-path log line ('iso_write vm=...') appears — the
-         ISO path ran, not the chunked-QGA fallback.
-      4. The 'fast path disabled' warning does NOT appear — the path
-         didn't silently fail and fall back.
-      5. (Soft) any red-flag lines added to dmesg get logged.
+    The solver captures guest dmesg before and after the write, so kernel-level
+    trouble (AHCI errors, I/O errors) shows even when the fallback masks it.
     """
     # Attach a manual handler — pytest's caplog doesn't reliably catch
     # records emitted from inside Inspect's eval() pipeline.
