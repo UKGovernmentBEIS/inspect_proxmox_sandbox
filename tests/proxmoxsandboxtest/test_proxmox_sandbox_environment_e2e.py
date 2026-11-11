@@ -93,11 +93,7 @@ async def test_static_ip() -> None:
 
 
 async def test_built_in() -> None:
-    """Ubuntu and Debian built-ins boot as UEFI sandboxes with two NICs each.
-
-    Kali is covered by test_built_in_kali: its template bake and boot are an
-    order of magnitude slower than the other two, so it is opt-in.
-    """
+    """Ubuntu and Debian built-ins boot as UEFI sandboxes with two NICs each."""
     envs_dict: Dict[str, SandboxEnvironment] = {}
     sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
         sdn_config=SdnConfig(
@@ -345,14 +341,7 @@ async def test_cleanup_after_interrupted_sample(
     qemu_commands: QemuCommands,
     sdn_commands: SdnCommands,
 ) -> None:
-    """Ctrl-C leaves resources for task_cleanup; the CLI sweeps untracked leftovers.
-
-    One booted sandbox covers both: sample_cleanup(interrupted=True) must leave
-    everything in place, task_cleanup must then destroy exactly what was tracked,
-    and cli_cleanup afterwards must find nothing (templates must survive the
-    sweep). The CLI's own destroy path is then exercised on a second sandbox
-    that nothing tracks any more.
-    """
+    """Ctrl-C leaves resources for task_cleanup; the CLI sweeps untracked leftovers."""
     sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
         vms_config=(
             VmConfig(
@@ -412,10 +401,8 @@ async def test_cleanup_after_interrupted_sample(
     assert await vm_ids() == {vm["vmid"] for vm in existing_vms}
     assert await zones() == existing_zones
 
-    # Leftovers of a process that has gone: a whole sandbox as sample_init
-    # builds it, booted so its guest holds a DHCP lease. Dropping the pool and
-    # instance registries forgets what this process tracked, so the CLI has to
-    # find the VM by tag and the zone by name.
+    # Forget what this process tracked: the CLI has to find the VM by tag and
+    # the zone by name, as after a crash
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
     InfraCommands._instances.clear()
     await setup_sandbox("tcc", sandbox_env_config)

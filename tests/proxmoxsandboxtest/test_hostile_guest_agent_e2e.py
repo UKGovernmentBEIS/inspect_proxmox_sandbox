@@ -28,12 +28,9 @@ pytestmark = pytest.mark.req_proxmox
 # Proxmox synchronizes and pings before each command; those replies stay valid
 # so each test reaches its intended command response.
 #
-# The shim also answers a real file-open/write/close for its own replies file
-# (handle CONTROL_HANDLE) and reloads the replies on close, so one VM serves
-# every case: the host rewrites the replies through the shim with a plain
-# agent/file-write. Those branches match ahead of the reply table, so a case
-# may override file-open/write/close; hostile_env rejects the two overrides
-# that would break this.
+# The shim also answers a real file-open/write/close on its own replies file
+# and reloads it on close, so one VM serves every case. hostile_env rejects
+# the two overrides that would break this.
 SHIM_SOURCE = r"""
 import base64, json, os, sys, time
 
@@ -215,9 +212,7 @@ async def _reconfigure_shim(
 
 @pytest.fixture(scope="module", autouse=True)
 def reset_global_pool_state():
-    # Shadows conftest's function-scoped autouse fixture: hostile_vm's
-    # sample_cleanup at module teardown needs the pool created by task_init,
-    # so we must not clear pool state between cases.
+    # Shadows conftest's per-test reset: hostile_vm's teardown needs the pool
     ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
     InfraCommands._instances.clear()
     yield
@@ -230,11 +225,7 @@ _shim_generations = itertools.count(1)
 
 @pytest.fixture(scope="module")
 async def hostile_vm() -> AsyncGenerator[ProxmoxSandboxEnvironment, None]:
-    """One VM running the shim, shared by every case in the module.
-
-    The shim executes nothing, so a case leaves no state behind in the guest;
-    only the reply table differs between cases, and hostile_env swaps that.
-    """
+    """One VM running the shim, shared by every case in the module."""
     task_name = "test_hostile_guest_agent_e2e"
     template = os.getenv("PROXMOX_LINUX_TEMPLATE_TAG")
     config = (
@@ -267,8 +258,7 @@ async def hostile_env(
 ) -> ProxmoxSandboxEnvironment:
     """The shared shim VM, answering with this case's overrides."""
     overrides = request.param
-    # _replies replaces osinfo with the generation marker, so such a case
-    # would run against honest replies and assert nothing.
+    # _replies overwrites osinfo, so such a case would assert nothing
     assert "guest-get-osinfo" not in overrides
     # The shim would take the provider's next write for one to its own file.
     file_open = overrides.get("guest-file-open") or {}
@@ -381,10 +371,8 @@ async def test_exec_without_timeout_is_bounded(hostile_env, monkeypatch):
 async def test_exec_with_timeout_is_bounded_when_agent_stalls(hostile_env, monkeypatch):
     """exec(timeout=5) must return in bounded time when every status poll hangs.
 
-    PVE times each guest command out after 5s, and the provider retries those
-    as transient; without a deadline that is ~10 minutes per poll. The agent
-    budget is shrunk from 180 s so the test shows the bound is the budget, not
-    the retries, without sitting through the full budget.
+    The agent budget is shrunk from 180 s, so the bound shown is the budget and
+    not the retries.
     """
     monkeypatch.setattr(sandbox_environment, "_EXEC_AGENT_BUDGET_SECONDS", 30)
     started = time.monotonic()

@@ -121,8 +121,7 @@ async def built_in_vm(infra_commands: InfraCommands) -> BuiltInVM:
     return infra_commands.built_in_vm
 
 
-# Drawn without replacement: module-scoped zones outlive the test that made
-# them, so a repeated number would collide with a zone that still exists.
+# Without replacement: module-scoped zones outlive the test that made them
 _ID_NUMBERS = iter(random.sample(range(100, 1000), 900))
 
 
@@ -139,12 +138,7 @@ async def ids_start() -> str:
 
 @pytest.fixture(scope="module")
 async def module_sdn_commands() -> SdnCommands:
-    """SdnCommands for module-scoped SDN fixtures.
-
-    Built separately from the function-scoped `infra_commands` family so it
-    is never registered in InfraCommands._instances, which the autouse reset
-    clears around every test.
-    """
+    """SdnCommands outside InfraCommands._instances, which the per-test reset clears."""
     instance_config = _load_single_instance_from_env()
     return SdnCommands(AsyncProxmoxAPI.from_instance_config(instance_config))
 
@@ -155,9 +149,6 @@ async def auto_sdn_vnet_aliases(
 ) -> AsyncGenerator[VnetAliases, None]:
     """One "auto" SDN zone shared by every test in the module.
 
-    Each SDN create and teardown is a PUT /cluster/sdn apply of several
-    seconds, so the zone is created once per module. Tests only read the
-    vnet aliases and attach NICs to the vnet; nothing they do alters the zone.
     Any VM a test puts on the vnet must be destroyed before the module ends.
     """
     sdn_zone_id, vnet_aliases = await module_sdn_commands.create_sdn(
@@ -208,16 +199,11 @@ async def proxmox_sandbox_environment(
 ) -> AsyncGenerator[ProxmoxSandboxEnvironment, None]:
     """One default sandbox (per OS) shared by every test in the module.
 
-    A fresh sandbox is a VM clone, boot and guest-agent wait plus two SDN
-    applies, so it is set up once per module rather than per test. Tests
-    share the guest, so each must write to paths no other test uses; a QGA
-    exec costs ~3 s, so they do not pay to remove them.
+    Tests share the guest, so each must write to paths no other test uses.
 
     A module using this must shadow `reset_global_pool_state` with a
-    module-scoped one (see test_proxmox_sandbox_agent_commands.py): the
-    sample_cleanup at module teardown needs the pool that task_init created.
-    It must also not call sample_init itself, whose pre-clean would sweep the
-    shared VM as a leftover.
+    module-scoped one, and must not call sample_init: its pre-clean would
+    sweep the shared VM.
     """
     task_name = "from_conftest"
     await ProxmoxSandboxEnvironment.task_init(task_name=task_name, config=None)
@@ -239,8 +225,7 @@ async def proxmox_sandbox_environment(
             interrupted=False,
         )
     finally:
-        # The module-scoped reset does not run between the OS params. A
-        # cleanup that failed has withheld the instance, and the next param's
-        # sample_init would wait on the emptied pool forever.
+        # The module-scoped reset does not run between OS params, and a failed
+        # cleanup leaves the next param's sample_init waiting on an empty pool
         ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
         InfraCommands._instances.clear()

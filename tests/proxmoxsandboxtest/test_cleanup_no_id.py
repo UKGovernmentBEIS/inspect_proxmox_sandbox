@@ -192,8 +192,7 @@ async def test_cleanup_skips_zone_with_matching_prefix_only():
     ("zone_id", "vnet_id"),
     [
         ("user_zone", "uservnet"),
-        # Hosts that built a template with a release up to 0.12 still have
-        # this zone, and those templates still have a NIC on its VNET.
+        # Hosts that built a template with 0.12 or earlier still have this zone
         ("inspvmz", "inspvmv0"),
     ],
 )

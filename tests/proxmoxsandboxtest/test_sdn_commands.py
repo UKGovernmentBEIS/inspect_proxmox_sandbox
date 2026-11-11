@@ -13,11 +13,7 @@ from proxmoxsandbox.schema import DhcpRange, SdnConfig, SubnetConfig, VnetConfig
 
 @pytest.fixture
 def offline_sdn_commands() -> SdnCommands:
-    """SdnCommands with no host behind it.
-
-    create_sdn rejects these configs before its first request, so a request
-    shows up as a connection failure if that ever changes.
-    """
+    """SdnCommands with no host behind it: a request fails to connect."""
     return SdnCommands(AsyncProxmoxAPI("proxmox.invalid:8006", "nobody", "nothing"))
 
 
@@ -25,11 +21,7 @@ def offline_sdn_commands() -> SdnCommands:
 async def module_sdn_zones(
     module_sdn_commands: SdnCommands,
 ) -> AsyncGenerator[list[str], None]:
-    """Zones to tear down together at module end.
-
-    Each teardown is a PUT /cluster/sdn apply of several seconds; tests whose
-    teardown is not itself under test register their zone here instead.
-    """
+    """Zones to tear down together at module end: each teardown is an SDN apply."""
     zones: list[str] = []
     yield zones
     gone = await module_sdn_commands.tear_down_sdn_zones_and_vnets(zones, ())

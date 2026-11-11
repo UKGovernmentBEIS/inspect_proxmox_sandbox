@@ -22,12 +22,8 @@ from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
-# Backoff for polling Proxmox until a task finishes or a VM changes state.
-# tenacity's wait_exponential starts at `multiplier` (its `min` is only a
-# floor), so the first gap here is 0.1 s: clone, config, start and stop tasks
-# usually finish within a few hundred ms. The cap keeps long waits (SDN
-# reloads, slow guests) polling every couple of seconds rather than drifting
-# to 30 s gaps.
+# First gap 0.1 s, capped at 2 s. tenacity's `multiplier` sets the first gap;
+# `min` is only a floor.
 POLL_MAX_WAIT = 2.0
 POLL_WAIT = tenacity.wait_exponential(multiplier=0.1, max=POLL_MAX_WAIT, exp_base=1.3)
 
@@ -266,8 +262,7 @@ class AsyncProxmoxAPI:
             timeout=httpx.Timeout(connect=15, read=60, write=60, pool=60),
         ) as client:
             # Login discovers the version, which picks the file-read variant.
-            # Each guest-agent call costs ~200 ms inside Proxmox, so this
-            # deliberately does not ping the agent first.
+            # No agent ping first: each agent call costs ~200 ms inside Proxmox.
             if not self.ticket or self._ticket_near_expiry():
                 await self._login(client)
             modern = self.release_at_least(9, 2)
@@ -392,10 +387,7 @@ class AsyncProxmoxAPI:
     ) -> dict[str, Any]:
         """Poll until the task has finished; returns its final status record.
 
-        Raises ProxmoxTaskError unless the task's exitstatus is OK (or
-        "WARNINGS: n"): a start whose QEMU exited or a clone that broke would
-        otherwise go unnoticed until a later step timed out waiting for the
-        VM state the task should have produced.
+        Raises ProxmoxTaskError unless the exitstatus is OK or "WARNINGS: n".
         """
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")

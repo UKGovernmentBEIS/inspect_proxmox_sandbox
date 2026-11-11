@@ -1,9 +1,7 @@
 """The SDN zone built-in templates are built in, and the build VM's place in it.
 
-Collaborators are mocked. The harness records the order of the steps that
-matter to the zone: it cannot be removed while a build VM still has a NIC
-(and so an IPAM entry) in it. A failed build keeps its VM and the zone, both
-tracked, as the rest of a failed sample_init does.
+Collaborators are mocked; the harness records the order of the steps that
+matter to the zone.
 """
 
 from ipaddress import ip_address

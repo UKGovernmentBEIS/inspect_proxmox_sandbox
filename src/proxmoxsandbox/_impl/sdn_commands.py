@@ -35,9 +35,7 @@ VnetAliases: TypeAlias = List[Tuple[str, str | None]]
 # prefix match would let a pre-existing zone such as `abc123za` be swept and
 # deleted as if the provider owned it. Use `is_ephemeral_zone()` rather than
 # matching this directly.
-# `inspvmz` must stay outside the pattern: versions up to 0.12 built templates
-# in that permanent zone, hosts still have it, and those templates still have
-# a NIC on its VNET.
+# `inspvmz` must stay outside the pattern: templates built up to 0.12 are on it.
 ZONE_REGEX = r"^[a-z0-9]{1,3}[0-9]{3}z$"
 
 
@@ -50,11 +48,8 @@ def is_ephemeral_zone(zone_id: str) -> bool:
     return re.fullmatch(ZONE_REGEX, zone_id) is not None
 
 
-# Two characters, so a built-in template's build zone can't share a name with
-# a sample's zone (three-character prefix) for any task name of three or more
-# characters. A task named exactly `bi` does share the namespace, but that is
-# confusing rather than damaging: the build zone is torn down before the
-# sample's own zone is created, so the two are never alive at once.
+# Two characters: a sample's zone has a three-character prefix, so the names
+# only collide for a task named exactly `bi`.
 BUILT_IN_IDS_PREFIX = "bi"
 
 
@@ -288,8 +283,7 @@ class SdnCommands(abc.ABC):
             await self.generate_sdn_config() if sdn_config == "auto" else sdn_config
         )
 
-        # Checks that need only the config come first, so a bad config fails
-        # before any request to Proxmox.
+        # Config-only checks first, so a bad config fails before any request
         if len(resolved_sdn_config.vnet_configs) > 10:
             raise ValueError(
                 f"Too many vnets; max 10, got {len(resolved_sdn_config.vnet_configs)}"
@@ -393,9 +387,8 @@ class SdnCommands(abc.ABC):
     async def find_proxmox_ids_start(self, prefix: str) -> str:
         """Pick a `{prefix}{3 digits}` stem whose zone `{stem}z` doesn't exist yet.
 
-        The stem must satisfy `is_ephemeral_zone` once suffixed, so `prefix`
-        is at most 3 characters of [a-z0-9]. SDN IDs are 8 characters max;
-        the last two are left free to distinguish the zone and VNET objects.
+        `prefix` is at most 3 characters of [a-z0-9]: SDN IDs are 8 characters max
+        and the last two distinguish the zone and VNET objects.
         """
         existing_zone_ids = set([zone["zone"] for zone in await self.list_sdn_zones()])
         zone_free = False
@@ -421,8 +414,7 @@ class SdnCommands(abc.ABC):
                     "GET", f"/cluster/sdn/vnets/{vnet}/subnets"
                 )
             except httpx.HTTPStatusError as e:
-                # Another process tearing down its zone between our listing
-                # and this read; its CIDRs are no longer in use.
+                # Another process tore its zone down after we listed it
                 if e.response.status_code == 500 and "does not exist" in str(e):
                     continue
                 raise

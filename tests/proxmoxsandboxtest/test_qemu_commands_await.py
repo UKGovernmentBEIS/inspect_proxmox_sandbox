@@ -21,10 +21,8 @@ from proxmoxsandbox._impl.qemu_commands import (
 )
 from proxmoxsandbox.schema import HealthCheck, VmConfig, VmSourceConfig
 
-# Real-time tenacity budgets. The poll backoff starts at 0.1 s and
-# stop_before_delay refuses a sleep that would overrun the budget, so _TINY
-# allows exactly one attempt and _TWO_ATTEMPTS a second one after the first
-# 0.1 s sleep (the second sleep would be 0.13 s).
+# stop_before_delay refuses a sleep that would overrun the budget: _TINY allows
+# one attempt, _TWO_ATTEMPTS a second after the first 0.1 s sleep
 _TINY = 0.05
 _TWO_ATTEMPTS = 0.2
 

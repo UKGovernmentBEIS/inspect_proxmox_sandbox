@@ -1,6 +1,5 @@
-# Options live here, not in proxmoxsandboxtest/conftest.py: pytest only reads
-# command-line options from conftests it loads before parsing arguments, and
-# for `pytest tests` that stops at this directory.
+# Not in proxmoxsandboxtest/conftest.py: `pytest tests` parses its arguments
+# before loading that one
 import pytest
 
 

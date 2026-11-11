@@ -2,12 +2,12 @@
 
 ## Unreleased
 
-- Built-in VM templates are built in a temporary SDN zone (`bi` + 3 digits + `z`) that is removed when the builds finish, instead of a permanent `inspvmz` zone, and the finished template has no NIC. A host image taken after a build no longer carries a zone with an SNAT rule naming the build host. A failed or cancelled build keeps its half-built VM (tagged `inspect` from creation) and the zone for `task_cleanup` or the next sample's pre-clean, like the rest of a failed `sample_init`. An `inspvmz` zone from an earlier version is left alone; see "Identifying created resources" in the README for removing it. A VM cloned from a built-in template by `existing_vm_template_tag` with `nics=None` now has no NIC
-- Proxmox task and VM-state polls start at 0.1 s and are at most 2 s apart (the first poll used to wait 1 s, and the gap was uncapped), and a VM is only reported stopped, deleted or converted to a template once its Proxmox task has finished
+- Built-in templates are built in a temporary SDN zone and no longer create the permanent `inspvmz` zone, so a host image taken after a build does not carry a SNAT rule for the build host. An `inspvmz` left by an earlier version is ignored; "Identifying created resources" in the README says how to remove it
+- A built-in template no longer has a NIC, so a VM cloned from one through `existing_vm_template_tag` with `nics=None` gets none
 - A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
-- VM creation retries when another process takes the VM ID between `/cluster/nextid` and the create; VM start retries a failed start task
-- `exec` reads its stdout, stderr and exit code concurrently and does not ping the guest agent before each file read any more, about 1 s less per command
-- Built-in templates named by one config are built concurrently, and they boot with a quiet console (`quiet` on the kernel command line)
+- Two processes creating VMs on one Proxmox host no longer fail when both are given the same VM ID
+- `exec` takes about 1 s less per command
+- Built-in templates boot with `quiet` on the kernel command line, so the serial console shows only warnings and errors
 
 ## 0.13.0
 
