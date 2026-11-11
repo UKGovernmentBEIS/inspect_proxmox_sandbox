@@ -10,6 +10,8 @@ from proxmoxsandbox._impl.async_proxmox import ProxmoxTaskError
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
+from .proxmox_sandbox_utils import http_500
+
 
 def _qemu(api) -> QemuCommands:
     return QemuCommands(api, "pve1", "local", MagicMock())
@@ -126,7 +128,6 @@ def _api_with_task_outcomes(outcomes: dict[str, str]) -> MagicMock:
     async def wait_for_task(*, upid: str):
         if upid in outcomes:
             raise ProxmoxTaskError(upid, outcomes[upid])
-        return {"exitstatus": "OK"}
 
     api = MagicMock()
     api.request = AsyncMock(side_effect=fake_request)
@@ -167,14 +168,7 @@ async def test_destroy_vm_deletes_after_a_failed_stop_task():
 @pytest.mark.asyncio
 async def test_destroy_vm_retries_when_proxmox_cannot_start_a_worker(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
-    request = httpx.Request("DELETE", "https://pve/api2/json/x")
-    no_worker = httpx.HTTPStatusError(
-        "500",
-        request=request,
-        response=httpx.Response(
-            500, text="got no worker upid - start worker failed", request=request
-        ),
-    )
+    no_worker = http_500("got no worker upid - start worker failed", method="DELETE")
     deletes = 0
 
     async def fake_request(method, path, **kwargs):
@@ -190,7 +184,7 @@ async def test_destroy_vm_retries_when_proxmox_cannot_start_a_worker(monkeypatch
 
     api = MagicMock()
     api.request = AsyncMock(side_effect=fake_request)
-    api.wait_for_task = AsyncMock(return_value={"exitstatus": "OK"})
+    api.wait_for_task = AsyncMock()
 
     await _qemu(api).destroy_vm(vm_id=4242, name="vm")
 

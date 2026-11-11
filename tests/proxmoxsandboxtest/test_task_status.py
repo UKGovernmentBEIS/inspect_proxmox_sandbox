@@ -15,7 +15,6 @@ def _api(statuses: list[dict]) -> AsyncProxmoxAPI:
     return api
 
 
-@pytest.mark.asyncio
 async def test_failed_task_raises_with_its_exitstatus():
     api = _api([{}, {"exitstatus": "start failed: QEMU exited with code 1"}])
     with pytest.raises(ProxmoxTaskError, match="QEMU exited with code 1") as info:
@@ -23,7 +22,6 @@ async def test_failed_task_raises_with_its_exitstatus():
     assert info.value.upid == UPID
 
 
-@pytest.mark.asyncio
 async def test_ok_and_warnings_tasks_return():
     await _api([{"exitstatus": "OK"}]).wait_for_task(upid=UPID)
     await _api([{"exitstatus": "WARNINGS: 2"}]).wait_for_task(upid=UPID)

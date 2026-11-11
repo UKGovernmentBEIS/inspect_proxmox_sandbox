@@ -57,7 +57,7 @@ Inspect calls these methods in order:
 VMs with `is_sandbox=True` **must** have `qemu-guest-agent` installed and running. Without it, command execution fails silently or with opaque errors.
 
 ### VM ID Collisions
-`/cluster/nextid` returns the lowest free VM ID and reserves nothing, so two creators can read the same one. Create VMs through `QemuCommands._create_with_fresh_vm_id`, which retries with a new ID when Proxmox reports the collision. SDN zone IDs come from `find_proxmox_ids_start()` and have no such retry.
+`/cluster/nextid` returns the lowest free VM ID and reserves nothing, so two creators can read the same one. Create VMs through `QemuCommands.create_with_fresh_vm_id`, which retries with a new ID when Proxmox reports the collision. SDN zone IDs come from `find_proxmox_ids_start()` and have no such retry.
 
 ### Pydantic Frozen Models
 All config models use `frozen=True` — immutable after creation. You can't modify configs in place; create new instances instead.
