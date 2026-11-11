@@ -9,7 +9,6 @@ import tenacity
 from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.async_proxmox import (
-    POLL_MAX_WAIT,
     POLL_WAIT,
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
@@ -32,9 +31,6 @@ def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
-# A ping to an agent that is not up blocks ~3 s inside Proxmox
-_POLL_MAX_WAIT = POLL_MAX_WAIT
-_POLL_WAIT = POLL_WAIT
 
 
 def vm_label(*, name: str, vm_id: int) -> str:
@@ -135,7 +131,7 @@ class QemuCommands(abc.ABC):
         label = vm_label(name=name, vm_id=vm_id)
 
         @tenacity.retry(
-            wait=_POLL_WAIT,
+            wait=POLL_WAIT,
             stop=tenacity.stop_before_delay(timeout),
         )
         async def is_in_status() -> None:
@@ -171,7 +167,7 @@ class QemuCommands(abc.ABC):
         attempt_count = [0]  # Use list to allow mutation in nested function
 
         @tenacity.retry(
-            wait=_POLL_WAIT,
+            wait=POLL_WAIT,
             stop=tenacity.stop_before_delay(timeout),
         )
         async def qemu_agent_reachable() -> None:
