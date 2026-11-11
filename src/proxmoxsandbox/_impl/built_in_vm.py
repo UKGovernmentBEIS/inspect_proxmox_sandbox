@@ -344,11 +344,7 @@ runcmd:
         return existing_content
 
     async def ensure_exists_many(self, built_in_names: Iterable[str]) -> None:
-        """Build whichever of these built-ins the host lacks, concurrently.
-
-        Each build is a VM boot plus an apt run, mostly waiting on the guest,
-        so the set costs about one build's time.
-        """
+        """Build whichever of these built-ins the host lacks, concurrently."""
         missing = sorted(set(built_in_names) - set(await self.known_builtins()))
         if not missing:
             return
