@@ -385,7 +385,8 @@ class AsyncProxmoxAPI:
     ) -> None:
         """Poll until the task has finished.
 
-        Raises ProxmoxTaskError unless the exitstatus is OK or "WARNINGS: n".
+        Raises ProxmoxTaskError unless the exitstatus is OK or "WARNINGS: n";
+        warnings are logged.
         """
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")
@@ -401,5 +402,7 @@ class AsyncProxmoxAPI:
             return response.get("exitstatus")
 
         exitstatus = str(await _exitstatus())
-        if exitstatus != "OK" and not exitstatus.startswith("WARNINGS"):
+        if exitstatus.startswith("WARNINGS"):
+            self.logger.warning(f"Proxmox task {upid} finished with {exitstatus}")
+        elif exitstatus != "OK":
             raise ProxmoxTaskError(upid, exitstatus)
