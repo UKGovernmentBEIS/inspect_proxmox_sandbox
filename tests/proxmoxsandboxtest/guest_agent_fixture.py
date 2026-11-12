@@ -17,7 +17,10 @@ from unittest.mock import patch
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from proxmoxsandbox._impl.agent_commands import AgentCommands
+from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
+    GuestExecNotStartedError,
+)
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.qga_responses import GuestAgentTamperError
@@ -76,7 +79,7 @@ class Scenario(BaseModel):
 class Observation(BaseModel):
     """Visible result, or the failure reported by the provider."""
 
-    kind: Literal["file", "exec", "rejected", "timeout", "error"]
+    kind: Literal["file", "exec", "rejected", "not_started", "timeout", "error"]
     content: str | None = None
     truncated: bool | None = None
     returncode: int | None = None
@@ -263,6 +266,12 @@ async def exercise(scenario: Scenario) -> Observation:
             )
         except GuestAgentTamperError as exc:
             return Observation(kind="rejected", vm_id=exc.vm_id)
+        except GuestExecNotStartedError:
+            return Observation(
+                kind="not_started",
+                cancelled=replies.cancelled,
+                launched=replies.seen.get("launch", 0) > 0,
+            )
         except TimeoutError:
             return Observation(
                 kind="timeout",
