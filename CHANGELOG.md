@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: an EC2 Proxmox host launched with the instance metadata endpoint disabled no longer hangs at boot in `networking.service`. Without a datasource, cloud-init fell back to requesting DHCPv6 as well as DHCPv4, and `ifupdown` waited for a DHCPv6 lease the VPC does not offer. The provisioning script now disables cloud-init's network config and writes a DHCPv4-only entry for the physical NIC at each boot. The root-password fixup still needs the metadata endpoint. Rebuild existing hosts to pick this up.
+
 ## 0.13.0
 
 - **Breaking:** guest VMs no longer get nested virtualisation by default. Evals that need it must set `VmConfig(nested_virt=True)`. Requires Proxmox VE 9.1 or later (qemu-server 9.0.27).

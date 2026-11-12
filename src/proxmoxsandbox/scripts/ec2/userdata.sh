@@ -639,7 +639,45 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_FIREWALL_UNIT
 
+# Without IMDS, cloud-init falls back to DHCPv4 and DHCPv6 on the NIC, and
+# ifupdown blocks boot waiting for a DHCPv6 lease the VPC doesn't offer.
+cat > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg <<'DISABLE_CI_NET'
+network: {config: disabled}
+DISABLE_CI_NET
+
+cat > /usr/local/bin/proxmox-ami-primary-nic.sh <<'PRIMARY_NIC'
+#!/bin/bash
+set -euo pipefail
+# Bridges and taps have no device link
+for dev in /sys/class/net/*; do
+    [ -e "$dev/device" ] || continue
+    NIC=$(basename "$dev")
+    break
+done
+[ -n "${NIC:-}" ] || { echo "ERROR: no physical NIC found" >&2; exit 1; }
+printf 'auto %s\niface %s inet dhcp\n' "$NIC" "$NIC" > /etc/network/interfaces.d/50-cloud-init
+PRIMARY_NIC
+chmod +x /usr/local/bin/proxmox-ami-primary-nic.sh
+
+cat > /etc/systemd/system/proxmox-ami-primary-nic.service <<'PRIMARY_NIC_UNIT'
+[Unit]
+Description=Write the DHCPv4 config for the management NIC
+DefaultDependencies=no
+After=local-fs.target ifupdown2-pre.service systemd-udev-settle.service cloud-init-local.service
+Before=networking.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/proxmox-ami-primary-nic.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=networking.service
+PRIMARY_NIC_UNIT
+
 systemctl daemon-reload
+systemctl enable proxmox-ami-primary-nic.service
 systemctl enable proxmox-ami-fixup-hostname.service
 systemctl enable proxmox-ami-fixup-certs.service
 systemctl enable proxmox-ami-fixup-nat.service
