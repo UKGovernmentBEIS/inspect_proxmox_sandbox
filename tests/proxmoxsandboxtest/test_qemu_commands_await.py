@@ -12,21 +12,18 @@ import httpx
 import pytest
 import tenacity
 
+from proxmoxsandbox._impl.async_proxmox import POLL_MAX_WAIT, POLL_WAIT
 from proxmoxsandbox._impl.qemu_commands import (
-    _POLL_MAX_WAIT,
-    _POLL_WAIT,
     GuestAgentUnavailableError,
     QemuCommands,
     VmNotRunningError,
 )
 from proxmoxsandbox.schema import HealthCheck, VmConfig, VmSourceConfig
 
-# Real-time tenacity budgets. The poll backoff starts at 1 s (multiplier 1; the
-# min=0.1 floor never bites) and stop_before_delay refuses a sleep that would
-# overrun the budget, so _TINY allows exactly one attempt and _TWO_ATTEMPTS a
-# second one after the first 1 s sleep.
-_TINY = 0.3
-_TWO_ATTEMPTS = 1.5
+# stop_before_delay refuses a sleep that would overrun the budget: _TINY allows
+# one attempt, _TWO_ATTEMPTS a second after the first 0.1 s sleep
+_TINY = 0.05
+_TWO_ATTEMPTS = 0.2
 
 
 def _qemu() -> QemuCommands:
@@ -88,10 +85,10 @@ def test_poll_backoff_is_capped():
     for attempt in range(1, 100):
         state = tenacity.RetryCallState(None, None, (), {})
         state.attempt_number = attempt
-        waits.append(_POLL_WAIT(state))
-    assert waits[:3] == pytest.approx([1.0, 1.3, 1.69])
+        waits.append(POLL_WAIT(state))
+    assert waits[:3] == pytest.approx([0.1, 0.13, 0.169])
     assert waits == sorted(waits)
-    assert max(waits) == _POLL_MAX_WAIT
+    assert max(waits) == POLL_MAX_WAIT
 
 
 async def test_await_agent_sleeps_follow_the_poll_schedule(monkeypatch):
@@ -107,8 +104,7 @@ async def test_await_agent_sleeps_follow_the_poll_schedule(monkeypatch):
     qemu.async_proxmox.request = AsyncMock(side_effect=_http_500)
     with pytest.raises(GuestAgentUnavailableError):
         await qemu.await_agent(100, name="vm-100", timeout=_TWO_ATTEMPTS)
-    assert sleeps == [1.0]
-    assert max(sleeps) <= _POLL_MAX_WAIT
+    assert sleeps == pytest.approx([0.1])
 
 
 async def test_await_agent_raises_actionable_error_on_timeout():

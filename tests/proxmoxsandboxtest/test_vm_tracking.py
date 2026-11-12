@@ -1,12 +1,16 @@
 """VMs are tracked for task_cleanup from the moment they exist, by int ID."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+from proxmoxsandbox._impl.async_proxmox import ProxmoxTaskError
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+
+from .proxmox_sandbox_utils import http_500
 
 
 def _qemu(api) -> QemuCommands:
@@ -66,6 +70,7 @@ async def test_task_cleanup_forgets_a_vm_that_is_already_gone():
 
     api = MagicMock()
     api.request = AsyncMock(side_effect=fake_request)
+    api.wait_for_task = AsyncMock()
     qemu = _qemu(api)
     qemu.register_vm(
         vm_id=4242,
@@ -98,6 +103,7 @@ async def test_task_cleanup_keeps_a_vm_whose_storage_is_missing():
 
     api = MagicMock()
     api.request = AsyncMock(side_effect=fake_request)
+    api.wait_for_task = AsyncMock()
     qemu = _qemu(api)
     qemu.register_vm(
         vm_id=4242,
@@ -107,3 +113,67 @@ async def test_task_cleanup_keeps_a_vm_whose_storage_is_missing():
     await qemu.task_cleanup()
 
     assert 4242 in qemu._tracked_vms
+
+
+def _api_with_task_outcomes(outcomes: dict[str, str]) -> MagicMock:
+    """Stop and delete return UPIDs; `outcomes` maps a UPID to a failed status."""
+
+    async def fake_request(method, path, **kwargs):
+        if path.endswith("/status/stop"):
+            return "UPID:pve1:qmstop"
+        if path.endswith("/status/current"):
+            return {"status": "stopped"}
+        return "UPID:pve1:qmdestroy"
+
+    async def wait_for_task(*, upid: str):
+        if upid in outcomes:
+            raise ProxmoxTaskError(upid, outcomes[upid])
+
+    api = MagicMock()
+    api.request = AsyncMock(side_effect=fake_request)
+    api.wait_for_task = AsyncMock(side_effect=wait_for_task)
+    return api
+
+
+@pytest.mark.asyncio
+async def test_destroy_vm_raises_when_the_delete_task_fails():
+    api = _api_with_task_outcomes(
+        {"UPID:pve1:qmdestroy": "storage 'local-lvm' does not exist"}
+    )
+    with pytest.raises(ProxmoxTaskError, match="local-lvm"):
+        await _qemu(api).destroy_vm(vm_id=4242, name="vm")
+
+
+@pytest.mark.asyncio
+async def test_destroy_vm_deletes_after_a_failed_stop_task():
+    api = _api_with_task_outcomes(
+        {"UPID:pve1:qmstop": "can't lock file '/var/lock/qemu-server/lock-4242.conf'"}
+    )
+    await _qemu(api).destroy_vm(vm_id=4242, name="vm")
+    assert api.request.await_args_list[-1].args == ("DELETE", "/nodes/pve1/qemu/4242")
+
+
+@pytest.mark.asyncio
+async def test_destroy_vm_retries_when_proxmox_cannot_start_a_worker(monkeypatch):
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    no_worker = http_500("got no worker upid - start worker failed", method="DELETE")
+    deletes = 0
+
+    async def fake_request(method, path, **kwargs):
+        nonlocal deletes
+        if path.endswith("/status/stop"):
+            return "UPID:pve1:qmstop"
+        if path.endswith("/status/current"):
+            return {"status": "stopped"}
+        deletes += 1
+        if deletes == 1:
+            raise no_worker
+        return "UPID:pve1:qmdestroy"
+
+    api = MagicMock()
+    api.request = AsyncMock(side_effect=fake_request)
+    api.wait_for_task = AsyncMock()
+
+    await _qemu(api).destroy_vm(vm_id=4242, name="vm")
+
+    assert deletes == 2

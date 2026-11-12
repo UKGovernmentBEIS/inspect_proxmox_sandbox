@@ -1,7 +1,9 @@
 import abc
+import asyncio
 import os
 import subprocess
 import tempfile
+from collections.abc import Awaitable, Callable, Iterable
 from io import BytesIO
 from ipaddress import ip_address, ip_network
 from logging import getLogger
@@ -16,7 +18,7 @@ import tenacity
 from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
-from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.async_proxmox import POLL_WAIT, AsyncProxmoxAPI
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, proxmox_cpu
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
@@ -29,6 +31,8 @@ from proxmoxsandbox.schema import (
 )
 
 VM_TIMEOUT = 1200
+# /cluster/nextid reserves nothing, so concurrent builds read the same ID
+_VM_ID_ATTEMPTS = 5
 CLOUD_INIT_TIMEOUT = 1200
 # 41 GiB used after install (39 GiB of it /usr), so ~20 GiB free for the eval
 KALI_DISK_GIB = 64
@@ -46,6 +50,13 @@ KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.4/kali-linux-2
 KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
 
 STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
+
+# built-in name -> filename of its source image in local storage
+SOURCE_IMAGE_NAMES = {
+    "ubuntu24.04": Path(urlparse(UBUNTU_URL).path).name,
+    "debian13": Path(urlparse(DEBIAN_13_URL).path).name,
+    "kali2025.4": KALI_DISK_RENAMED,
+}
 
 
 async def download_to_file(url: str, destination: Path) -> None:
@@ -181,10 +192,17 @@ runcmd:
   - [ systemctl, mask, systemd-networkd-wait-online.service ]
 # systemd-networkd-wait-online.service causes startup delays
 # and makes it annoying to debug network issues
+# "quiet": under nested virtualisation every printk byte to the serial console is a trap
+  - - sh
+    - -c
+    - |
+      mkdir -p /etc/default/grub.d
+      echo 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS0 quiet"' > /etc/default/grub.d/90-inspect.cfg
+      update-grub
 """  # noqa: E501
 
     # Not in packages: the Kali image has no qemu-guest-agent, so one apt transaction
-    # would keep the agent down past await_vm's 5 min ping window.
+    # would keep the agent down, and the build blind, for the whole install.
     # Must stay the last runcmd entry: cloud-init only reports the last command's exit
     # status, so a failed install would otherwise still produce "status: done".
     # apt-get clean drops ~13 GiB of cached .debs from the template
@@ -274,33 +292,21 @@ runcmd:
         await attach_to_vm()
 
     # for test code only
-    async def clear_builtins(self) -> None:
-        existing_vms = await self.known_builtins()
-        for built_in, vm_id in existing_vms.items():
+    async def clear_builtin(self, built_in: str) -> None:
+        """Remove one built-in's template and its uploaded source image."""
+        source_image_name = SOURCE_IMAGE_NAMES[built_in]
+        vm_id = (await self.known_builtins()).get(built_in)
+        if vm_id is not None:
             await self.qemu_commands.destroy_vm(vm_id=vm_id, name=f"inspect-{built_in}")
 
-        existing_content = await self.read_all_content()
-
-        storage_names_to_delete = [
-            Path(urlparse(UBUNTU_URL).path).name,
-            Path(urlparse(DEBIAN_13_URL).path).name,
-            KALI_DISK_RENAMED,
-        ]
-
-        deletion_upids: list[str] = []
-        for content in existing_content:
-            if content["volid"]:
-                for storage_name in storage_names_to_delete:
-                    if content["volid"].endswith(f"/{storage_name}"):
-                        upid = await self.async_proxmox.request(
-                            "DELETE",
-                            f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
-                        )
-                        if upid is not None:
-                            deletion_upids.append(upid)
-
-        for upid in deletion_upids:
-            await self.async_proxmox.wait_for_task(upid=upid)
+        for content in await self.read_all_content():
+            if content["volid"] and content["volid"].endswith(f"/{source_image_name}"):
+                upid = await self.async_proxmox.request(
+                    "DELETE",
+                    f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
+                )
+                if upid is not None:
+                    await self.async_proxmox.wait_for_task(upid=upid)
 
     async def known_builtins(self) -> Dict[str, int]:
         existing_vms = await self.qemu_commands.list_vms()
@@ -333,6 +339,23 @@ runcmd:
 
         return existing_content
 
+    async def ensure_exists_many(self, built_in_names: Iterable[str]) -> None:
+        """Build whichever of these built-ins the host lacks, concurrently."""
+        missing = sorted(set(built_in_names) - set(await self.known_builtins()))
+        if not missing:
+            return
+        # Up front: two builds that both found it missing would both create it
+        await self.ensure_static_sdn_exists()
+        builds = [asyncio.create_task(self.ensure_exists(name)) for name in missing]
+        try:
+            await asyncio.gather(*builds)
+        finally:
+            # A build outliving a failed sibling would run on under the next
+            # sample's pre-clean
+            for build in builds:
+                build.cancel()
+            await asyncio.gather(*builds, return_exceptions=True)
+
     async def ensure_exists(self, built_in_name: str) -> None:
         if built_in_name is None:
             raise ValueError("built_in_name must be set")
@@ -341,11 +364,8 @@ runcmd:
         if built_in_name in await self.known_builtins():
             return
 
-        next_available_vm_id = await self.qemu_commands.find_next_available_vm_id()
-
         if built_in_name == "ubuntu24.04":
             await self.ensure_exists_from_ova(
-                next_available_vm_id=next_available_vm_id,
                 built_in=built_in_name,
                 source_image_source_url=UBUNTU_URL,
                 ova_vmdk_filename=UBUNTU_VMDK_FILENAME,
@@ -353,14 +373,12 @@ runcmd:
         elif built_in_name == "debian13":
             await self.ensure_version(9)
             await self.ensure_exists_from_qcow2(
-                next_available_vm_id=next_available_vm_id,
                 built_in=built_in_name,
                 source_image_source_url=DEBIAN_13_URL,
             )
         elif built_in_name == "kali2025.4":
             await self.ensure_version(9)
             await self.ensure_exists_from_xz(
-                next_available_vm_id=next_available_vm_id,
                 built_in=built_in_name,
                 source_image_source_url=KALI_DOWNLOAD_URL,
                 disk_renamed=KALI_DISK_RENAMED,
@@ -373,7 +391,6 @@ runcmd:
 
     async def ensure_exists_from_ova(
         self,
-        next_available_vm_id: int,
         built_in: str,
         source_image_source_url: str,
         ova_vmdk_filename: str,
@@ -387,14 +404,12 @@ runcmd:
         await self.ensure_static_sdn_exists()
 
         await self.startup_vm(
-            next_available_vm_id,
             built_in,
             f"import/{source_image_name}/{ova_vmdk_filename}",
         )
 
     async def ensure_exists_from_qcow2(
         self,
-        next_available_vm_id: int,
         built_in: str,
         source_image_source_url: str,
     ) -> None:
@@ -406,13 +421,10 @@ runcmd:
 
         await self.ensure_static_sdn_exists()
 
-        await self.startup_vm(
-            next_available_vm_id, built_in, f"import/{source_image_name}"
-        )
+        await self.startup_vm(built_in, f"import/{source_image_name}")
 
     async def ensure_exists_from_xz(
         self,
-        next_available_vm_id: int,
         built_in: str,
         source_image_source_url: str,
         disk_renamed: str,
@@ -439,10 +451,28 @@ runcmd:
                 download_path = Path(self.cache_dir) / download_filename
                 await download_to_file(source_image_source_url, download_path)
 
-                # shell out to tar -xf with subprocess:
-                subprocess.check_call(
-                    ["tar", "-xf", download_path, "-C", self.cache_dir]
+                # Not check_call: that would block other builds' polls
+                tar_command = [
+                    "tar",
+                    "-xf",
+                    str(download_path),
+                    "-C",
+                    str(self.cache_dir),
+                ]
+                tar = await asyncio.create_subprocess_exec(
+                    *tar_command, stderr=asyncio.subprocess.PIPE
                 )
+                try:
+                    _, tar_stderr = await tar.communicate()
+                except asyncio.CancelledError:
+                    # Left running, it would still be writing disk.raw under a retry
+                    tar.kill()
+                    await tar.wait()
+                    raise
+                if tar.returncode:
+                    raise subprocess.CalledProcessError(
+                        tar.returncode, tar_command, stderr=tar_stderr
+                    )
 
                 # rename the output disk.raw to something better:
 
@@ -463,7 +493,6 @@ runcmd:
         await self.ensure_static_sdn_exists()
 
         await self.startup_vm(
-            next_available_vm_id,
             built_in,
             f"import/{disk_renamed}",
             user_data=user_data,
@@ -485,7 +514,7 @@ runcmd:
                 TRACE_NAME,
                 f"upload source image {built_in=} ",
             ):
-                await self.async_proxmox.request(
+                upid = await self.async_proxmox.request(
                     "POST",
                     f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/download-url",
                     json={
@@ -494,20 +523,32 @@ runcmd:
                         "url": source_image_source_url,
                     },
                 )
+                await self.async_proxmox.wait_for_task(upid=upid)
 
-                @tenacity.retry(
-                    wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                    stop=tenacity.stop_after_delay(VM_TIMEOUT),
+    async def _create_with_fresh_vm_id(
+        self, create: Callable[[int], Awaitable[None]]
+    ) -> int:
+        """Run `create` with the next free VM ID; try the next if a build took it."""
+        attempt = 0
+        while True:
+            attempt += 1
+            vm_id = await self.qemu_commands.find_next_available_vm_id()
+            try:
+                await create(vm_id)
+                return vm_id
+            except httpx.HTTPStatusError as e:
+                # `unable to create VM 105 - VM 105 already exists on node 'pve'`,
+                # rejected before Proxmox writes anything
+                taken = (
+                    e.response.status_code == 500
+                    and "already exists" in e.response.text
                 )
-                async def upload_complete() -> None:
-                    if not await self.content_exists(source_image_name):
-                        raise ValueError("image upload not yet complete")
-
-                await upload_complete()
+                if attempt == _VM_ID_ATTEMPTS or not taken:
+                    raise
+                self.logger.info(f"VM ID {vm_id} was taken by another build; retrying")
 
     async def startup_vm(
         self,
-        next_available_vm_id: int,
         built_in: str,
         import_source: str,
         user_data: str = DEFAULT_USER_DATA,
@@ -516,49 +557,60 @@ runcmd:
     ) -> None:
         name = f"inspect-{built_in}"
 
-        with trace_action(
-            self.logger,
-            TRACE_NAME,
-            f"create VM from import {next_available_vm_id=}",
-        ):
-            upid = await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu",
-                json={
-                    "vmid": next_available_vm_id,
-                    "name": name,
-                    "node": self.node,
-                    "cpu": proxmox_cpu("host", nested_virt=False),
-                    "memory": 8192,
-                    "cores": 2,
-                    "ostype": "l26",
-                    "scsi0": f"{self.image_storage}:0,"
-                    + f"import-from={LOCAL_STORAGE}:{import_source},"
-                    + "format=qcow2,cache=writeback",
-                    "scsihw": "virtio-scsi-single",
-                    "net0": f"virtio,bridge={STATIC_VNET_ID}",
-                    "serial0": "socket",
-                    "vga": "none",
-                    "tablet": 0,
-                    "start": False,
-                    "agent": "enabled=1",
-                },
-            )
-            await self.async_proxmox.wait_for_task(upid=upid)
+        with trace_action(self.logger, TRACE_NAME, f"build template {built_in=}"):
+
+            async def create(vm_id: int) -> None:
+                with trace_action(
+                    self.logger,
+                    TRACE_NAME,
+                    f"create VM from import {built_in=} {vm_id=}",
+                ):
+                    upid = await self.async_proxmox.request(
+                        "POST",
+                        f"/nodes/{self.node}/qemu",
+                        json={
+                            "vmid": vm_id,
+                            "name": name,
+                            "node": self.node,
+                            "cpu": proxmox_cpu("host", nested_virt=False),
+                            "memory": 8192,
+                            "cores": 2,
+                            "ostype": "l26",
+                            "scsi0": f"{self.image_storage}:0,"
+                            + f"import-from={LOCAL_STORAGE}:{import_source},"
+                            + "format=qcow2,cache=writeback",
+                            "scsihw": "virtio-scsi-single",
+                            "net0": f"virtio,bridge={STATIC_VNET_ID}",
+                            "serial0": "socket",
+                            "vga": "none",
+                            "tablet": 0,
+                            "start": False,
+                            "agent": "enabled=1",
+                        },
+                    )
+                    await self.async_proxmox.wait_for_task(upid=upid)
+
+            next_available_vm_id = await self._create_with_fresh_vm_id(create)
 
             if disk_gib is not None:
                 # cloud-init's growpart/resizefs pick this up on first boot
-                upid = await self.async_proxmox.request(
-                    "PUT",
-                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
-                    json={"disk": "scsi0", "size": f"{disk_gib}G"},
-                )
-                await self.async_proxmox.wait_for_task(upid=upid)
+                with trace_action(
+                    self.logger, TRACE_NAME, f"resize disk {next_available_vm_id=}"
+                ):
+                    upid = await self.async_proxmox.request(
+                        "PUT",
+                        f"/nodes/{self.node}/qemu/{next_available_vm_id}/resize",
+                        json={"disk": "scsi0", "size": f"{disk_gib}G"},
+                    )
+                    await self.async_proxmox.wait_for_task(upid=upid)
 
-            await self.create_and_upload_cloudinit_iso(
-                vm_id=next_available_vm_id,
-                user_data=user_data,
-            )
+            with trace_action(
+                self.logger, TRACE_NAME, f"cloud-init ISO {next_available_vm_id=}"
+            ):
+                await self.create_and_upload_cloudinit_iso(
+                    vm_id=next_available_vm_id,
+                    user_data=user_data,
+                )
 
             upid = await self.async_proxmox.request(
                 "POST",
@@ -569,9 +621,17 @@ runcmd:
             )
             await self.async_proxmox.wait_for_task(upid=upid)
 
-            await self.qemu_commands.start(vm_id=next_available_vm_id)
+            with trace_action(
+                self.logger, TRACE_NAME, f"start VM {next_available_vm_id=}"
+            ):
+                await self.qemu_commands.start(vm_id=next_available_vm_id)
+            # The guest installs its agent in cloud-init's package run, so
+            # this is a wait for that download and gets the same budget.
             await self.qemu_commands.await_vm(
-                vm_id=next_available_vm_id, requires_guest_agent=True, name=name
+                vm_id=next_available_vm_id,
+                requires_guest_agent=True,
+                name=name,
+                agent_timeout=cloud_init_timeout,
             )
 
             # now wait for cloud-init to finish
@@ -583,8 +643,8 @@ runcmd:
             )
 
             @tenacity.retry(
-                # Uncapped, the backoff reaches tens of minutes per poll inside an hour
-                wait=tenacity.wait_exponential(min=0.1, max=30, exp_base=1.3),
+                # Uncapped, this backoff reaches gaps of tens of minutes
+                wait=tenacity.wait_exponential(multiplier=0.1, max=5, exp_base=1.3),
                 stop=tenacity.stop_after_delay(cloud_init_timeout),
                 retry=tenacity.retry_if_result(lambda x: x is False),
             )
@@ -604,7 +664,10 @@ runcmd:
                 else:
                     return False
 
-            await wait_for_cloud_init()
+            with trace_action(
+                self.logger, TRACE_NAME, f"wait for cloud-init {next_available_vm_id=}"
+            ):
+                await wait_for_cloud_init()
 
             await self.async_proxmox.request(
                 "POST",
@@ -618,24 +681,30 @@ runcmd:
                 status_for_wait="stopped",
             )
 
-            await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
-            )
-
-            @tenacity.retry(
-                wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-                stop=tenacity.stop_after_delay(VM_TIMEOUT),
-                retry=tenacity.retry_if_result(lambda x: x is False),
-            )
-            async def is_template() -> bool:
-                current_config = await self.async_proxmox.request(
-                    "GET",
-                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
+            with trace_action(
+                self.logger, TRACE_NAME, f"convert to template {next_available_vm_id=}"
+            ):
+                upid = await self.async_proxmox.request(
+                    "POST",
+                    f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
                 )
-                return current_config.get("template") == 1
+                # template=1 is set before the disks are renamed to base-*; a clone in
+                # between fails with "Linked clone feature is not supported"
+                await self.async_proxmox.wait_for_task(upid=upid)
 
-            await is_template()
+                @tenacity.retry(
+                    wait=POLL_WAIT,
+                    stop=tenacity.stop_after_delay(VM_TIMEOUT),
+                    retry=tenacity.retry_if_result(lambda x: x is False),
+                )
+                async def is_template() -> bool:
+                    current_config = await self.async_proxmox.request(
+                        "GET",
+                        f"/nodes/{self.node}/qemu/{next_available_vm_id}/config?current=1",
+                    )
+                    return current_config.get("template") == 1
+
+                await is_template()
 
             @tenacity.retry(
                 wait=tenacity.wait_exponential(min=1, exp_base=1.3),

@@ -180,9 +180,7 @@ class SdnCommands(abc.ABC):
                 new_cidrs.append(str(subnet.cidr))
 
         # See https://forum.proxmox.com/threads/sdn-simple-zones-and-overlapping-ip-ranges.162739/
-        if overlaps := self.find_existing_cidr_overlaps(
-            existing_cidrs, new_cidrs
-        ) + self.find_self_cidr_overlaps(new_cidrs):
+        if overlaps := self.find_existing_cidr_overlaps(existing_cidrs, new_cidrs):
             raise ValueError(f"Duplicate IP ranges found: {overlaps}")
 
     def simple_vnet_config(
@@ -280,7 +278,7 @@ class SdnCommands(abc.ABC):
             await self.generate_sdn_config() if sdn_config == "auto" else sdn_config
         )
 
-        await self.check_cidrs(list(resolved_sdn_config.vnet_configs))
+        # Config-only checks first, so a bad config fails before any request
         if len(resolved_sdn_config.vnet_configs) > 10:
             raise ValueError(
                 f"Too many vnets; max 10, got {len(resolved_sdn_config.vnet_configs)}"
@@ -290,6 +288,16 @@ class SdnCommands(abc.ABC):
             raise ValueError("No vnets provided")
 
         self.validate_ipam_dhcp_dnsnmasq(resolved_sdn_config)
+
+        new_cidrs = [
+            str(subnet.cidr)
+            for vnet_config in resolved_sdn_config.vnet_configs
+            for subnet in vnet_config.subnets
+        ]
+        if self_overlaps := self.find_self_cidr_overlaps(new_cidrs):
+            raise ValueError(f"Duplicate IP ranges found: {self_overlaps}")
+
+        await self.check_cidrs(list(resolved_sdn_config.vnet_configs))
 
         sdn_zone_id = f"{proxmox_ids_start}z"
 
@@ -365,9 +373,8 @@ class SdnCommands(abc.ABC):
             # pvesh, which waits for it, so waiting on this UPID covers the
             # reload. But a failed per-node reload is only reported via Perl's
             # `warn` (printed to the task log, not counted as a Proxmox task
-            # warning), so this task's exitstatus is still OK. Currently we
-            # don't check exitstatus anyway, but it seemed worth recording this
-            # oddity for when we do. See
+            # warning), so this task's exitstatus is still OK and
+            # wait_for_task does not raise for it. See
             # https://github.com/proxmox/pve-network/blob/ce388c5eec2376576d62a6be708439a64cf7fb62/src/PVE/API2/Network/SDN.pm#L338-L353
             upid = await self.async_proxmox.request("PUT", "/cluster/sdn")
             await self.async_proxmox.wait_for_task(upid=upid)

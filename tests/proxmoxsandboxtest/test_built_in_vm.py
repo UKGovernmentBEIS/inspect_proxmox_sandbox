@@ -1,46 +1,80 @@
+"""Rebuilds the Ubuntu and Debian templates and leaves them for the rest of the suite.
+
+Kali is rebuilt only under --runslow.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
 import pytest
 
-from proxmoxsandbox._impl.built_in_vm import BuiltInVM
-from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.infra_commands import InfraCommands
+from proxmoxsandbox.schema import _load_single_instance_from_env
 
 pytestmark = pytest.mark.req_proxmox
 
 
-async def test_ubuntu(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
-    await _do_test_builtin(qemu_commands, built_in_vm, "ubuntu24.04")
+@dataclass(frozen=True)
+class Rebuild:
+    built_ins: list[str]
+    new_vms: list[dict[str, Any]]
+    """VMs present after the rebuild that were not present before it."""
 
 
-async def test_debian(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
-    await _do_test_builtin(qemu_commands, built_in_vm, "debian13")
+@pytest.fixture(scope="module")
+async def rebuild(request: pytest.FixtureRequest) -> Rebuild:
+    built_ins = ["ubuntu24.04", "debian13"]
+    if request.config.getoption("--runslow"):
+        built_ins.append("kali2025.4")
+    instance_config = _load_single_instance_from_env()
+    async_proxmox = AsyncProxmoxAPI.from_instance_config(instance_config)
+    infra = InfraCommands.build(
+        async_proxmox, instance_config.node, instance_config.image_storage
+    )
+    built_in_vm = infra.built_in_vm
 
-
-async def test_kali(qemu_commands: QemuCommands, built_in_vm: BuiltInVM) -> None:
-    await _do_test_builtin(qemu_commands, built_in_vm, "kali2025.4")
-
-
-async def _do_test_builtin(
-    qemu_commands: QemuCommands, built_in_vm: BuiltInVM, builtin_name: str
-):
-    await built_in_vm.clear_builtins()
-
+    for built_in in built_ins:
+        await built_in_vm.clear_builtin(built_in)
     known_builtins = await built_in_vm.known_builtins()
+    assert not set(built_ins) & set(known_builtins)
 
-    assert builtin_name not in known_builtins
+    existing_vm_ids = {vm["vmid"] for vm in await infra.qemu_commands.list_vms()}
 
-    existing_vms = await qemu_commands.list_vms()
+    await built_in_vm.ensure_exists_many(built_ins)
 
-    await built_in_vm.ensure_exists(builtin_name)
+    all_vms = await infra.qemu_commands.list_vms()
+    return Rebuild(
+        built_ins=built_ins,
+        new_vms=[vm for vm in all_vms if vm["vmid"] not in existing_vm_ids],
+    )
 
-    all_vms = await qemu_commands.list_vms()
 
-    existing_vm_ids = [vm["vmid"] for vm in existing_vms]
+async def test_one_vm_per_built_in(rebuild: Rebuild) -> None:
+    assert len(rebuild.new_vms) == len(rebuild.built_ins), rebuild.new_vms
 
-    assert len(all_vms) == len(existing_vms) + 1
 
-    new_vms = [vm for vm in all_vms if vm["vmid"] not in existing_vm_ids]
-    assert len(new_vms) == 1
-    assert new_vms[0]["template"] == 1
-    assert new_vms[0]["tags"]
-    tags = new_vms[0]["tags"].split(";")
-    assert "inspect" in tags
-    assert f"builtin-{builtin_name}" in tags
+async def test_ubuntu(rebuild: Rebuild) -> None:
+    _check_template(rebuild, "ubuntu24.04")
+
+
+async def test_debian(rebuild: Rebuild) -> None:
+    _check_template(rebuild, "debian13")
+
+
+@pytest.mark.slow
+async def test_kali(rebuild: Rebuild) -> None:
+    _check_template(rebuild, "kali2025.4")
+
+
+def _check_template(rebuild: Rebuild, built_in: str) -> None:
+    tagged = [
+        vm
+        for vm in rebuild.new_vms
+        if f"builtin-{built_in}" in (vm.get("tags") or "").split(";")
+    ]
+    assert len(tagged) == 1, tagged
+    template = tagged[0]
+    assert template["template"] == 1
+    assert "inspect" in template["tags"].split(";")
+    assert template["name"] == f"inspect-{built_in}"

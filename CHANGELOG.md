@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
+- Built-in templates boot with `quiet` on the kernel command line, so the serial console shows only warnings and errors
 - Fix: the experimental `create_snapshot` tool numbers snapshots 1, 2, 3 (every call used to return 1), and `rollback_to_snapshot` gives the model a tool error for an id that was never created
 - Fix: a snapshot, rollback or stop straight after `restore_snapshot` no longer fails with "can't lock file ... got timeout". A rollback now takes about 30 s longer
 

@@ -12,6 +12,7 @@ from inspect_ai.util import (
 from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
+    ProxmoxTaskError,
 )
 from proxmoxsandbox._impl.deadline import within_budget
 from proxmoxsandbox._impl.qga_responses import (
@@ -48,7 +49,6 @@ _QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
 
 # qm cleanup waits up to 60 s for the config lock, then holds it for up to 30 s
 _ROLLBACK_LOCK_TIMEOUT = 120.0
-_TASK_POLL_INTERVAL = 0.5
 
 
 def _is_pid_gone(exc: httpx.HTTPStatusError) -> bool:
@@ -264,26 +264,14 @@ class AgentCommands:
             upid = await self.async_proxmox.request(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/resume"
             )
-            exitstatus = await self._task_exitstatus(upid)
-            if exitstatus == "OK":
+            try:
+                await self.async_proxmox.wait_for_task(upid=upid)
                 return
-            if "can't lock file" not in exitstatus:
-                raise RuntimeError(
-                    f"VM {vm_id}: resume after a snapshot rollback failed: {exitstatus}"
-                )
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"VM {vm_id}: config lock still held {_ROLLBACK_LOCK_TIMEOUT:g}s "
-                    f"after a snapshot rollback: {exitstatus}"
-                )
-
-    async def _task_exitstatus(self, upid: str) -> str:
-        # wait_for_task does not return the exit status
-        node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
-        while True:
-            status = await self.async_proxmox.request(
-                "GET", f"/nodes/{node}/tasks/{upid}/status"
-            )
-            if status.get("exitstatus") is not None:
-                return str(status["exitstatus"])
-            await asyncio.sleep(_TASK_POLL_INTERVAL)
+            except ProxmoxTaskError as e:
+                if "can't lock file" not in e.exitstatus:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"VM {vm_id}: config lock still held "
+                        f"{_ROLLBACK_LOCK_TIMEOUT:g}s after a snapshot rollback"
+                    ) from e

@@ -1,5 +1,6 @@
 """SDN zones are tracked from before they exist until they are confirmed gone."""
 
+import asyncio
 from ipaddress import ip_address, ip_network
 from unittest.mock import AsyncMock, MagicMock
 
@@ -134,3 +135,30 @@ async def test_delete_sdn_and_vms_raises_when_zone_survives():
         await InfraCommands.delete_sdn_and_vms(
             infra, sdn_zone_id="abc123z", ipam_mappings=(), vms={}
         )
+
+
+@pytest.mark.asyncio
+async def test_delete_sdn_and_vms_waits_for_every_destroy_before_raising():
+    slow_destroy_finished = False
+
+    async def destroy_vm(*, vm_id: int, name: str) -> None:
+        nonlocal slow_destroy_finished
+        if vm_id == 101:
+            raise RuntimeError("destroy failed")
+        await asyncio.sleep(0.05)
+        slow_destroy_finished = True
+
+    infra = MagicMock()
+    infra.qemu_commands.destroy_vm = destroy_vm
+    infra.sdn_commands.tear_down_sdn_zone_and_vnet = AsyncMock(return_value=True)
+
+    with pytest.raises(RuntimeError, match="destroy failed"):
+        await InfraCommands.delete_sdn_and_vms(
+            infra,
+            sdn_zone_id="abc123z",
+            ipam_mappings=(),
+            vms={101: MagicMock(), 102: MagicMock()},
+        )
+
+    assert slow_destroy_finished
+    infra.sdn_commands.tear_down_sdn_zone_and_vnet.assert_not_called()

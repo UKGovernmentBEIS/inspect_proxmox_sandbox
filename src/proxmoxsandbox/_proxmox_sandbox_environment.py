@@ -317,8 +317,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         for vm_config in config.vms_config:
             if vm_config.vm_source_config.built_in is not None:
                 built_in_names.add(vm_config.vm_source_config.built_in)
-        for built_in_name in built_in_names:
-            await infra_commands.built_in_vm.ensure_exists(built_in_name)
+        await infra_commands.built_in_vm.ensure_exists_many(built_in_names)
 
     @classmethod
     @override
@@ -698,7 +697,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
         @tenacity.retry(
             wait=tenacity.wait_exponential(
-                min=0.1, max=_EXEC_POLL_MAX_INTERVAL_SECONDS, exp_base=1.3
+                multiplier=0.1, max=_EXEC_POLL_MAX_INTERVAL_SECONDS, exp_base=1.3
             ),
             stop=tenacity.stop_after_delay(poll_timeout + _EXEC_POLL_GRACE_SECONDS),
             retry=tenacity.retry_if_result(lambda x: x is None),
@@ -804,18 +803,38 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     stderr=exec_status.err_data,
                 )
             else:
-                # TODO: consider reading all files at once?
-                stdout = await self._read_exec_output(f"{tmp_start}script.stdout")
-                stderr = await self._read_exec_output(f"{tmp_start}script.stderr")
+                # Concurrently: QGA round trips dominate exec latency
+                reads = (
+                    asyncio.create_task(
+                        self._read_exec_output(f"{tmp_start}script.stdout")
+                    ),
+                    asyncio.create_task(
+                        self._read_exec_output(f"{tmp_start}script.stderr")
+                    ),
+                    asyncio.create_task(self._read_return_code(tmp_start)),
+                )
+                written_returncode: int | None
                 try:
-                    returncode = await self._read_return_code(tmp_start)
+                    # In this order, so a stdout failure is reported first and at once
+                    stdout = await reads[0]
+                    stderr = await reads[1]
+                    try:
+                        written_returncode = await reads[2]
+                    except ReturnCodeNotWritten:
+                        written_returncode = None
+                finally:
+                    # Left pending, a read would keep retrying against the agent
+                    for read in reads:
+                        read.cancel()
+                    await asyncio.gather(*reads, return_exceptions=True)
+                if written_returncode is not None:
                     exec_response = ExecResult(
-                        success=returncode == 0,
-                        returncode=returncode,
+                        success=written_returncode == 0,
+                        returncode=written_returncode,
                         stdout=stdout,
                         stderr=stderr,
                     )
-                except ReturnCodeNotWritten:
+                else:
                     # exec exited but the wrapper never wrote its returncode file:
                     # it was killed before completion.
                     signal_num = exec_status.signal
