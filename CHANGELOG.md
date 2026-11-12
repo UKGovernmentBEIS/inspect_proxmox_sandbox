@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: the `debian13` built-in template builds again on a host that does not have one. Debian's `latest` build has no `genericcloud` image, so the download failed with `download failed: exit code 8`; the image is pinned to build 20261103-2651 for now
+
 ## 0.13.0
 
 - **Breaking:** guest VMs no longer get nested virtualisation by default. Evals that need it must set `VmConfig(nested_virt=True)`. Requires Proxmox VE 9.1 or later (qemu-server 9.0.27).

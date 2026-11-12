@@ -41,7 +41,9 @@ UBUNTU_URL = (
     "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.ova"
 )
 UBUNTU_VMDK_FILENAME = "ubuntu-noble-24.04-cloudimg.vmdk"
-DEBIAN_13_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+# Pinned: trixie/latest/ points at build 20261111-2659, which has no genericcloud
+# image. Go back to latest/ once a build there has one.
+DEBIAN_13_URL = "https://cloud.debian.org/images/cloud/trixie/20261103-2651/debian-13-genericcloud-amd64-20261103-2651.qcow2"
 KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.4/kali-linux-2025.4-cloud-genericcloud-amd64.tar.xz"
 KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
 
