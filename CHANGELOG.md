@@ -3,6 +3,7 @@
 ## Unreleased
 
 - A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
+- Built-in templates boot with `quiet` on the kernel command line, so the serial console shows only warnings and errors
 
 ## 0.13.0
 

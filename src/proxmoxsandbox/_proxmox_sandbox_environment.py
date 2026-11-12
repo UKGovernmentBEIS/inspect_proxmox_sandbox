@@ -317,8 +317,7 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         for vm_config in config.vms_config:
             if vm_config.vm_source_config.built_in is not None:
                 built_in_names.add(vm_config.vm_source_config.built_in)
-        for built_in_name in built_in_names:
-            await infra_commands.built_in_vm.ensure_exists(built_in_name)
+        await infra_commands.built_in_vm.ensure_exists_many(built_in_names)
 
     @classmethod
     @override

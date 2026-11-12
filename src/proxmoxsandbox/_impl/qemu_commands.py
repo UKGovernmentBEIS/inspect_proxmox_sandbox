@@ -117,11 +117,12 @@ class QemuCommands(abc.ABC):
         requires_guest_agent: bool,
         name: str,
         status_for_wait: str = "running",
+        agent_timeout: float = _AGENT_TIMEOUT,
     ) -> None:
         """Wait for the VM's status and, if required, a guest-agent ping."""
         await self.await_running(vm_id, status_for_wait=status_for_wait, name=name)
         if requires_guest_agent and status_for_wait == "running":
-            await self.await_agent(vm_id, name=name)
+            await self.await_agent(vm_id, name=name, timeout=agent_timeout)
 
     async def await_running(
         self,

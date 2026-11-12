@@ -28,6 +28,7 @@ pythonpath = ["tests"]
 testpaths = ["tests/**/*.py"]
 markers = [
   "req_proxmox: test requires a live Proxmox instance",
+  "slow: takes tens of minutes on a fresh host; skipped unless --runslow is given",
 ]
 
 [build-system]
