@@ -24,6 +24,10 @@ dependencies = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# One loop per module: module-scoped async fixtures hold loop-bound state.
+# A task a test leaves running lives on into the module's later tests.
+asyncio_default_fixture_loop_scope = "module"
+asyncio_default_test_loop_scope = "module"
 pythonpath = ["tests"]
 testpaths = ["tests/**/*.py"]
 markers = [
