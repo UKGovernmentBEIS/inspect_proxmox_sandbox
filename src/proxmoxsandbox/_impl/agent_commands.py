@@ -1,16 +1,16 @@
 import asyncio
 import base64
+import time
 from logging import getLogger
 from typing import List, Tuple
 
 import httpx
-from inspect_ai.util import (
-    trace_action,
-)
+from inspect_ai.util import SandboxUnavailableError, trace_action
 
 from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
+    ProxmoxTaskError,
 )
 from proxmoxsandbox._impl.deadline import within_budget
 from proxmoxsandbox._impl.qga_responses import (
@@ -45,6 +45,9 @@ _QGA_RETRY_MAX_DELAY = 20.0  # seconds
 # Limit requests and retry sleeps together, including a request that never returns.
 _QGA_RETRY_MAX_TOTAL_SECONDS = 600.0
 
+# qm cleanup waits up to 60 s for the config lock, then holds it for up to 30 s
+_ROLLBACK_LOCK_TIMEOUT = 120.0
+
 
 def _is_pid_gone(exc: httpx.HTTPStatusError) -> bool:
     """Whether a QGA error says the PID is unknown.
@@ -78,6 +81,17 @@ def is_transient_qga_error(exc: Exception) -> bool:
             return False
         return status_code >= 500
     return False
+
+
+class GuestExecNotStartedError(SandboxUnavailableError):
+    """exec() could not reach the guest agent before launching the command."""
+
+    def __init__(self) -> None:
+        # Inspect shows this text to the model, so it says nothing about the host
+        super().__init__(
+            "The sandbox is not running or cannot be reached, "
+            "so the command was not launched."
+        )
 
 
 class AgentCommands:
@@ -244,3 +258,29 @@ class AgentCommands:
         path = f"/nodes/{self.node}/qemu/{vm_id}/snapshot/{snapshot_name}/rollback"
         upid = await self.async_proxmox.request("POST", path)
         await self.async_proxmox.wait_for_task(upid=upid)
+        await self._await_config_lock_after_rollback(vm_id)
+
+    async def _await_config_lock_after_rollback(self, vm_id: int) -> None:
+        """Wait until the VM's config lock can be taken again after a rollback.
+
+        After a rollback, Proxmox's `qm cleanup` for the old QEMU holds the lock
+        for 30 s (cleanup in qemu-server's PVE/CLI/qm.pm), and any snapshot,
+        rollback or stop of the VM fails with "can't lock file ... got timeout".
+        Resuming a running VM takes the same lock and does nothing else.
+        """
+        deadline = time.monotonic() + _ROLLBACK_LOCK_TIMEOUT
+        while True:
+            upid = await self.async_proxmox.request(
+                "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/resume"
+            )
+            try:
+                await self.async_proxmox.wait_for_task(upid=upid)
+                return
+            except ProxmoxTaskError as e:
+                if "can't lock file" not in e.exitstatus:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"VM {vm_id}: config lock still held "
+                        f"{_ROLLBACK_LOCK_TIMEOUT:g}s after a snapshot rollback"
+                    ) from e

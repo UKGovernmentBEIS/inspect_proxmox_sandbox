@@ -5,7 +5,10 @@
 - Built-in templates are built in a temporary SDN zone and no longer create the permanent `inspvmz` zone, so a host image taken after a build does not carry a SNAT rule for the build host. An `inspvmz` left by an earlier version is ignored; "Identifying created resources" in the README says how to remove it
 - A built-in template no longer has a NIC, so a VM cloned from one through `existing_vm_template_tag` with `nics=None` gets none
 - A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
+- `exec()` raises `GuestExecNotStartedError`, a subclass of Inspect's `SandboxUnavailableError`, when the guest agent cannot be reached before the command is launched (for example, the VM has stopped). A tool call then gets a `sandbox_unavailable` tool error and the sample continues
 - Built-in templates boot with `quiet` on the kernel command line, so the serial console shows only warnings and errors
+- Fix: the experimental `create_snapshot` tool numbers snapshots 1, 2, 3 (every call used to return 1), and `rollback_to_snapshot` gives the model a tool error for an id that was never created
+- Fix: a snapshot, rollback or stop straight after `restore_snapshot` no longer fails with "can't lock file ... got timeout". A rollback now takes about 30 s longer
 
 ## 0.13.0
 

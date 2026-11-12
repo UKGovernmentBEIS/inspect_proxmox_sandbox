@@ -4,7 +4,7 @@ from inspect_ai.dataset import Sample
 from inspect_ai.model import ModelOutput, get_model
 from inspect_ai.scorer import includes
 from inspect_ai.solver import basic_agent
-from inspect_ai.tool import Tool, bash, tool
+from inspect_ai.tool import Tool, ToolError, bash, tool
 from inspect_ai.util import SandboxEnvironmentSpec, sandbox, store
 
 from proxmoxsandbox._proxmox_sandbox_environment import (
@@ -22,6 +22,10 @@ sample text
 ]
 
 
+# Snapshots created so far in this sample: ids 1..count exist
+_SNAPSHOT_COUNT_KEY = "snapshot_count"
+
+
 @tool
 def create_snapshot() -> Tool:
     async def do_create_snapshot() -> int:
@@ -31,8 +35,7 @@ def create_snapshot() -> Tool:
         Returns:
           The number of snapshot, which can be used to rollback
         """
-        current_snapshot_id = store().get("current_snapshot_id", 0)
-        new_snapshot_id = current_snapshot_id + 1
+        new_snapshot_id = store().get(_SNAPSHOT_COUNT_KEY, 0) + 1
         try:
             await (
                 sandbox()
@@ -41,6 +44,8 @@ def create_snapshot() -> Tool:
             )
         except TypeError as e:
             raise ValueError("This tool only works with VM sandboxes") from e
+        # Only after the create returned: a failed create must not use up the id
+        store().set(_SNAPSHOT_COUNT_KEY, new_snapshot_id)
         return new_snapshot_id
 
     return do_create_snapshot
@@ -53,10 +58,14 @@ def rollback_to_snapshot() -> Tool:
         Use this function to roll back to a previous snapshot of your sandbox.
 
         Args:
-            snapshot_id (int): id of the previous snapshot
+            snapshot_id (int): id returned by an earlier create_snapshot call
         Returns:
             bool: Always True
         """
+        if not 1 <= snapshot_id <= store().get(_SNAPSHOT_COUNT_KEY, 0):
+            raise ToolError(
+                f"No snapshot {snapshot_id}: create_snapshot has not returned that id"
+            )
         try:
             await (
                 sandbox()
