@@ -1,21 +1,26 @@
-"""_upload_exec_script chunks oversize wrapper scripts under the file-write cap.
+"""Chunked guest writes: _upload_exec_script and write_file above the cap.
 
 A single agent/file-write caps base64 `content` at 61440 chars, so a large
-command (its wrapper script > ~45 KiB raw) must be split across multiple writes
-and reassembled inside the launched command. These tests drive that logic with
-mocked QGA collaborators — no live VM.
+command's wrapper script, and any write_file payload over 40 KiB that does not
+take the ISO path, must be split across multiple writes and reassembled inside
+the guest. These tests drive that logic with mocked QGA collaborators — no live
+VM.
 """
 
+import shutil
+import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from inspect_ai.util import ExecResult
 
 from proxmoxsandbox import _proxmox_sandbox_environment as mod
 from proxmoxsandbox._proxmox_sandbox_environment import ProxmoxSandboxEnvironment
-from proxmoxsandbox.schema import VmConfig, VmSourceConfig
+from proxmoxsandbox.schema import OsType, VmConfig, VmSourceConfig
 
 
-def _make_sandbox() -> ProxmoxSandboxEnvironment:
+def _make_sandbox(os_type: OsType = "l26") -> ProxmoxSandboxEnvironment:
     return ProxmoxSandboxEnvironment(
         infra_commands=MagicMock(),
         agent_commands=MagicMock(),
@@ -31,7 +36,7 @@ def _make_sandbox() -> ProxmoxSandboxEnvironment:
         sdn_zone_id=None,
         instance=None,
         pool_id=None,
-        os_type="l26",
+        os_type=os_type,
     )
 
 
@@ -181,3 +186,93 @@ async def test_write_file_chunks_text_by_encoded_bytes() -> None:
         data[: mod._WRITE_CHUNK_SIZE],
         data[mod._WRITE_CHUNK_SIZE :],
     ]
+
+
+_PAYLOAD = bytes(range(256)) * (mod._WRITE_CHUNK_SIZE // 256 + 1)
+assert len(_PAYLOAD) > mod._WRITE_CHUNK_SIZE
+
+
+async def _chunked_linux_write(target: Path) -> dict[str, str | bytes]:
+    """Run write_file against mocks; return each guest file it would write, by path."""
+    env = _make_sandbox()
+    env.exec = AsyncMock()  # type: ignore[method-assign]
+    env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    await env.write_file(str(target), _PAYLOAD)
+    return {c.args[0]: c.args[1] for c in env._write_file_only.await_args_list}
+
+
+def _replay_combine(
+    written: dict[str, str | bytes], cwd: Path
+) -> subprocess.CompletedProcess[bytes]:
+    """Write the captured guest files locally and run combine.sh under sh.
+
+    The chunk files land where the script expects them, so the only thing under
+    test is the script itself.
+    """
+    combine = next(p for p in written if p.endswith("/combine.sh"))
+    try:
+        for path, content in written.items():
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(
+                content.encode() if isinstance(content, str) else content
+            )
+        return subprocess.run(["sh", combine], cwd=cwd, capture_output=True)
+    finally:
+        shutil.rmtree(Path(combine).parent, ignore_errors=True)
+
+
+# Two names that between them defeat every partial fix: `$(...)` still runs
+# inside double quotes, and an apostrophe breaks naive single quotes.
+@pytest.mark.parametrize(
+    "name",
+    ["out$(touch pwned).txt", "it's a file.txt"],
+    ids=["command-substitution", "single-quote"],
+)
+async def test_write_file_combine_script_treats_target_as_data(
+    tmp_path: Path, name: str
+) -> None:
+    target = tmp_path / name
+    written = await _chunked_linux_write(target)
+
+    result = _replay_combine(written, cwd=tmp_path)
+
+    assert not (tmp_path / "pwned").exists(), "the file name ran as a command"
+    assert result.returncode == 0, result.stderr.decode()
+    assert target.read_bytes() == _PAYLOAD
+
+
+async def test_write_file_combine_script_fails_on_a_missing_chunk(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "out.bin"
+    written = await _chunked_linux_write(target)
+    del written[next(p for p in written if p.endswith("/chunk_0"))]
+
+    result = _replay_combine(written, cwd=tmp_path)
+
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("os_type", ["l26", "win11"], ids=["linux", "windows"])
+async def test_write_file_raises_when_combine_script_fails(os_type: OsType) -> None:
+    # The combine script is the step that produces the destination file, so its
+    # exit code is the write's outcome; mkdir and cleanup results are not.
+    env = _make_sandbox(os_type)
+    env._write_file_only = AsyncMock()  # type: ignore[method-assign]
+    env._try_iso_write = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    async def fake_exec(cmd: list[str], **_: object) -> ExecResult[str]:
+        if "combine" in cmd[-1]:
+            return ExecResult(False, 1, "", "cat: write error: No space left on device")
+        return ExecResult(True, 0, "", "")
+
+    env.exec = AsyncMock(side_effect=fake_exec)  # type: ignore[method-assign]
+
+    with pytest.raises(IOError, match="No space left on device"):
+        await env.write_file("/tmp/out.bin", b"x" * (mod._WRITE_CHUNK_SIZE + 1))
+
+    # The temp dir is still removed when the combine fails.
+    last_cmd = env.exec.await_args_list[-1].kwargs["cmd"]
+    assert last_cmd[:2] == ["rm", "-rf"] or last_cmd[-1].startswith("rmdir /s /q")
+    assert "split_out.bin" in last_cmd[-1]

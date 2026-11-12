@@ -17,7 +17,7 @@ from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
-from proxmoxsandbox._impl.qemu_commands import QemuCommands
+from proxmoxsandbox._impl.qemu_commands import QemuCommands, proxmox_cpu
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
 from proxmoxsandbox.schema import (
@@ -291,7 +291,7 @@ runcmd:
         for content in existing_content:
             if content["volid"]:
                 for storage_name in storage_names_to_delete:
-                    if content["volid"].endswith(storage_name):
+                    if content["volid"].endswith(f"/{storage_name}"):
                         upid = await self.async_proxmox.request(
                             "DELETE",
                             f"/nodes/{self.node}/storage/{LOCAL_STORAGE}/content/{content['volid']}",
@@ -321,7 +321,7 @@ runcmd:
     async def content_exists(self, content_name_end: str) -> bool:
         existing_content = await self.read_all_content()
         return any(
-            content["volid"] and content["volid"].endswith(content_name_end)
+            content["volid"] and content["volid"].endswith(f"/{content_name_end}")
             for content in existing_content
         )
 
@@ -528,7 +528,7 @@ runcmd:
                     "vmid": next_available_vm_id,
                     "name": name,
                     "node": self.node,
-                    "cpu": "host",
+                    "cpu": proxmox_cpu("host", nested_virt=False),
                     "memory": 8192,
                     "cores": 2,
                     "ostype": "l26",

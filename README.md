@@ -23,7 +23,7 @@ poetry add git+ssh://git@github.com/UKGovernmentBEIS/inspect_proxmox_sandbox.git
 
 This plugin assumes you already have one or more Proxmox instances set up, and that you have admin access to them.
 
-Proxmox 9 or later is required; 9.2 or later is recommended for improvements in read_file.
+Proxmox 9.1 or later is required; 9.2 or later is recommended for improvements in read_file.
 
 Your Proxmox instance(s) must allow additional storage types in `local` from the default.
 You can run this on your Proxmox node to configure them:
@@ -262,7 +262,8 @@ sandbox=SandboxEnvironmentSpec(
                 uefi_boot=True, # optional, default is False. Generally only needed for Windows VMs.
                 disk_controller="scsi", # optional, default will be SCSI. Can also use "ide" for older VM images.
                 nic_controller="virtio", # optional, default will be VirtIO. Can also use "e1000" for older VM images.
-                cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"). Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
+                cpu="host", # optional, default "host". The qemu CPU model (e.g. "host", "qemu64", "x86-64-v2"), applied to every VM including clones of existing templates. Must not contain "flags=". Older guest kernels (notably FreeBSD/pfSense) can panic on nested virtualization with "host"; use "qemu64" for those.
+                nested_virt=False, # optional, default False. See "Nested virtualisation" below.
                 vga="none", # optional, default "none" (no emulated display, mitigates the QEMU #4215 escape path). "std" re-adds the vulnerable device — read the warning under "Windows VMs" before using it.
                 tablet=False, # optional, default False. True adds a USB tablet so the noVNC mouse tracks accurately; only useful with vga="std".
                 firewall=True, # optional, default is False. Enables the NIC firewall flag; VM-level filtering needs separate configuration.
@@ -411,6 +412,34 @@ nics=(
 - `use_pve_ipam_dnsnmasq` must be `True` in the SDN config
 - The Proxmox server *must* be patched using the patch from https://lists.proxmox.com/pipermail/pve-devel/2025-November/076472.html
 
+### VLANs
+
+A VNet with `vlan_aware=True` carries many VLANs over one bridge. Each NIC on it must say which:
+
+```python
+sdn_config=SdnConfig(
+    vnet_configs=(
+        VnetConfig(alias="lan", subnets=(...)),
+        VnetConfig(alias="fabric", vlan_aware=True),
+    ),
+),
+vms_config=(
+    # An ordinary host on VLAN 12: an access port
+    VmConfig(name="workstation", ..., nics=(VmNicConfig(vnet_alias="fabric", vlan_tag=12),)),
+    # A router VM with one 802.1Q sub-interface per VLAN: a trunk port
+    VmConfig(name="router", ..., nics=(
+        VmNicConfig(vnet_alias="lan"),
+        VmNicConfig(vnet_alias="fabric", vlan_tag="trunk"),
+    )),
+),
+```
+
+- An access port (`vlan_tag=12`) sees untagged frames and can reach only its own VLAN. Frames it tags for another VLAN are dropped by the host bridge.
+- A trunk port (`vlan_tag="trunk"`) carries VLAN 1 untagged and VLANs 2-4094 tagged, so the guest can join any VLAN on the VNet. Give trunks only to VMs that play the part of a router, firewall or switch; an ordinary host on a trunk defeats the segmentation.
+- Proxmox does not allow subnets on a VLAN-aware VNet, so it has no host gateway, DHCP or SNAT. Routing, DHCP and DNS between VLANs come from a guest such as the router above; for traffic to leave the VNet, that guest needs a NIC on an ordinary VNet too.
+- `vlan_tag` is not allowed on an ordinary VNet. Built-in and OVA VMs without `nics` are rejected when the first VNet is VLAN-aware, since they would be attached to it as trunks.
+- With `firewall=True` on the default iptables firewall backend, per-VM Proxmox firewall rules do not filter the frames a guest tags itself (the kernel's `net.bridge.bridge-nf-filter-vlan-tagged` is 0). Rules on access-port VMs work as normal, but rules on a trunk VM do not cover its tagged traffic.
+
 ### Using Existing Proxmox VNETs (Advanced/Not Recommended)
 
 **⚠️ WARNING**: This feature is intended for advanced users with specific integration requirements. For most use cases, you should let the sandbox manage its own network configuration using the standard `sdn_config` options.
@@ -454,6 +483,15 @@ the same, you should manually delete it from the Proxmox server.
 
 These template VMs are *not* cleaned up because that needs to happen outside
 the lifecycle of an Inspect eval. You need to do this manually at the moment.
+
+## Nested virtualisation
+
+Guests get `cpu: <cpu>,flags=-nested-virt` by default, so they don't see the
+host's `vmx`/`svm` flag, cannot run KVM themselves, and cannot reach the host
+kernel's nested-virtualisation code. This is to enhance the security provided
+by the sandbox. Set `VmConfig(nested_virt=True)` for a guest that runs its own VMs.
+May be needed by Windows guests e.g. for  Credential Guard or other virtualisation-based 
+security (VBS).
 
 ## Windows VMs
 

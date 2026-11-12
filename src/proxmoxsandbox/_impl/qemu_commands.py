@@ -14,7 +14,18 @@ from proxmoxsandbox._impl.async_proxmox import (
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
-from proxmoxsandbox.schema import VmConfig
+from proxmoxsandbox.schema import VmConfig, check_nic_vlan
+
+
+def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
+    """The Proxmox `cpu` option for a CPU model, hiding vmx/svm from the guest.
+
+    With "host", the guest otherwise sees the host's vmx/svm and can run its
+    own KVM, reaching the host kernel's nested-virtualisation code.
+    """
+    model = cpu or "host"
+    return model if nested_virt else f"{model},flags=-nested-virt"
+
 
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
@@ -83,10 +94,11 @@ class QemuCommands(abc.ABC):
                 await self.destroy_vm(vm_id=vm_id, name=vm_config.name)
                 self.deregister_vm(vm_id)
             except httpx.HTTPStatusError as e:
-                # Proxmox returns 500 (not 404) when a VM config file is missing
+                # Proxmox returns 500 (not 404) when a VM config file is missing.
+                # Match the file name: a missing storage says "does not exist" too.
                 already_gone = (
                     e.response.status_code == 500
-                    and "does not exist" in e.response.text
+                    and f"qemu-server/{vm_id}.conf' does not exist" in e.response.text
                 )
                 if already_gone:
                     self.deregister_vm(vm_id)
@@ -189,9 +201,13 @@ class QemuCommands(abc.ABC):
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
 
+        # Only retry "still running". Stopping a missing VM still returns a
+        # UPID, so a 500 here would otherwise be retried for 300s and come out
+        # as a RetryError that hides the "does not exist" callers look for.
         @tenacity.retry(
             wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
             stop=tenacity.stop_after_delay(300),
+            retry=tenacity.retry_if_exception_type(ValueError),
         )
         async def is_not_running() -> None:
             vm_status = await self.async_proxmox.request(
@@ -245,7 +261,8 @@ class QemuCommands(abc.ABC):
         return bridges
 
     async def find_next_available_vm_id(self) -> int:
-        return await self.async_proxmox.request("GET", "/cluster/nextid")
+        # PVE returns this as a JSON string; tracking and list_vms use ints
+        return int(await self.async_proxmox.request("GET", "/cluster/nextid"))
 
     async def start(
         self,
@@ -414,7 +431,6 @@ class QemuCommands(abc.ABC):
 
                 json_for_create: ProxmoxJsonDataType = {
                     "node": self.node,
-                    "cpu": vm_config.cpu if vm_config.cpu else "host",
                     "scsihw": "virtio-scsi-single",
                     "start": False,
                 }
@@ -519,6 +535,7 @@ class QemuCommands(abc.ABC):
         )
         # If we have nics configured, we need to look up existing VNETs
         existing_vnet_mapping = {}
+        existing_vlan_aware: Dict[str, bool] = {}
         try:
             # Fetch all existing VNETs from Proxmox
             all_vnets = await self.async_proxmox.request("GET", "/cluster/sdn/vnets")
@@ -528,6 +545,7 @@ class QemuCommands(abc.ABC):
                     if "alias" in vnet and vnet["alias"]:
                         # Map alias to the actual VNET ID
                         existing_vnet_mapping[vnet["alias"]] = vnet["vnet"]
+                        existing_vlan_aware[vnet["alias"]] = bool(vnet.get("vlanaware"))
         except Exception as e:
             self.logger.error(f"Error fetching existing VNETs: {e}")
 
@@ -561,6 +579,7 @@ class QemuCommands(abc.ABC):
                 # Then check if it exists in existing VNETs
                 elif nic.vnet_alias in existing_vnet_mapping:
                     bridge_name = existing_vnet_mapping[nic.vnet_alias]
+                    check_nic_vlan(nic, existing_vlan_aware[nic.vnet_alias])
                 else:
                     # If we can't find it anywhere,
                     # log what we found and raise an error
@@ -577,6 +596,10 @@ class QemuCommands(abc.ABC):
                 netx = f"{nic_prefix},bridge={bridge_name}"
                 if nic.mac:
                     netx += f",macaddr={str(nic.mac).upper()}"
+                # A trunk is Proxmox's default for an untagged NIC on a
+                # VLAN-aware bridge.
+                if isinstance(nic.vlan_tag, int):
+                    netx += f",tag={nic.vlan_tag}"
                 if vm_config.firewall:
                     netx += ",firewall=1"
                 network_update_json[f"net{i}"] = netx
@@ -652,6 +675,10 @@ class QemuCommands(abc.ABC):
         json_for_create["memory"] = vm_config.ram_mb
         json_for_create["cores"] = vm_config.vcpus
         json_for_create["name"] = vm_config.name
+        # Sent on every clone, not just at template creation, so a cached OVA
+        # template, a built-in or an existing_vm_template_tag template cannot
+        # carry its own cpu (usually "host", with nesting) into the sandbox.
+        json_for_create["cpu"] = proxmox_cpu(vm_config.cpu, vm_config.nested_virt)
         json_for_create["serial0"] = "socket"
         json_for_create["vga"] = vm_config.vga
         # Proxmox defaults the tablet on, so this must be sent explicitly.
