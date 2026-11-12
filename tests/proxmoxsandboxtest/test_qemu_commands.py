@@ -4,7 +4,7 @@ import pytest
 
 from proxmoxsandbox._impl.built_in_vm import BuiltInVM
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, VnetAliases
-from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
+from proxmoxsandbox._impl.sdn_commands import SdnCommands
 from proxmoxsandbox.schema import (
     SdnConfig,
     VmConfig,
@@ -25,7 +25,7 @@ async def test_simple_vm_non_sandbox(
 ):
     built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
 
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=auto_sdn_vnet_aliases,
@@ -58,7 +58,11 @@ async def test_none_nic_from_template_tag(
     auto_sdn_vnet_aliases: VnetAliases,
     built_in_vm: BuiltInVM,
 ):
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    """nics=None on existing_vm_template_tag leaves the template's NICs as they are.
+
+    A built-in template has none, unless a release up to 0.13 built it.
+    """
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=auto_sdn_vnet_aliases,
@@ -71,9 +75,11 @@ async def test_none_nic_from_template_tag(
         built_in_vm_ids=await built_in_vm.known_builtins(),
     )
 
+    template_vm_id = (await built_in_vm.known_builtins())["ubuntu24.04"]
+    assert await qemu_commands.vm_bridges(new_vm_id) == await qemu_commands.vm_bridges(
+        template_vm_id
+    )
     new_vm = await qemu_commands.read_vm(new_vm_id)
-    assert "net0" in new_vm
-    assert STATIC_SDN_START in new_vm["net0"]
     assert "inspect" in new_vm["tags"]
     assert "builtin-ubuntu24.04" in new_vm["tags"]
 
@@ -85,7 +91,7 @@ async def test_empty_nic_from_template_tag(
     auto_sdn_vnet_aliases: VnetAliases,
     built_in_vm: BuiltInVM,
 ):
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=auto_sdn_vnet_aliases,
@@ -111,7 +117,7 @@ async def test_none_nic_from_built_in(
 ):
     built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
 
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=auto_sdn_vnet_aliases,
@@ -136,7 +142,7 @@ async def test_existing_alias_from_built_in(
 ):
     built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
 
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     sdn_zone_id, _ = await sdn_commands.create_sdn(
         proxmox_ids_start="tea999",
@@ -177,7 +183,7 @@ async def test_multiple_nic(
 ):
     built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
 
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(
         ids_start,
@@ -220,7 +226,7 @@ async def test_empty_nic_from_built_in(
 ):
     built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
 
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=auto_sdn_vnet_aliases,
@@ -244,7 +250,7 @@ async def test_disk_controller_match_from_built_in(
 ):
     built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
 
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     # Built-ins are created on scsi, so requesting "scsi" must be accepted and
     # the clone must still come out on scsi.
@@ -270,7 +276,7 @@ async def test_disk_controller_mismatch_from_built_in_raises(
 ):
     built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
 
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     # Built-ins are scsi, so requesting "ide" is unsatisfiable and must raise
     # before any VM is created (hence no cleanup needed).
@@ -289,7 +295,7 @@ async def test_disk_controller_mismatch_from_template_tag_raises(
     qemu_commands: QemuCommands,
     built_in_vm: BuiltInVM,
 ):
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     with pytest.raises(ValueError, match="disk_controller"):
         await qemu_commands.create_and_start_vm(
@@ -363,7 +369,7 @@ async def test_uefi(
 ):
     built_in_ubuntu = VmSourceConfig(built_in="ubuntu24.04")
 
-    await built_in_vm.ensure_exists("ubuntu24.04")
+    await built_in_vm.ensure_exists_many(["ubuntu24.04"])
 
     new_vm_id = await qemu_commands.create_and_start_vm(
         sdn_vnet_aliases=auto_sdn_vnet_aliases,

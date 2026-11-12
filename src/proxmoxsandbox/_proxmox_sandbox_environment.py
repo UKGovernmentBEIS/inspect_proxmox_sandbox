@@ -417,8 +417,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
 
             task_name_start = re.sub("[^a-zA-Z0-9]", "x", task_name[:3].lower())
 
-            proxmox_ids_start = await infra_commands.find_proxmox_ids_start(
-                task_name_start
+            proxmox_ids_start = (
+                await infra_commands.sdn_commands.find_proxmox_ids_start(
+                    prefix=task_name_start
+                )
             )
 
             # Ensure built-in VM templates exist on this instance
@@ -498,8 +500,8 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         Only VNETs in zones matching the provider's ephemeral-zone naming
         convention, and non-template VMs tagged `inspect`, are considered
         leftovers. Pre-existing user VNETs (referenced via sdn_config=None)
-        and the static `inspvm*` SDN are deliberately ignored — they are
-        expected to persist across samples.
+        are deliberately ignored — they are expected to persist across
+        samples.
 
         Raises if the instance cannot be checked or cleaned. Carrying on
         would not necessarily fail: a new sample gets fresh IDs, so it can

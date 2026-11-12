@@ -2,7 +2,7 @@ import abc
 import re
 from ipaddress import ip_address, ip_network
 from logging import getLogger
-from random import shuffle
+from random import randint, shuffle
 from typing import Collection, List, Optional, Sequence, Tuple, TypeAlias
 
 import httpx
@@ -27,12 +27,12 @@ from proxmoxsandbox.schema import (
 # The alias may be None for a given ID.
 VnetAliases: TypeAlias = List[Tuple[str, str | None]]
 
-# Ephemeral zones the provider creates are named exactly
-# `{task_name[:3] sanitised to [a-z0-9]}{000-999}z`. This pattern is the
-# ownership boundary for automatic, non-interactive cleanup, so it must be
-# anchored at both ends — a prefix match would let a pre-existing zone such
-# as `abc123za` be swept and deleted as if the provider owned it. Use
-# `is_ephemeral_zone()` rather than matching this directly.
+# Ephemeral zones are named exactly `{prefix}{000-999}z`: the prefix is
+# `task_name[:3]` sanitised to [a-z0-9], or BUILT_IN_IDS_PREFIX for a template
+# build zone. Anchored at both ends because it is the ownership boundary for
+# automatic cleanup: a prefix match would sweep a pre-existing `abc123za`.
+# Use `is_ephemeral_zone()` rather than matching this directly.
+# `inspvmz` must stay outside the pattern: templates built up to 0.13 are on it.
 ZONE_REGEX = r"^[a-z0-9]{1,3}[0-9]{3}z$"
 
 
@@ -45,9 +45,9 @@ def is_ephemeral_zone(zone_id: str) -> bool:
     return re.fullmatch(ZONE_REGEX, zone_id) is not None
 
 
-# A static SDN used for creating built-in VMs. It is created on demand
-# and not torn down afterwards.
-STATIC_SDN_START = "inspvm"
+# Two characters: a sample's zone has a three-character prefix, so the names
+# only collide for a task named exactly `bi`.
+BUILT_IN_IDS_PREFIX = "bi"
 
 
 class SdnTeardownError(Exception):
@@ -303,16 +303,12 @@ class SdnCommands(abc.ABC):
 
         # sanity check so that we don't get into trouble later
         # in inspect sandbox cleanup
-        if not (
-            is_ephemeral_zone(sdn_zone_id) or sdn_zone_id.startswith(STATIC_SDN_START)
-        ):
+        if not is_ephemeral_zone(sdn_zone_id):
             raise ValueError("Invalid zone ID")
 
         # Register before the first request so a failure anywhere below (zone,
-        # VNET, subnet, apply) leaves the zone tracked. The static zone is
-        # meant to outlive the task.
-        if is_ephemeral_zone(sdn_zone_id):
-            self.register_sdn_zone(sdn_zone_id)
+        # VNET, subnet, apply) leaves the zone tracked.
+        self.register_sdn_zone(sdn_zone_id)
 
         with trace_action(self.logger, self.TRACE_NAME, f"create sdn  {sdn_zone_id=}"):
             zone_create_json: ProxmoxJsonDataType = {
@@ -382,6 +378,19 @@ class SdnCommands(abc.ABC):
     async def list_sdn_zones(self):
         with trace_action(self.logger, self.TRACE_NAME, "get SDN zones"):
             return await self.async_proxmox.request("GET", "/cluster/sdn/zones")
+
+    async def find_proxmox_ids_start(self, prefix: str) -> str:
+        """Pick a `{prefix}{3 digits}` stem whose zone `{stem}z` doesn't exist yet.
+
+        `prefix` is at most 3 characters of [a-z0-9]: SDN IDs are 8 characters max
+        and the last two distinguish the zone and VNET objects.
+        """
+        existing_zone_ids = set([zone["zone"] for zone in await self.list_sdn_zones()])
+        zone_free = False
+        while not zone_free:
+            proxmox_ids_start = f"{prefix}{randint(0, 999):03d}"
+            zone_free = f"{proxmox_ids_start}z" not in existing_zone_ids
+        return proxmox_ids_start
 
     async def read_all_simple_zone_cidrs(self) -> List[str]:
         existing_zones = await self.list_sdn_zones()
@@ -507,6 +516,22 @@ class SdnCommands(abc.ABC):
     async def read_all_ipam_mappings(self) -> List[PveIpamStatus]:
         res = await self.async_proxmox.request("GET", "/cluster/sdn/ipams/pve/status")
         return [PveIpamStatus(**item) for item in res]
+
+    async def read_zone_ipam_mappings(
+        self, zone_ids: Collection[str]
+    ) -> List[IpamMapping]:
+        """IPAM entries in `zone_ids` that would block tearing the zones down.
+
+        Gateway entries have no MAC and go away with their subnet, so only
+        MAC-bearing leases are returned.
+        """
+        return [
+            mapping.to_ipam_mapping()
+            for mapping in await self.read_all_ipam_mappings()
+            if mapping.zone in zone_ids
+            and mapping.gateway is None
+            and mapping.mac is not None
+        ]
 
     async def create_ipam_mapping(self, ipam_mapping: IpamMapping) -> None:
         """
