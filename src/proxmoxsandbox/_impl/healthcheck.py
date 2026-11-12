@@ -126,11 +126,14 @@ class HealthCheckRunner:
     async def _probe(self) -> Probe:
         """Run the check once and classify what happened."""
         try:
-            try:
-                result = await self.execute(self.spec)
-            except GuestExecNotStartedError as e:
-                # Classified by what stopped the launch
-                raise e.cause from None
+            result = await self.execute(self.spec)
+        except GuestExecNotStartedError as e:
+            cause = e.__cause__
+            if isinstance(cause, TimeoutError):
+                return Probe("unhealthy", f"timed out after {self.spec.timeout}s")
+            if isinstance(cause, httpx.HTTPStatusError):
+                return Probe("unreachable", f"HTTP {cause.response.status_code}")
+            return Probe("unreachable", type(cause).__name__)
         except httpx.TransportError as e:
             return Probe("unreachable", type(e).__name__)
         except httpx.HTTPStatusError as e:

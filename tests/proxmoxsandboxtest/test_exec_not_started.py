@@ -56,10 +56,11 @@ async def test_script_write_that_exhausts_its_retries_means_not_started(error):
 
     assert isinstance(raised.value, SandboxUnavailableError)
     assert raised.value.__cause__ is error
-    message = str(raised.value)
-    assert message.startswith("VM 100: ")
-    assert "was not launched" in message
-    assert str(error) in message
+    # Inspect passes this text to the model
+    assert str(raised.value) == (
+        "The sandbox is not running or cannot be reached, "
+        "so the command was not launched."
+    )
     agent.exec_command.assert_not_awaited()
 
 

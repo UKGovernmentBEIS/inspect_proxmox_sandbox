@@ -84,13 +84,13 @@ def is_transient_qga_error(exc: Exception) -> bool:
 
 
 class GuestExecNotStartedError(SandboxUnavailableError):
-    """The guest agent could not be reached before exec() launched the command."""
+    """exec() could not reach the guest agent before launching the command."""
 
-    def __init__(self, vm_id: int, cause: Exception):
-        self.cause = cause
+    def __init__(self) -> None:
+        # Inspect shows this text to the model, so it says nothing about the host
         super().__init__(
-            f"VM {vm_id}: the guest agent could not be reached to start the "
-            f"command, so it was not launched ({type(cause).__name__}: {cause})"
+            "The sandbox is not running or cannot be reached, "
+            "so the command was not launched."
         )
 
 

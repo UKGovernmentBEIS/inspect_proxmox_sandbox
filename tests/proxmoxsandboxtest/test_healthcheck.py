@@ -142,11 +142,17 @@ async def test_slow_probe_is_judged_by_when_it_started():
     assert calls == [1000.0, 1026.0]
 
 
+def _not_started(cause: Exception) -> GuestExecNotStartedError:
+    error = GuestExecNotStartedError()
+    error.__cause__ = cause
+    return error
+
+
 @pytest.mark.parametrize(
     "error",
     [
         TimeoutError("Command timed out"),
-        GuestExecNotStartedError(100, TimeoutError("waiting allowance")),
+        _not_started(TimeoutError("waiting allowance")),
     ],
     ids=["timeout", "not-started-timeout"],
 )
@@ -226,8 +232,8 @@ async def test_non_transient_agent_errors_count_as_failures(error):
     [
         _transport_error(),
         _http_500(),
-        GuestExecNotStartedError(100, _transport_error()),
-        GuestExecNotStartedError(100, _http_500()),
+        _not_started(_transport_error()),
+        _not_started(_http_500()),
     ],
 )
 async def test_transport_errors_are_bounded(error):

@@ -902,10 +902,10 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
         except httpx.HTTPError as ex:
             if launch_requested or not is_transient_qga_error(ex):
                 raise
-            raise GuestExecNotStartedError(self.vm_id, ex) from ex
+            raise self._not_started(ex) from ex
         except TimeoutError as ex:
             if not launch_requested:
-                raise GuestExecNotStartedError(self.vm_id, ex) from ex
+                raise self._not_started(ex) from ex
             raise TimeoutError(
                 f"The QEMU guest agent on VM {self.vm_id} did not deliver the result "
                 f"of pid {launched_pid} within {waiting_allowance}s ({poll_timeout}s "
@@ -928,6 +928,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 raise PermissionError("Permission denied executing command")
 
         return exec_response
+
+    def _not_started(self, cause: Exception) -> GuestExecNotStartedError:
+        self.logger.warning(
+            f"VM {self.vm_id}: guest agent unreachable before the command was "
+            f"launched ({type(cause).__name__}: {cause})"
+        )
+        return GuestExecNotStartedError()
 
     _RETURNCODE_RE = re.compile(r"-?\d{1,10}")
 
