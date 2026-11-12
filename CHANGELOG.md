@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
+
 ## 0.13.0
 
 - **Breaking:** guest VMs no longer get nested virtualisation by default. Evals that need it must set `VmConfig(nested_virt=True)`. Requires Proxmox VE 9.1 or later (qemu-server 9.0.27).
