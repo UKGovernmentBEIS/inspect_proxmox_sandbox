@@ -25,7 +25,11 @@ from inspect_ai.util import (
 from pydantic import BaseModel
 from typing_extensions import override
 
-from proxmoxsandbox._impl.agent_commands import AgentCommands
+from proxmoxsandbox._impl.agent_commands import (
+    AgentCommands,
+    GuestExecNotStartedError,
+    is_transient_qga_error,
+)
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
 from proxmoxsandbox._impl.deadline import (
     CLEANUP_WAIT_SECONDS,
@@ -769,14 +773,17 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
             poll_timeout + _EXEC_POLL_GRACE_SECONDS + _EXEC_AGENT_BUDGET_SECONDS
         )
         launched_pid: int | None = None
+        # Once set, the command may have run even if the launch request failed
+        launch_requested = False
 
         async def launch_and_collect() -> ExecResult[str]:
-            nonlocal launched_pid
+            nonlocal launched_pid, launch_requested
             if stdin_upload is not None:
                 await self.write_file(*stdin_upload)
             launch = await self._upload_exec_script(
                 script_path, script, is_windows=is_windows
             )
+            launch_requested = True
             exec_response_pid = await self.agent_commands.exec_command(
                 vm_id=self.vm_id, command=launch
             )
@@ -892,7 +899,13 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                 f"agent did not report the process as finished. "
                 f"Command: {shlex.join(cmd)[:200]}"
             ) from ex
+        except httpx.HTTPError as ex:
+            if launch_requested or not is_transient_qga_error(ex):
+                raise
+            raise GuestExecNotStartedError(self.vm_id, ex) from ex
         except TimeoutError as ex:
+            if not launch_requested:
+                raise GuestExecNotStartedError(self.vm_id, ex) from ex
             raise TimeoutError(
                 f"The QEMU guest agent on VM {self.vm_id} did not deliver the result "
                 f"of pid {launched_pid} within {waiting_allowance}s ({poll_timeout}s "

@@ -607,6 +607,8 @@ Two things worth knowing:
 
 `exec()` shares a waiting allowance across uploads, retries and result collection: the command timeout plus 188 seconds for grace and communication. Without a timeout, the base wait is four hours; set `PROXMOX_EXEC_UNTIMED_WAIT_SECONDS` to a positive integer to change it. Cleanup gets a separate two-minute allowance per step, and the guest command may keep running after the provider raises `TimeoutError`.
 
+If the guest agent cannot be reached before the command is launched (the transport retries or the waiting allowance run out while the script or its input is uploaded), `exec()` raises `GuestExecNotStartedError`, a `SandboxUnavailableError`: the command did not run, Inspect reports a `sandbox_unavailable` tool error and the sample continues. A failure from the launch request onwards keeps its own error, because the command may have run.
+
 Invalid guest replies raise `GuestAgentTamperError` with the VM and failure details. Uncaught in normal Inspect tool execution, this ends the sample with an error; Inspect also stops the evaluation by default (`fail_on_error=False` allows other samples to continue). Validation cannot detect correctly formatted lies or prevent oversized replies consuming memory before the checks run.
 
 ## Feature Roadmap

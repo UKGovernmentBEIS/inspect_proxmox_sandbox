@@ -4,9 +4,7 @@ from logging import getLogger
 from typing import List, Tuple
 
 import httpx
-from inspect_ai.util import (
-    trace_action,
-)
+from inspect_ai.util import SandboxUnavailableError, trace_action
 
 from proxmoxsandbox._impl.async_proxmox import (
     AsyncProxmoxAPI,
@@ -78,6 +76,17 @@ def is_transient_qga_error(exc: Exception) -> bool:
             return False
         return status_code >= 500
     return False
+
+
+class GuestExecNotStartedError(SandboxUnavailableError):
+    """The guest agent could not be reached before exec() launched the command."""
+
+    def __init__(self, vm_id: int, cause: Exception):
+        self.cause = cause
+        super().__init__(
+            f"VM {vm_id}: the guest agent could not be reached to start the "
+            f"command, so it was not launched ({type(cause).__name__}: {cause})"
+        )
 
 
 class AgentCommands:

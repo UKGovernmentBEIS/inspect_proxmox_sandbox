@@ -3,6 +3,7 @@
 ## Unreleased
 
 - A Proxmox task that fails (a start whose QEMU exited, a broken clone) raises `ProxmoxTaskError` with Proxmox's status text instead of surfacing as a later timeout
+- `exec()` raises `GuestExecNotStartedError`, a subclass of Inspect's `SandboxUnavailableError`, when the guest agent cannot be reached before the command is launched (for example, the VM has stopped). A tool call then gets a `sandbox_unavailable` tool error and the sample continues, where before the sample ended with the `httpx` error or the tool call reported a `timeout`
 - Built-in templates boot with `quiet` on the kernel command line, so the serial console shows only warnings and errors
 
 ## 0.13.0
