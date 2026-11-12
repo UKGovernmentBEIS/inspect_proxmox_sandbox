@@ -38,6 +38,10 @@ from proxmoxsandbox.schema import (
     VmConfig,
 )
 
+# A 19-VM range posting every stop and delete at once got
+# "500 got no worker upid - start worker failed" from Proxmox
+_DESTROY_CONCURRENCY = 4
+
 
 class ProxmoxTarget(NamedTuple):
     """Identifies a specific Proxmox host+node combination."""
@@ -277,8 +281,20 @@ class InfraCommands(abc.ABC):
         ipam_mappings: Sequence[IpamMapping],
         vms: dict[int, VmConfig],
     ):
-        for vm_id, vm_config in vms.items():
-            await self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
+        slots = asyncio.Semaphore(_DESTROY_CONCURRENCY)
+
+        async def destroy(vm_id: int, vm_config: VmConfig) -> None:
+            async with slots:
+                await self.qemu_commands.destroy_vm(vm_id=vm_id, name=vm_config.name)
+
+        results = await asyncio.gather(
+            *(destroy(vm_id, vm_config) for vm_id, vm_config in vms.items()),
+            # A destroy still running after we raise would race task_cleanup
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         if sdn_zone_id is not None:
             gone = await self.sdn_commands.tear_down_sdn_zone_and_vnet(
                 sdn_zone_id=sdn_zone_id, ipam_mappings=ipam_mappings

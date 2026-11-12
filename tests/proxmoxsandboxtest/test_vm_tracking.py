@@ -66,6 +66,7 @@ async def test_task_cleanup_forgets_a_vm_that_is_already_gone():
 
     api = MagicMock()
     api.request = AsyncMock(side_effect=fake_request)
+    api.wait_for_task = AsyncMock()
     qemu = _qemu(api)
     qemu.register_vm(
         vm_id=4242,
@@ -98,6 +99,7 @@ async def test_task_cleanup_keeps_a_vm_whose_storage_is_missing():
 
     api = MagicMock()
     api.request = AsyncMock(side_effect=fake_request)
+    api.wait_for_task = AsyncMock()
     qemu = _qemu(api)
     qemu.register_vm(
         vm_id=4242,
