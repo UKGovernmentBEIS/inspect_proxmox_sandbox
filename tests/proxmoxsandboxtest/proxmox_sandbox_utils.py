@@ -7,6 +7,7 @@ import httpx
 from inspect_ai.util import SandboxEnvironment
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._proxmox_sandbox_environment import (
     ProxmoxSandboxEnvironment,
     ProxmoxSandboxEnvironmentConfig,
@@ -64,3 +65,9 @@ def http_500(text: str, method: str = "POST") -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(
         text, request=request, response=httpx.Response(500, text=text, request=request)
     )
+
+
+def reset_pool_state() -> None:
+    """Forget every pool and InfraCommands instance, as a new process would."""
+    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
+    InfraCommands._instances.clear()

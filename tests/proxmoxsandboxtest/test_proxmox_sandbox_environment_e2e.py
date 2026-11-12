@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Dict
 
 import pytest
-from inspect_ai.util import SandboxConnection, SandboxEnvironment
+from inspect_ai.util import SandboxEnvironment
 
 from proxmoxsandbox._impl.qemu_commands import QemuCommands
 from proxmoxsandbox._impl.sdn_commands import SdnCommands
@@ -18,7 +18,7 @@ from proxmoxsandbox.schema import (
     VnetConfig,
 )
 
-from .proxmox_sandbox_utils import setup_sandbox
+from .proxmox_sandbox_utils import reset_pool_state, setup_sandbox
 
 CURRENT_DIR = Path(__file__).parent
 
@@ -336,17 +336,11 @@ async def test_ova() -> None:
         )
 
 
-async def test_connect(proxmox_sandbox_environment: ProxmoxSandboxEnvironment) -> None:
-    connection: SandboxConnection = await proxmox_sandbox_environment.connection()
-    # we can't really do much more than this assertion;
-    # sandbox.connection() needs to be tested manually
-    assert "open 'http" in connection.command
-
-
-async def test_task_cleanup_after_interrupted_sample(
-    qemu_commands: QemuCommands, sdn_commands: SdnCommands
+async def test_task_cleanup_then_cli_cleanup(
+    qemu_commands: QemuCommands,
+    sdn_commands: SdnCommands,
 ) -> None:
-    """Simulate Ctrl-C: skip sample_cleanup, verify task_cleanup destroys resources."""
+    """Ctrl-C leaves resources for task_cleanup; the CLI sweeps untracked leftovers."""
     sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
         vms_config=(
             VmConfig(
@@ -356,17 +350,28 @@ async def test_task_cleanup_after_interrupted_sample(
         )
     )
 
+    async def vm_ids() -> set[int]:
+        return {vm["vmid"] for vm in await qemu_commands.list_vms()}
+
+    async def zones() -> list[dict]:
+        return sorted(await sdn_commands.list_sdn_zones(), key=lambda x: x["zone"])
+
     existing_vms = await qemu_commands.list_vms()
-    existing_zones = await sdn_commands.list_sdn_zones()
+    existing_vm_ids = {vm["vmid"] for vm in existing_vms}
+    existing_zones = await zones()
+
+    # can happen if something else (e.g. an interrupted test run) left inspect VMs
+    # behind; abort rather than trying to work around it
+    existing_sweepable = [
+        vm for vm in existing_vms if QemuCommands.vm_is_inspect(vm=vm, template=False)
+    ]
+    assert not existing_sweepable, f"unexpected pre-existing VMs: {existing_sweepable}"
 
     task_name = "ttc"
     _, envs_dict = await setup_sandbox(task_name, sandbox_env_config)
 
-    # Resources should exist on Proxmox
-    mid_vms = await qemu_commands.list_vms()
-    mid_zones = await sdn_commands.list_sdn_zones()
-    assert len(mid_vms) == len(existing_vms) + 1
-    assert len(mid_zones) == len(existing_zones) + 1
+    assert len(await vm_ids()) == len(existing_vm_ids) + 1
+    assert len(await zones()) == len(existing_zones) + 1
 
     # Simulate Ctrl-C: sample_cleanup is called with interrupted=True,
     # which skips the happy-path deletion
@@ -377,11 +382,8 @@ async def test_task_cleanup_after_interrupted_sample(
         interrupted=True,
     )
 
-    # Resources should still exist — sample_cleanup did nothing
-    still_vms = await qemu_commands.list_vms()
-    still_zones = await sdn_commands.list_sdn_zones()
-    assert len(still_vms) == len(existing_vms) + 1
-    assert len(still_zones) == len(existing_zones) + 1
+    assert len(await vm_ids()) == len(existing_vm_ids) + 1
+    assert len(await zones()) == len(existing_zones) + 1
 
     # Now task_cleanup runs (as Inspect would after Ctrl-C)
     await ProxmoxSandboxEnvironment.task_cleanup(
@@ -390,56 +392,23 @@ async def test_task_cleanup_after_interrupted_sample(
         cleanup=True,
     )
 
-    # Resources should be gone
-    post_vms = await qemu_commands.list_vms()
-    post_zones = await sdn_commands.list_sdn_zones()
-    assert set(vm["vmid"] for vm in post_vms) == set(vm["vmid"] for vm in existing_vms)
-    existing_zones.sort(key=lambda x: x["zone"])
-    post_zones.sort(key=lambda x: x["zone"])
-    assert post_zones == existing_zones
+    assert await vm_ids() == existing_vm_ids
+    assert await zones() == existing_zones
 
+    # A clean host: the sweep must leave templates and the static SDN alone.
+    await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
+    assert await vm_ids() == existing_vm_ids
+    assert await zones() == existing_zones
 
-async def test_cli_cleanup(
-    qemu_commands: QemuCommands, sdn_commands: SdnCommands
-) -> None:
-    sandbox_env_config = ProxmoxSandboxEnvironmentConfig(
-        vms_config=(
-            VmConfig(
-                vm_source_config=VmSourceConfig(built_in="ubuntu24.04"),
-                name="test-cli-cleanup",
-            ),
-        )
-    )
-
-    existing_vms = await qemu_commands.list_vms()
-    existing_zones = await sdn_commands.list_sdn_zones()
-
-    # can happen if something else (e.g. an interrupted test run) left inspect VMs
-    # behind; abort rather than trying to work around it
-    existing_sweepable = [
-        vm for vm in existing_vms if QemuCommands.vm_is_inspect(vm=vm, template=False)
-    ]
-    assert not existing_sweepable, (
-        f"test_cli_cleanup: unexpected pre-existing VMs: {existing_sweepable}"
-    )
-
+    # Forget what this process tracked: the CLI has to find the VM by tag and
+    # the zone by name, as after a crash
+    reset_pool_state()
     await setup_sandbox("tcc", sandbox_env_config)
-
-    all_vms = await qemu_commands.list_vms()
-    all_zones = await sdn_commands.list_sdn_zones()
-
-    assert len(all_vms) == len(existing_vms) + 1
-    assert len(all_zones) == len(existing_zones) + 1
+    reset_pool_state()
+    assert len(await vm_ids()) == len(existing_vm_ids) + 1
+    assert len(await zones()) == len(existing_zones) + 1
 
     await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
 
-    post_cleanup_vms = await qemu_commands.list_vms()
-    post_cleanup_zones = await sdn_commands.list_sdn_zones()
-
-    assert set([vm["vmid"] for vm in post_cleanup_vms]) == set(
-        [vm["vmid"] for vm in existing_vms]
-    )
-
-    existing_zones.sort(key=lambda x: x["zone"])
-    post_cleanup_zones.sort(key=lambda x: x["zone"])
-    assert post_cleanup_zones == existing_zones
+    assert await vm_ids() == existing_vm_ids
+    assert await zones() == existing_zones

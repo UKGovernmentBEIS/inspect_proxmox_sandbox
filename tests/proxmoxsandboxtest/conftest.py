@@ -28,6 +28,8 @@ from proxmoxsandbox.schema import (
     _load_single_instance_from_env,
 )
 
+from .proxmox_sandbox_utils import reset_pool_state
+
 # Set PROXMOX_WINDOWS_TEMPLATE_TAG to run tests against a Windows VM.
 # The value should match the tag on an existing Proxmox VM template.
 # The template must be tagged with "inspect;<tag>" and have the QEMU
@@ -43,15 +45,12 @@ def reset_global_pool_state():
     class-level, so they persist for the whole session. initialize() is a no-op
     for a pool_id that already exists, so a 'default' pool left behind by an
     earlier test (e.g. an e2e test built from PROXMOX_HOST) would otherwise be
-    reused by a later test that meant to build its own config. Every pool
-    consumer is function-scoped and re-runs task_init, so resetting around each
-    test is safe and removes the need for per-test bookkeeping.
+    reused by a later test that meant to build its own config. Modules that
+    share a module-scoped sandbox shadow this fixture with a module-scoped one.
     """
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
+    reset_pool_state()
     yield
-    ProxmoxSandboxEnvironment.proxmox_pool.clear_pools()
-    InfraCommands._instances.clear()
+    reset_pool_state()
 
 
 @pytest.fixture
@@ -121,22 +120,42 @@ async def built_in_vm(infra_commands: InfraCommands) -> BuiltInVM:
     return infra_commands.built_in_vm
 
 
-@pytest.fixture(scope="function")
-async def ids_start() -> str:
+# Without replacement: module-scoped zones outlive the test that made them
+_ID_NUMBERS = iter(random.sample(range(100, 1000), 900))
+
+
+def _next_ids_start() -> str:
     # this could definitely be improved to go and check
     # proxmox and find a non-conflicting ID
-    ids_start = f"cts{random.randint(100, 999)}"
-    return ids_start
+    return f"cts{next(_ID_NUMBERS)}"
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
+async def ids_start() -> str:
+    return _next_ids_start()
+
+
+@pytest.fixture(scope="module")
+async def module_sdn_commands() -> SdnCommands:
+    """SdnCommands outside InfraCommands._instances, which the per-test reset clears."""
+    instance_config = _load_single_instance_from_env()
+    return SdnCommands(AsyncProxmoxAPI.from_instance_config(instance_config))
+
+
+@pytest.fixture(scope="module")
 async def auto_sdn_vnet_aliases(
-    ids_start: str, sdn_commands: SdnCommands
+    module_sdn_commands: SdnCommands,
 ) -> AsyncGenerator[VnetAliases, None]:
-    sdn_zone_id, vnet_aliases = await sdn_commands.create_sdn(ids_start, "auto")
+    """One "auto" SDN zone shared by every test in the module.
+
+    Any VM a test puts on the vnet must be destroyed before the module ends.
+    """
+    sdn_zone_id, vnet_aliases = await module_sdn_commands.create_sdn(
+        _next_ids_start(), "auto"
+    )
     assert sdn_zone_id is not None
     yield vnet_aliases
-    await sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
+    await module_sdn_commands.tear_down_sdn_zone_and_vnet(sdn_zone_id, ())
 
 
 def _get_os_params() -> list[str]:
@@ -168,15 +187,23 @@ def _get_os_config(os_name: str) -> ProxmoxSandboxEnvironmentConfig:
     raise ValueError(f"Unknown OS: {os_name}")
 
 
-@pytest.fixture(params=_get_os_params())
+@pytest.fixture(scope="module", params=_get_os_params())
 def sandbox_env_config_by_os(request) -> ProxmoxSandboxEnvironmentConfig:
     return _get_os_config(request.param)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="module")
 async def proxmox_sandbox_environment(
     sandbox_env_config_by_os: ProxmoxSandboxEnvironmentConfig,
 ) -> AsyncGenerator[ProxmoxSandboxEnvironment, None]:
+    """One default sandbox (per OS) shared by every test in the module.
+
+    Tests share the guest, so each must write to paths no other test uses.
+
+    A module using this must shadow `reset_global_pool_state` with a
+    module-scoped one, and must not call sample_init: its pre-clean would
+    sweep the shared VM.
+    """
     task_name = "from_conftest"
     await ProxmoxSandboxEnvironment.task_init(task_name=task_name, config=None)
     envs_dict = await ProxmoxSandboxEnvironment.sample_init(
@@ -189,9 +216,14 @@ async def proxmox_sandbox_environment(
 
     yield default_env
 
-    await ProxmoxSandboxEnvironment.sample_cleanup(
-        task_name=task_name,
-        config=sandbox_env_config_by_os,
-        environments=envs_dict,
-        interrupted=False,
-    )
+    try:
+        await ProxmoxSandboxEnvironment.sample_cleanup(
+            task_name=task_name,
+            config=sandbox_env_config_by_os,
+            environments=envs_dict,
+            interrupted=False,
+        )
+    finally:
+        # The module-scoped reset does not run between OS params, and a failed
+        # cleanup leaves the next param's sample_init waiting on an empty pool
+        reset_pool_state()
