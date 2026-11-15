@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fix: an EC2 Proxmox host launched with the instance metadata endpoint disabled no longer hangs at boot in `networking.service`. Without a datasource, cloud-init fell back to requesting DHCPv6 as well as DHCPv4, and `ifupdown` waited for a DHCPv6 lease the VPC does not offer. The provisioning script now disables cloud-init's network config and writes a DHCPv4-only entry for the physical NIC at each boot. The root-password fixup still needs the metadata endpoint. Rebuild existing hosts to pick this up.
+- Fix: an EC2 Proxmox host launched with the instance metadata endpoint disabled no longer hangs at boot in `networking.service`. Without a datasource, cloud-init fell back to requesting DHCPv6 as well as DHCPv4, and `ifupdown` waited for a DHCPv6 lease the VPC does not offer. The provisioning script now disables cloud-init's network config and boots with `net.ifnames=0`, so the management NIC is `eth0` on every instance type and has a static DHCPv4 entry. The root-password fixup still needs the metadata endpoint. Rebuild existing hosts to pick this up.
 
 ## 0.13.0
 

@@ -278,10 +278,7 @@ pvesh create /nodes/proxmox/network \
 grep -qxF 'source /etc/network/interfaces.d/*' /etc/network/interfaces.new \
     || sed -i '1s|^|source /etc/network/interfaces.d/*\n\n|' /etc/network/interfaces.new
 
-# NAT/FORWARD rules are applied at boot by proxmox-ami-fixup-nat.service below,
-# which resolves the management NIC name dynamically (it differs across EC2
-# instance families: enp39s0 on m8i, ens5 on m6i, etc., so it can't be baked
-# into the AMI).
+# NAT/FORWARD rules are applied at boot by proxmox-ami-fixup-nat.service below.
 echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/99-vm-nat.conf
 sysctl -w net.ipv4.ip_forward=1
 
@@ -377,7 +374,6 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_PASSWORD_UNIT
 
-# At boot, not baked in: the NIC name (enp39s0, ens5, ...) depends on instance family.
 cat > /usr/local/bin/proxmox-ami-fixup-nat.sh << 'FIXUP_NAT'
 #!/bin/bash
 set -euo pipefail
@@ -640,44 +636,17 @@ WantedBy=multi-user.target
 FIXUP_FIREWALL_UNIT
 
 # Without IMDS, cloud-init falls back to DHCPv4 and DHCPv6 on the NIC, and
-# ifupdown blocks boot waiting for a DHCPv6 lease the VPC doesn't offer.
-cat > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg <<'DISABLE_CI_NET'
-network: {config: disabled}
-DISABLE_CI_NET
-
-cat > /usr/local/bin/proxmox-ami-primary-nic.sh <<'PRIMARY_NIC'
-#!/bin/bash
-set -euo pipefail
-# Bridges and taps have no device link
-for dev in /sys/class/net/*; do
-    [ -e "$dev/device" ] || continue
-    NIC=$(basename "$dev")
-    break
-done
-[ -n "${NIC:-}" ] || { echo "ERROR: no physical NIC found" >&2; exit 1; }
-printf 'auto %s\niface %s inet dhcp\n' "$NIC" "$NIC" > /etc/network/interfaces.d/50-cloud-init
-PRIMARY_NIC
-chmod +x /usr/local/bin/proxmox-ami-primary-nic.sh
-
-cat > /etc/systemd/system/proxmox-ami-primary-nic.service <<'PRIMARY_NIC_UNIT'
-[Unit]
-Description=Write the DHCPv4 config for the management NIC
-DefaultDependencies=no
-After=local-fs.target ifupdown2-pre.service systemd-udev-settle.service cloud-init-local.service
-Before=networking.service network-pre.target
-Wants=network-pre.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/proxmox-ami-primary-nic.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=networking.service
-PRIMARY_NIC_UNIT
+# ifupdown blocks boot waiting for a DHCPv6 lease the VPC doesn't offer. So
+# cloud-init stays out of networking, and the NIC is eth0 on every instance type.
+echo 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX net.ifnames=0"' > /etc/default/grub.d/99-net-ifnames.cfg
+update-grub
+echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+rm -f /etc/netplan/50-cloud-init.yaml
+# With no netplan config, networkd manages no links and this times out after 120s
+systemctl disable systemd-networkd-wait-online.service
+printf 'auto eth0\niface eth0 inet dhcp\n' > /etc/network/interfaces.d/50-cloud-init
 
 systemctl daemon-reload
-systemctl enable proxmox-ami-primary-nic.service
 systemctl enable proxmox-ami-fixup-hostname.service
 systemctl enable proxmox-ami-fixup-certs.service
 systemctl enable proxmox-ami-fixup-nat.service
