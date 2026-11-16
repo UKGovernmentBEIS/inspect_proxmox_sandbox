@@ -2,8 +2,7 @@
 
 ## Unreleased
 
-- Fix: an EC2 Proxmox host launched with the instance metadata endpoint disabled no longer hangs at boot waiting for DHCPv6. Rebuild the AMI to pick this up.
-- Fix: EC2 Proxmox hosts launched with instance metadata disabled no longer share the AMI build instance's root password. Rebuild the AMI to pick this up.
+- Fix: an EC2 Proxmox host launched with instance metadata disabled no longer hangs at boot waiting for DHCPv6, and no longer keeps the AMI build instance's root password. Rebuild the AMI to pick this up.
 
 ## 0.13.0
 
