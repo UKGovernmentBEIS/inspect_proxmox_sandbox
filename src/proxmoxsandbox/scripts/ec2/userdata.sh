@@ -341,10 +341,16 @@ FIXUP_CERTS_UNIT
 
 # Keyed on the EC2 instance-id, so every launch from an AMI gets its own password rather
 # than sharing the one set during the build run.
+# DMI, not IMDS: hosts may launch with the metadata endpoint disabled. Nitro puts the
+# instance-id in board_asset_tag.
 cat > /usr/local/bin/proxmox-ami-fixup-password.sh << 'FIXUP_PASSWORD'
 #!/bin/bash
 set -euo pipefail
-CURRENT_ID=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/instance-id)
+CURRENT_ID=$(cat /sys/devices/virtual/dmi/id/board_asset_tag)
+if [[ "$CURRENT_ID" != i-* ]]; then
+    echo "ERROR: no EC2 instance-id in DMI board_asset_tag (got '$CURRENT_ID'); not a Nitro instance?" >&2
+    exit 1
+fi
 SAVED_ID=$(cat /root/.last-instance-id 2>/dev/null || true)
 if [ "$CURRENT_ID" = "$SAVED_ID" ] && [ -s /root/root-password ]; then
     exit 0
@@ -361,8 +367,6 @@ chmod +x /usr/local/bin/proxmox-ami-fixup-password.sh
 cat > /etc/systemd/system/proxmox-ami-fixup-password.service << 'FIXUP_PASSWORD_UNIT'
 [Unit]
 Description=Regenerate root password when EC2 instance-id changes
-After=network-online.target
-Wants=network-online.target
 Before=pveproxy.service
 
 [Service]
