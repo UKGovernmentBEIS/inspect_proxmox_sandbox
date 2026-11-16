@@ -641,6 +641,10 @@ FIXUP_FIREWALL_UNIT
 echo 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX net.ifnames=0"' > /etc/default/grub.d/99-net-ifnames.cfg
 update-grub
 echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+# The Ec2 datasource enables cloud-init's hotplug hook, which ignores
+# config: disabled and rewrites 50-cloud-init when an ENI is attached.
+echo 'updates: {network: {when: [boot-new-instance]}}' > /etc/cloud/cloud.cfg.d/99-disable-network-hotplug.cfg
+rm -f /etc/udev/rules.d/90-cloud-init-hook-hotplug.rules
 rm -f /etc/netplan/50-cloud-init.yaml
 # With no netplan config, networkd manages no links and this times out after 120s
 systemctl disable systemd-networkd-wait-online.service
