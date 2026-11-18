@@ -149,6 +149,10 @@ Both provisioning scripts embed the same `patch-pve-qemu.sh`, which builds stock
 `+aisiN` in `PATCHED_VERSION`, bump the version (see "Versioning") and the host
 contract `C=aisiN`, and build a host to check the patches apply.
 
+The `+aisiN` in `PATCHED_VERSION` and the host contract `C=aisiN` are one number:
+raise both together, in both provisioning scripts, whichever of them the change
+is about.
+
 ## Design Notes
 
 All communication with Proxmox is via the AsyncProxmoxAPI class.

@@ -124,7 +124,7 @@ export DEBIAN_FRONTEND=noninteractive
 STOCK_VERSION="11.1.3-1"
 PVE_QEMU_BASE_COMMIT="ae7733cb6e3abe422144906f92a3b00387402672"
 QEMU_FIXES="d7f16bad8f0263ca01c1da61d5d69ee79fca837f a2fbf1785b7a464d61c0f60c4ad0a86d82925e5d 1332990194b53f5ca6a4fe7ac93cf4ad6eecfa9c 2713717148f538577e5f2a5d4d9dc272f7a8dc4b 795af987ce4cbac260582189cff2394a27eff7cb 5bdc12fed592a1673f64ca1e8243046632f83a26"
-PATCHED_VERSION="${STOCK_VERSION}+aisi4"
+PATCHED_VERSION="${STOCK_VERSION}+aisi5"
 BUILD_DIR="/root/pve-qemu-build"
 
 # Skip only on an exact match. A version comparison would skip whenever stock
@@ -246,7 +246,7 @@ STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
 cat > "$STAMP" << 'STAMP_CONTRACT'
 #!/bin/bash
 set -euo pipefail
-C=aisi4
+C=aisi5
 F=/usr/share/perl5/PVE/pvecfg.pm
 before=$(md5sum < "$F")
 sed -i -E "s/\.aisi[0-9]+//g
