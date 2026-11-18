@@ -30,6 +30,16 @@ def test_launch_contains_expected_imds_settings() -> None:
     ) in launch
 
 
+def test_password_fixup_reads_instance_id_without_imds() -> None:
+    # Hosts can be launched with the metadata endpoint disabled.
+    userdata = (EC2_SCRIPTS / "userdata.sh").read_text()
+    script = _extract_heredoc(userdata, "FIXUP_PASSWORD")
+    unit = _extract_heredoc(userdata, "FIXUP_PASSWORD_UNIT")
+
+    assert "CURRENT_ID=$(cat /sys/devices/virtual/dmi/id/board_asset_tag)" in script
+    assert "Before=pveproxy.service amazon-ssm-agent.service" in unit
+
+
 @pytest.mark.parametrize(
     "provisioner",
     [

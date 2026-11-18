@@ -124,7 +124,7 @@ export DEBIAN_FRONTEND=noninteractive
 STOCK_VERSION="11.1.3-1"
 PVE_QEMU_BASE_COMMIT="ae7733cb6e3abe422144906f92a3b00387402672"
 QEMU_FIXES="d7f16bad8f0263ca01c1da61d5d69ee79fca837f a2fbf1785b7a464d61c0f60c4ad0a86d82925e5d 1332990194b53f5ca6a4fe7ac93cf4ad6eecfa9c 2713717148f538577e5f2a5d4d9dc272f7a8dc4b 795af987ce4cbac260582189cff2394a27eff7cb 5bdc12fed592a1673f64ca1e8243046632f83a26"
-PATCHED_VERSION="${STOCK_VERSION}+aisi4"
+PATCHED_VERSION="${STOCK_VERSION}+aisi5"
 BUILD_DIR="/root/pve-qemu-build"
 
 # Skip only on an exact match. A version comparison would skip whenever stock
@@ -246,7 +246,7 @@ STAMP=/usr/local/bin/inspect-proxmox-stamp-contract.sh
 cat > "$STAMP" << 'STAMP_CONTRACT'
 #!/bin/bash
 set -euo pipefail
-C=aisi4
+C=aisi5
 F=/usr/share/perl5/PVE/pvecfg.pm
 before=$(md5sum < "$F")
 sed -i -E "s/\.aisi[0-9]+//g
@@ -341,10 +341,15 @@ FIXUP_CERTS_UNIT
 
 # Keyed on the EC2 instance-id, so every launch from an AMI gets its own password rather
 # than sharing the one set during the build run.
+# From DMI, not IMDS, which may be disabled
 cat > /usr/local/bin/proxmox-ami-fixup-password.sh << 'FIXUP_PASSWORD'
 #!/bin/bash
 set -euo pipefail
-CURRENT_ID=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/instance-id)
+CURRENT_ID=$(cat /sys/devices/virtual/dmi/id/board_asset_tag)
+if [[ "$CURRENT_ID" != i-* ]]; then
+    echo "ERROR: no EC2 instance-id in DMI board_asset_tag (got '$CURRENT_ID'); not a Nitro instance?" >&2
+    exit 1
+fi
 SAVED_ID=$(cat /root/.last-instance-id 2>/dev/null || true)
 if [ "$CURRENT_ID" = "$SAVED_ID" ] && [ -s /root/root-password ]; then
     exit 0
@@ -361,9 +366,8 @@ chmod +x /usr/local/bin/proxmox-ami-fixup-password.sh
 cat > /etc/systemd/system/proxmox-ami-fixup-password.service << 'FIXUP_PASSWORD_UNIT'
 [Unit]
 Description=Regenerate root password when EC2 instance-id changes
-After=network-online.target
-Wants=network-online.target
-Before=pveproxy.service
+# Clients read /root/root-password over SSM as soon as the agent is up
+Before=pveproxy.service amazon-ssm-agent.service
 
 [Service]
 Type=oneshot
