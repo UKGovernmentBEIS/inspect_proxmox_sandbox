@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `check-host-isolation.sh` can check a host launched with IMDS disabled or managed without SSM: `--region` supplies the region, `--no-endpoints` skips the interface endpoint checks, and `--allow-inbound` expects an inbound ACCEPT added on top of the AMI's.
+
 ## 0.13.0
 
 - **Breaking:** guest VMs no longer get nested virtualisation by default. Evals that need it must set `VmConfig(nested_virt=True)`. Requires Proxmox VE 9.1 or later (qemu-server 9.0.27).

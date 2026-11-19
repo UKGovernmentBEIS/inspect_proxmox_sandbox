@@ -11,6 +11,8 @@
 # the configuration worth checking; an ordinary host fails these by design.
 #
 # Usage: check-host-isolation.sh [--unreachable IP[:PORT]] ... [--no-sweep]
+#                                [--region REGION | --no-endpoints]
+#                                [--allow-inbound PROTO/PORT[@IFACE]] ...
 #   --unreachable  an address off this VPC that must stay dead: a host across a peering link,
 #                  a transit gateway or on-prem. Repeats; port defaults to 443. Also passed on
 #                  to the printed guest command line. Pick a port that is listening: a closed
@@ -18,10 +20,22 @@
 #                  machine you administer the host from is usually a good target, e.g. its
 #                  private IP on port 22 if it runs sshd.
 #   --no-sweep     skip the TCP/443 sweep of the VPC, which takes ~4-5 minutes per /16.
+#   --region       the AWS region, for a host launched with IMDS disabled, which cannot read
+#                  it. The interface endpoint names are built from it.
+#   --no-endpoints  the host is not managed over SSM, so its VPC has no interface endpoints:
+#                  skip the region and endpoint checks. On such a host the endpoint names
+#                  do not resolve, and each lookup takes minutes to give up.
+#   --allow-inbound  an inbound ACCEPT the node firewall carries on top of the AMI's, for a
+#                  service you added to the host: tcp/2222, say. Repeats. IFACE defaults to
+#                  the management NIC; a guest can reach a rule bound anywhere else.
 # shellcheck disable=SC2329  # the check helpers are invoked indirectly, via check
 set -uo pipefail
 
-usage() { echo "usage: $0 [--unreachable IP[:PORT]] ... [--no-sweep]" >&2; exit 2; }
+usage() {
+    echo "usage: $0 [--unreachable IP[:PORT]] ... [--no-sweep] [--region REGION | --no-endpoints]" \
+        "[--allow-inbound PROTO/PORT[@IFACE]] ..." >&2
+    exit 2
+}
 # Literals only: the DNS firewall NXDOMAINs every name, so a name would pass without a packet
 # being sent.
 split_target() { # IP[:PORT] -> host, port
@@ -37,6 +51,9 @@ split_target() { # IP[:PORT] -> host, port
 }
 unreachable=()
 sweep=1
+region_arg=""
+endpoints=1
+allow_inbound=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --unreachable)
@@ -46,9 +63,25 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         --no-sweep) sweep=0; shift ;;
+        --region)
+            [ $# -ge 2 ] || usage
+            [[ $2 =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]] || { echo "--region takes a region name such as eu-west-2, not $2" >&2; exit 2; }
+            region_arg=$2
+            shift 2
+            ;;
+        --no-endpoints) endpoints=0; shift ;;
+        --allow-inbound)
+            [ $# -ge 2 ] || usage
+            [[ $2 =~ ^[a-z0-9]+/[0-9]+(@[A-Za-z0-9_.-]+)?$ ]] ||
+                { echo "--allow-inbound takes PROTO/PORT[@IFACE], such as tcp/2222, not $2" >&2; exit 2; }
+            allow_inbound+=("$2")
+            shift 2
+            ;;
         *) usage ;;
     esac
 done
+
+[ "$endpoints" = 1 ] || [ -z "$region_arg" ] || { echo "--region and --no-endpoints cannot be combined" >&2; exit 2; }
 
 checks=0
 failures=0
@@ -267,10 +300,16 @@ check "node firewall enabled" fw_enabled "/etc/pve/nodes/$node/host.fw"
 # port-53 ACCEPTs stay under lockdown; the lockdown's iptables INPUT REJECT (checked below)
 # sits ahead of the node firewall and closes the port.
 node_accepts=("tcp/8006@$nic" "tcp/22@$nic" "udp/67@" "udp/53@" "tcp/53@")
+accepts_label="exactly the AMI's"
+for accept in "${allow_inbound[@]}"; do
+    case "$accept" in *@*) ;; *) accept="$accept@$nic" ;; esac
+    node_accepts+=("$accept")
+    accepts_label="the AMI's plus $(oneline "${allow_inbound[*]}")"
+done
 # Skipped rather than run on an unreadable fetch, which would fail for a reason that has
 # nothing to do with the rules.
 if [ "$node_rules_rc" = 0 ]; then
-    check "node inbound ACCEPTs are exactly the AMI's, mgmt NIC $nic" \
+    check "node inbound ACCEPTs are $accepts_label, mgmt NIC $nic" \
         accepts_are "$node_rules" "${node_accepts[@]}"
 else
     skip "node inbound ACCEPT checks" "node firewall rules unreadable"
@@ -303,11 +342,21 @@ check "guest DNS rejected rather than dropped: INPUT tcp/53 -j REJECT" \
 echo
 echo "# AWS-level controls, as seen from the host"
 endpoint_ok() { is_private "$1" && connects "https://$2/"; }
-region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
-check "region from IMDS" test -n "$region"
+if [ "$endpoints" = 0 ]; then
+    region=""
+    skip "region from IMDS" "--no-endpoints"
+elif [ -n "$region_arg" ]; then
+    region=$region_arg
+    skip "region from IMDS" "--region $region"
+else
+    region=$(/usr/local/bin/call-ec2-hypervisor latest/meta-data/placement/region 2>/dev/null)
+    check "region from IMDS" test -n "$region"
+fi
 # Every address of every endpoint, one per AZ, so the guest probes them all.
 endpoint_addrs=""
-if [ -z "$region" ]; then
+if [ "$endpoints" = 0 ]; then
+    skip "interface endpoint checks" "--no-endpoints"
+elif [ -z "$region" ]; then
     skip "interface endpoint checks" "no region, so the endpoint names cannot be built"
 else
     # The host keeps these three — SSM is the operator's way in; a guest must not be able
