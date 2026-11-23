@@ -278,10 +278,7 @@ pvesh create /nodes/proxmox/network \
 grep -qxF 'source /etc/network/interfaces.d/*' /etc/network/interfaces.new \
     || sed -i '1s|^|source /etc/network/interfaces.d/*\n\n|' /etc/network/interfaces.new
 
-# NAT/FORWARD rules are applied at boot by proxmox-ami-fixup-nat.service below,
-# which resolves the management NIC name dynamically (it differs across EC2
-# instance families: enp39s0 on m8i, ens5 on m6i, etc., so it can't be baked
-# into the AMI).
+# NAT/FORWARD rules are applied at boot by proxmox-ami-fixup-nat.service below.
 echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/99-vm-nat.conf
 sysctl -w net.ipv4.ip_forward=1
 
@@ -377,7 +374,6 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIXUP_PASSWORD_UNIT
 
-# At boot, not baked in: the NIC name (enp39s0, ens5, ...) depends on instance family.
 cat > /usr/local/bin/proxmox-ami-fixup-nat.sh << 'FIXUP_NAT'
 #!/bin/bash
 set -euo pipefail
@@ -638,6 +634,21 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 FIXUP_FIREWALL_UNIT
+
+# Without IMDS, cloud-init falls back to DHCPv4 and DHCPv6 on the NIC, and
+# ifupdown blocks boot waiting for a DHCPv6 lease the VPC doesn't offer. So
+# cloud-init stays out of networking, and the NIC is eth0 on every instance type.
+echo 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX net.ifnames=0"' > /etc/default/grub.d/99-net-ifnames.cfg
+update-grub
+echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+# The Ec2 datasource enables cloud-init's hotplug hook, which ignores
+# config: disabled and rewrites 50-cloud-init when an ENI is attached.
+echo 'updates: {network: {when: [boot-new-instance]}}' > /etc/cloud/cloud.cfg.d/99-disable-network-hotplug.cfg
+rm -f /etc/udev/rules.d/90-cloud-init-hook-hotplug.rules
+rm -f /etc/netplan/50-cloud-init.yaml
+# With no netplan config, networkd manages no links and this times out after 120s
+systemctl disable systemd-networkd-wait-online.service
+printf 'auto eth0\niface eth0 inet dhcp\n' > /etc/network/interfaces.d/50-cloud-init
 
 systemctl daemon-reload
 systemctl enable proxmox-ami-fixup-hostname.service

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: an EC2 Proxmox host launched with the instance metadata endpoint disabled no longer hangs at boot waiting for DHCPv6. Its root password is still not regenerated in that case. Rebuild the AMI to pick this up.
+
 ## 0.13.0
 
 - **Breaking:** guest VMs no longer get nested virtualisation by default. Evals that need it must set `VmConfig(nested_virt=True)`. Requires Proxmox VE 9.1 or later (qemu-server 9.0.27).
