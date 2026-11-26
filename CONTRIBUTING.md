@@ -60,6 +60,25 @@ uv run pytest
 
 The tests require your Proxmox node to have at least 3 vCPUs available.
 
+### Slow tests and built-in template rebuilds
+
+`test_built_in_vm.py` deletes the `ubuntu24.04` and `debian13` templates (and
+their source images) and rebuilds them concurrently from the upstream cloud
+images; the rest of the suite then uses the rebuilt templates.
+
+Tests marked `slow` are skipped by default. They are the ones dominated by the
+Kali built-in: installing `kali-linux-everything` takes 25+ minutes, and the
+resulting 64 GiB guest is the slowest to clone and boot. Run them when you
+touch the built-in image code or before a release:
+
+```bash
+uv run pytest --runslow
+```
+
+With `--runslow`, `test_built_in_vm.py` also rebuilds the Kali template, and
+`test_proxmox_sandbox_environment_e2e.py::test_built_in_kali` boots a Kali
+sandbox.
+
 ### Windows VM Tests
 
 By default, tests run against Linux VMs using the built-in `ubuntu24.04` image.

@@ -57,7 +57,7 @@ Inspect calls these methods in order:
 VMs with `is_sandbox=True` **must** have `qemu-guest-agent` installed and running. Without it, command execution fails silently or with opaque errors.
 
 ### VM ID Collisions
-Proxmox assigns VM IDs (integers). The code finds available ranges via `find_proxmox_ids_start()`, but rapid creation/deletion can cause races.
+`/cluster/nextid` returns the lowest free VM ID and reserves nothing. A sample creates its VMs one at a time; built-in template builds run concurrently and retry with the next ID (`BuiltInVM._create_with_fresh_vm_id`). SDN zone IDs come from `find_proxmox_ids_start()` and are not retried.
 
 ### Pydantic Frozen Models
 All config models use `frozen=True` — immutable after creation. You can't modify configs in place; create new instances instead.

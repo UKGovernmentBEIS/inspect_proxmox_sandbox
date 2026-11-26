@@ -45,7 +45,6 @@ def _make_infra_mock(**overrides):
     infra.qemu_commands = MagicMock()
     infra.qemu_commands.list_vms = AsyncMock(return_value=[])
     infra.built_in_vm = AsyncMock()
-    infra.built_in_vm.ensure_exists = AsyncMock()
     infra.async_proxmox = AsyncMock()
     infra.node = "pve1"
     infra.find_proxmox_ids_start = AsyncMock(return_value="test123")
