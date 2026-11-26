@@ -804,18 +804,38 @@ class ProxmoxSandboxEnvironment(SandboxEnvironment):
                     stderr=exec_status.err_data,
                 )
             else:
-                # TODO: consider reading all files at once?
-                stdout = await self._read_exec_output(f"{tmp_start}script.stdout")
-                stderr = await self._read_exec_output(f"{tmp_start}script.stderr")
+                # Concurrently: QGA round trips dominate exec latency
+                reads = (
+                    asyncio.create_task(
+                        self._read_exec_output(f"{tmp_start}script.stdout")
+                    ),
+                    asyncio.create_task(
+                        self._read_exec_output(f"{tmp_start}script.stderr")
+                    ),
+                    asyncio.create_task(self._read_return_code(tmp_start)),
+                )
+                written_returncode: int | None
                 try:
-                    returncode = await self._read_return_code(tmp_start)
+                    # In this order, so a stdout failure is reported first and at once
+                    stdout = await reads[0]
+                    stderr = await reads[1]
+                    try:
+                        written_returncode = await reads[2]
+                    except ReturnCodeNotWritten:
+                        written_returncode = None
+                finally:
+                    # Left pending, a read would keep retrying against the agent
+                    for read in reads:
+                        read.cancel()
+                    await asyncio.gather(*reads, return_exceptions=True)
+                if written_returncode is not None:
                     exec_response = ExecResult(
-                        success=returncode == 0,
-                        returncode=returncode,
+                        success=written_returncode == 0,
+                        returncode=written_returncode,
                         stdout=stdout,
                         stderr=stderr,
                     )
-                except ReturnCodeNotWritten:
+                else:
                     # exec exited but the wrapper never wrote its returncode file:
                     # it was killed before completion.
                     signal_num = exec_status.signal
