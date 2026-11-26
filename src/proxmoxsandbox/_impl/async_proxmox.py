@@ -22,6 +22,10 @@ from proxmoxsandbox.schema import ProxmoxInstanceConfig
 
 ProxmoxJsonDataType = Dict[str, Union[str, List[str], int, bool, None]]
 
+# tenacity's multiplier sets the first gap; min is only a floor
+POLL_MAX_WAIT = 2.0
+POLL_WAIT = tenacity.wait_exponential(multiplier=0.1, max=POLL_MAX_WAIT, exp_base=1.3)
+
 # Error text is matched on short stable substrings and quoted in logs and
 # exceptions; cap both the HTTP reason and body independently.
 _MAX_ERROR_TEXT_CHARS = 8192
@@ -372,7 +376,7 @@ class AsyncProxmoxAPI:
         node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
 
         @tenacity.retry(
-            wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+            wait=POLL_WAIT,
             stop=tenacity.stop_after_delay(1200),
             retry=tenacity.retry_if_result(lambda x: x is False),
         )

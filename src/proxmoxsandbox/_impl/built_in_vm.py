@@ -16,7 +16,7 @@ import tenacity
 from inspect_ai.util import trace_action
 
 from proxmoxsandbox._impl.agent_commands import AgentCommands
-from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
+from proxmoxsandbox._impl.async_proxmox import POLL_WAIT, AsyncProxmoxAPI
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, proxmox_cpu
 from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
@@ -583,8 +583,8 @@ runcmd:
             )
 
             @tenacity.retry(
-                # Uncapped, the backoff reaches tens of minutes per poll inside an hour
-                wait=tenacity.wait_exponential(min=0.1, max=30, exp_base=1.3),
+                # Uncapped, this backoff reaches gaps of tens of minutes
+                wait=tenacity.wait_exponential(multiplier=0.1, max=5, exp_base=1.3),
                 stop=tenacity.stop_after_delay(cloud_init_timeout),
                 retry=tenacity.retry_if_result(lambda x: x is False),
             )
@@ -618,13 +618,16 @@ runcmd:
                 status_for_wait="stopped",
             )
 
-            await self.async_proxmox.request(
+            upid = await self.async_proxmox.request(
                 "POST",
                 f"/nodes/{self.node}/qemu/{next_available_vm_id}/template",
             )
+            # template=1 is set before the disks are renamed to base-*; a clone in
+            # between fails with "Linked clone feature is not supported"
+            await self.async_proxmox.wait_for_task(upid=upid)
 
             @tenacity.retry(
-                wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
+                wait=POLL_WAIT,
                 stop=tenacity.stop_after_delay(VM_TIMEOUT),
                 retry=tenacity.retry_if_result(lambda x: x is False),
             )

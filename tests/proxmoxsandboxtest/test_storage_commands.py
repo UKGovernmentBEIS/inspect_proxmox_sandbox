@@ -36,6 +36,9 @@ async def test_upload_size_check_different(
 
         assert test_iso_uploaded["size"] == test_iso_size
 
+        # Proxmox reports ctime in whole seconds
+        await asyncio.sleep(1.1)
+
         await storage_commands.upload_file_to_storage(
             file=temp_iso,
             content_type="iso",
@@ -105,6 +108,9 @@ async def test_upload_no_size_check(
         )
 
         test_iso_uploaded = await find_uploaded_iso(storage_commands, test_iso_name)
+
+        # Proxmox reports ctime in whole seconds
+        await asyncio.sleep(1.1)
 
         await storage_commands.upload_file_to_storage(
             file=temp_iso,
