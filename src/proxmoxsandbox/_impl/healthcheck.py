@@ -14,7 +14,10 @@ from typing import Awaitable, Callable, Literal
 import httpx
 from inspect_ai.util import ExecResult, OutputLimitExceededError
 
-from proxmoxsandbox._impl.agent_commands import is_transient_qga_error
+from proxmoxsandbox._impl.agent_commands import (
+    GuestExecNotStartedError,
+    is_transient_qga_error,
+)
 from proxmoxsandbox.schema import HealthCheck
 
 logger = getLogger(__name__)
@@ -124,6 +127,13 @@ class HealthCheckRunner:
         """Run the check once and classify what happened."""
         try:
             result = await self.execute(self.spec)
+        except GuestExecNotStartedError as e:
+            cause = e.__cause__
+            if isinstance(cause, TimeoutError):
+                return Probe("unhealthy", f"timed out after {self.spec.timeout}s")
+            if isinstance(cause, httpx.HTTPStatusError):
+                return Probe("unreachable", f"HTTP {cause.response.status_code}")
+            return Probe("unreachable", type(cause).__name__)
         except httpx.TransportError as e:
             return Probe("unreachable", type(e).__name__)
         except httpx.HTTPStatusError as e:

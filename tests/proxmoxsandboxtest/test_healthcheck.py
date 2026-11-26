@@ -11,6 +11,7 @@ import httpx
 import pytest
 from inspect_ai.util import ExecResult, OutputLimitExceededError
 
+from proxmoxsandbox._impl.agent_commands import GuestExecNotStartedError
 from proxmoxsandbox._impl.healthcheck import (
     _TRANSPORT_ERROR_LIMIT,
     HealthCheckFailed,
@@ -141,9 +142,23 @@ async def test_slow_probe_is_judged_by_when_it_started():
     assert calls == [1000.0, 1026.0]
 
 
-async def test_timeout_counts_as_failure():
+def _not_started(cause: Exception) -> GuestExecNotStartedError:
+    error = GuestExecNotStartedError()
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("Command timed out"),
+        _not_started(TimeoutError("waiting allowance")),
+    ],
+    ids=["timeout", "not-started-timeout"],
+)
+async def test_timeout_counts_as_failure(error):
     clock = FakeClock()
-    execute, calls = _scripted(TimeoutError("Command timed out"))
+    execute, calls = _scripted(error)
     spec = HealthCheck(test=("x",), interval=1, retries=2)
     with pytest.raises(HealthCheckFailed, match="timed out"):
         await _runner(spec, execute, clock).run()
@@ -212,7 +227,15 @@ async def test_non_transient_agent_errors_count_as_failures(error):
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("error", [_transport_error(), _http_500()])
+@pytest.mark.parametrize(
+    "error",
+    [
+        _transport_error(),
+        _http_500(),
+        _not_started(_transport_error()),
+        _not_started(_http_500()),
+    ],
+)
 async def test_transport_errors_are_bounded(error):
     """A dead agent costs _TRANSPORT_ERROR_LIMIT probes and `interval` sleeps only."""
     clock = FakeClock()

@@ -26,7 +26,7 @@ from .guest_agent_fixture import (
 )
 def test_command_stops_waiting_for_a_stalled_guest_at_every_stage(stage):
     observed = isolated(Scenario(operation="exec", fault=Fault(stage=stage)))
-    assert observed.kind == "timeout"
+    assert observed.kind == ("not_started" if stage == "upload" else "timeout")
     assert observed.cancelled is True
 
 
@@ -72,7 +72,7 @@ def test_large_input_upload_and_its_cleanup_cannot_restart_the_command_budget():
             ],
         )
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "not_started"
 
 
 def test_time_spent_on_earlier_upload_chunks_counts_toward_the_deadline():
@@ -87,7 +87,7 @@ def test_time_spent_on_earlier_upload_chunks_counts_toward_the_deadline():
             ],
         )
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "not_started"
     assert observed.launched is False
 
 
@@ -105,7 +105,7 @@ def test_untimed_command_stops_waiting_even_when_upload_keeps_progressing(monkey
             ],
         )
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "not_started"
     assert observed.launched is False
 
 
@@ -119,7 +119,7 @@ def test_iso_cleanup_cannot_hold_the_command_open_indefinitely(stage):
             faults=[Fault(stage="status"), Fault(stage=stage)],
         )
     )
-    assert observed.kind == "timeout"
+    assert observed.kind == "not_started"
 
 
 async def test_cancelled_iso_transfer_is_not_reused_by_the_next_write():
