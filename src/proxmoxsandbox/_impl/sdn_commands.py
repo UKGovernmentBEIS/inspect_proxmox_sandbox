@@ -365,9 +365,8 @@ class SdnCommands(abc.ABC):
             # pvesh, which waits for it, so waiting on this UPID covers the
             # reload. But a failed per-node reload is only reported via Perl's
             # `warn` (printed to the task log, not counted as a Proxmox task
-            # warning), so this task's exitstatus is still OK. Currently we
-            # don't check exitstatus anyway, but it seemed worth recording this
-            # oddity for when we do. See
+            # warning), so this task's exitstatus is still OK and
+            # wait_for_task does not raise for it. See
             # https://github.com/proxmox/pve-network/blob/ce388c5eec2376576d62a6be708439a64cf7fb62/src/PVE/API2/Network/SDN.pm#L338-L353
             upid = await self.async_proxmox.request("PUT", "/cluster/sdn")
             await self.async_proxmox.wait_for_task(upid=upid)

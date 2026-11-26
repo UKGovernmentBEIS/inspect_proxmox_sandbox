@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import re
 import tarfile
 from logging import getLogger
@@ -12,6 +13,7 @@ from proxmoxsandbox._impl.async_proxmox import (
     POLL_WAIT,
     AsyncProxmoxAPI,
     ProxmoxJsonDataType,
+    ProxmoxTaskError,
 )
 from proxmoxsandbox._impl.sdn_commands import VnetAliases
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
@@ -31,6 +33,8 @@ def proxmox_cpu(cpu: str | None, nested_virt: bool) -> str:
 # Budgets for the two VM readiness preconditions, in seconds.
 _RUNNING_TIMEOUT = 1200.0
 _AGENT_TIMEOUT = 300.0
+# pvedaemon could not fork the task
+_WORKER_START_ATTEMPTS = 4
 
 
 def vm_label(*, name: str, vm_id: int) -> str:
@@ -194,10 +198,15 @@ class QemuCommands(abc.ABC):
     async def destroy_vm(self, *, vm_id: int, name: str) -> None:
         label = vm_label(name=name, vm_id=vm_id)
         with trace_action(self.logger, self.TRACE_NAME, f"stop VM {label}"):
-            upid = await self.async_proxmox.request(
+            upid = await self._request_task(
                 "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/stop"
             )
-            await self.async_proxmox.wait_for_task(upid=upid)
+            # A failed stop (e.g. the VM does not exist) is left for the poll and the
+            # delete to report: callers match on their errors
+            try:
+                await self.async_proxmox.wait_for_task(upid=upid)
+            except ProxmoxTaskError as e:
+                self.logger.debug(f"stop task for VM {label} failed: {e}")
 
         # Only retry "still running". Stopping a missing VM still returns a
         # UPID, so a 500 here would otherwise be retried for 300s and come out
@@ -218,26 +227,10 @@ class QemuCommands(abc.ABC):
             await is_not_running()
 
         with trace_action(self.logger, self.TRACE_NAME, f"delete VM {label}"):
-            upid = await self.async_proxmox.request(
+            upid = await self._request_task(
                 "DELETE", f"/nodes/{self.node}/qemu/{vm_id}"
             )
             await self.async_proxmox.wait_for_task(upid=upid)
-
-        @tenacity.retry(
-            wait=POLL_WAIT,
-            stop=tenacity.stop_after_delay(30),
-        )
-        async def vm_deleted() -> None:
-            current = await self.async_proxmox.request(
-                method="GET",
-                path=f"/nodes/{self.node}/qemu/{vm_id}/status/current",
-                raise_errors=False,
-            )
-            if "vmid" in current:
-                raise ValueError(f"vm {label} still exists")
-
-        with trace_action(self.logger, self.TRACE_NAME, f"await VM {label} deleted"):
-            await vm_deleted()
 
     async def list_vms(self):
         with trace_action(self.logger, self.TRACE_NAME, "list all VMs"):
@@ -263,15 +256,38 @@ class QemuCommands(abc.ABC):
         # PVE returns this as a JSON string; tracking and list_vms use ints
         return int(await self.async_proxmox.request("GET", "/cluster/nextid"))
 
-    async def start(
-        self,
-        vm_id: int,
-    ) -> None:
-        upid = await self.async_proxmox.request(
-            "POST",
-            f"/nodes/{self.node}/qemu/{vm_id}/status/start",
+    async def start(self, vm_id: int) -> None:
+        upid = await self._request_task(
+            "POST", f"/nodes/{self.node}/qemu/{vm_id}/status/start"
         )
         await self.async_proxmox.wait_for_task(upid=upid)
+
+    @staticmethod
+    def _is_worker_start_failure(exc: Exception) -> bool:
+        # The task was never forked, so the request can be sent again
+        return (
+            isinstance(exc, httpx.HTTPStatusError)
+            and exc.response.status_code == 500
+            and "start worker failed" in exc.response.text
+        )
+
+    async def _request_task(self, method: str, path: str) -> str:
+        """Send a request that forks a task; retry if pvedaemon could not fork it."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await self.async_proxmox.request(method, path)
+            except httpx.HTTPStatusError as e:
+                if attempt == _WORKER_START_ATTEMPTS or not (
+                    self._is_worker_start_failure(e)
+                ):
+                    raise
+                self.logger.warning(
+                    f"{method} {path}: Proxmox could not start a worker; "
+                    f"retrying ({attempt}/{_WORKER_START_ATTEMPTS})"
+                )
+                await asyncio.sleep(attempt)
 
     def _convert_sdn_vnet_aliases(
         self, sdn_vnet_aliases: VnetAliases

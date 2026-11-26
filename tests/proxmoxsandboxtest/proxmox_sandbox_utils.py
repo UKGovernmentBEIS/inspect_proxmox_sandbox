@@ -3,6 +3,7 @@ import logging
 import re
 from typing import Dict, Tuple
 
+import httpx
 from inspect_ai.util import SandboxEnvironment
 
 from proxmoxsandbox._impl.async_proxmox import AsyncProxmoxAPI
@@ -55,3 +56,11 @@ async def setup_sandbox(
         metadata={},
     )
     return task_name, envs_dict
+
+
+def http_500(text: str, method: str = "POST") -> httpx.HTTPStatusError:
+    """The error AsyncProxmoxAPI.request raises for a Proxmox 500 with this message."""
+    request = httpx.Request(method, "https://pve/api2/json/x")
+    return httpx.HTTPStatusError(
+        text, request=request, response=httpx.Response(500, text=text, request=request)
+    )

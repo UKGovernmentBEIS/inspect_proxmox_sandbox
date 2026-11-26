@@ -47,6 +47,15 @@ def _http_status_error(response: httpx.Response) -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(message, request=response.request, response=response)
 
 
+class ProxmoxTaskError(RuntimeError):
+    """A Proxmox task finished with a status other than OK."""
+
+    def __init__(self, upid: str, exitstatus: str):
+        self.upid = upid
+        self.exitstatus = exitstatus
+        super().__init__(f"Proxmox task {upid} failed: {exitstatus}")
+
+
 class ProxmoxVersionInfo(BaseModel):
     release: str
     repoid: str
@@ -371,6 +380,11 @@ class AsyncProxmoxAPI:
         *,
         upid: str,
     ) -> None:
+        """Poll until the task has finished.
+
+        Raises ProxmoxTaskError unless the exitstatus is OK or "WARNINGS: n";
+        warnings are logged.
+        """
         if not upid.startswith("UPID:"):
             raise ValueError(f"Unexpected UPID format: {upid}")
         node = upid.removeprefix("UPID:").split(":", maxsplit=1)[0]
@@ -378,10 +392,14 @@ class AsyncProxmoxAPI:
         @tenacity.retry(
             wait=POLL_WAIT,
             stop=tenacity.stop_after_delay(1200),
-            retry=tenacity.retry_if_result(lambda x: x is False),
+            retry=tenacity.retry_if_result(lambda x: x is None),
         )
-        async def _wait_for_task() -> bool:
+        async def _exitstatus() -> str | None:
             response = await self.request("GET", f"/nodes/{node}/tasks/{upid}/status")
-            return response.get("exitstatus") is not None
+            return response.get("exitstatus")
 
-        await _wait_for_task()
+        exitstatus = str(await _exitstatus())
+        if exitstatus.startswith("WARNINGS"):
+            self.logger.warning(f"Proxmox task {upid} finished with {exitstatus}")
+        elif exitstatus != "OK":
+            raise ProxmoxTaskError(upid, exitstatus)
