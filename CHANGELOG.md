@@ -2,7 +2,7 @@
 
 ## 0.13.1
 
-- Fix: an EC2 Proxmox host launched with instance metadata disabled no longer hangs at boot waiting for DHCPv6, and no longer keeps the AMI build instance's root password. Rebuild the AMI to pick this up. New hosts carry contract `aisi5`, and their `pve-qemu-kvm` is `11.1.3-1+aisi5` with the same patches as `+aisi4`.
+- Fix: an EC2 Proxmox host launched with instance metadata disabled no longer hangs at boot waiting for DHCPv6, and no longer keeps the AMI build instance's root password. A host that cannot regenerate its root password now deletes `/root/root-password`, locks root's password and does not start `pveproxy`. Rebuild the AMI to pick this up. New hosts carry contract `aisi5`, and their `pve-qemu-kvm` is `11.1.3-1+aisi5` with the same patches as `+aisi4`.
 
 ## 0.13.0
 

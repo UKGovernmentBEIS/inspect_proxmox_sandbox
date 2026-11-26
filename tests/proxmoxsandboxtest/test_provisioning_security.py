@@ -38,6 +38,62 @@ def test_password_fixup_reads_instance_id_without_imds() -> None:
 
     assert "CURRENT_ID=$(cat /sys/devices/virtual/dmi/id/board_asset_tag)" in script
     assert "Before=pveproxy.service amazon-ssm-agent.service" in unit
+    assert "RequiredBy=pveproxy.service" in unit
+
+
+def _run_password_fixup(tmp_path: Path, asset_tag: str) -> subprocess.CompletedProcess:
+    userdata = (EC2_SCRIPTS / "userdata.sh").read_text()
+    script = _extract_heredoc(userdata, "FIXUP_PASSWORD")
+    tag = tmp_path / "board_asset_tag"
+    tag.write_text(asset_tag + "\n")
+    root = tmp_path / "root"
+    root.mkdir(exist_ok=True)
+    script = script.replace("/sys/devices/virtual/dmi/id/board_asset_tag", str(tag))
+    script = script.replace("/root/", f"{root}/")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("chpasswd", "passwd"):
+        stub = bin_dir / tool
+        stub.write_text(f'#!/bin/bash\necho "{tool} $* $(cat)" >> {tmp_path}/calls\n')
+        stub.chmod(0o755)
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+
+
+def test_password_fixup_regenerates_password_for_new_instance(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "root-password").write_text("ami-password\n")
+    (root / ".last-instance-id").write_text("i-build\n")
+
+    result = _run_password_fixup(tmp_path, "i-new")
+
+    assert result.returncode == 0, result.stderr
+    password = (root / "root-password").read_text().strip()
+    assert password not in ("", "ami-password")
+    assert (root / ".last-instance-id").read_text() == "i-new\n"
+    assert (tmp_path / "calls").read_text() == f"chpasswd  root:{password}\n"
+
+
+def test_password_fixup_fails_closed_without_instance_id(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "root-password").write_text("ami-password\n")
+    (root / ".last-instance-id").write_text("i-build\n")
+
+    result = _run_password_fixup(tmp_path, "")
+
+    assert result.returncode != 0
+    assert not (root / "root-password").exists()
+    assert not (root / ".last-instance-id").exists()
+    assert (tmp_path / "calls").read_text().split() == ["passwd", "-l", "root"]
 
 
 @pytest.mark.parametrize(

@@ -345,6 +345,8 @@ FIXUP_CERTS_UNIT
 cat > /usr/local/bin/proxmox-ami-fixup-password.sh << 'FIXUP_PASSWORD'
 #!/bin/bash
 set -euo pipefail
+# Fail closed: a host that can't regenerate its password must not keep the AMI's
+trap '[ $? -eq 0 ] || { rm -f /root/root-password /root/.last-instance-id; passwd -l root; }' EXIT
 CURRENT_ID=$(cat /sys/devices/virtual/dmi/id/board_asset_tag)
 if [[ "$CURRENT_ID" != i-* ]]; then
     echo "ERROR: no EC2 instance-id in DMI board_asset_tag (got '$CURRENT_ID'); not a Nitro instance?" >&2
@@ -376,6 +378,7 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=pveproxy.service
 FIXUP_PASSWORD_UNIT
 
 cat > /usr/local/bin/proxmox-ami-fixup-nat.sh << 'FIXUP_NAT'
