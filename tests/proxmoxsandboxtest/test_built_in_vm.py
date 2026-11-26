@@ -20,6 +20,10 @@ class Rebuild:
     built_ins: list[str]
     new_vms: list[dict[str, Any]]
     """VMs present after the rebuild that were not present before it."""
+    new_vm_bridges: dict[int, set[str]]
+    """VM ID of each new VM -> the bridges its NICs are on."""
+    zones_before: list[str]
+    zones_after: list[str]
 
 
 @pytest.fixture(scope="module")
@@ -41,17 +45,33 @@ async def rebuild(request: pytest.FixtureRequest) -> Rebuild:
 
     existing_vm_ids = {vm["vmid"] for vm in await infra.qemu_commands.list_vms()}
 
+    async def zones() -> list[str]:
+        return sorted(z["zone"] for z in await infra.sdn_commands.list_sdn_zones())
+
+    zones_before = await zones()
+
     await built_in_vm.ensure_exists_many(built_ins)
 
     all_vms = await infra.qemu_commands.list_vms()
+    new_vms = [vm for vm in all_vms if vm["vmid"] not in existing_vm_ids]
     return Rebuild(
         built_ins=built_ins,
-        new_vms=[vm for vm in all_vms if vm["vmid"] not in existing_vm_ids],
+        new_vms=new_vms,
+        new_vm_bridges={
+            vm["vmid"]: await infra.qemu_commands.vm_bridges(vm["vmid"])
+            for vm in new_vms
+        },
+        zones_before=zones_before,
+        zones_after=await zones(),
     )
 
 
 async def test_one_vm_per_built_in(rebuild: Rebuild) -> None:
     assert len(rebuild.new_vms) == len(rebuild.built_ins), rebuild.new_vms
+
+
+async def test_build_zone_is_gone(rebuild: Rebuild) -> None:
+    assert rebuild.zones_after == rebuild.zones_before
 
 
 async def test_ubuntu(rebuild: Rebuild) -> None:
@@ -78,3 +98,5 @@ def _check_template(rebuild: Rebuild, built_in: str) -> None:
     assert template["template"] == 1
     assert "inspect" in template["tags"].split(";")
     assert template["name"] == f"inspect-{built_in}"
+    # Clones are wired into their own sample's SDN.
+    assert rebuild.new_vm_bridges[template["vmid"]] == set()

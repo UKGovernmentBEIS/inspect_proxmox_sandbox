@@ -40,7 +40,7 @@ async def _sample_init(*vms: VmConfig) -> dict:
     infra.built_in_vm.ensure_exists_many = AsyncMock()
     infra.async_proxmox = AsyncMock()
     infra.node = "pve1"
-    infra.find_proxmox_ids_start = AsyncMock(return_value="test123")
+    infra.sdn_commands.find_proxmox_ids_start = AsyncMock(return_value="test123")
     infra.create_sdn_and_vms = AsyncMock(
         return_value=(
             tuple((100 + i, vm) for i, vm in enumerate(vms)),

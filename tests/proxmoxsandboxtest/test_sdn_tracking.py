@@ -9,7 +9,6 @@ import pytest
 
 from proxmoxsandbox._impl.infra_commands import InfraCommands
 from proxmoxsandbox._impl.sdn_commands import (
-    STATIC_SDN_START,
     IpamMapping,
     SdnCommands,
     SdnTeardownError,
@@ -68,12 +67,20 @@ async def test_zone_is_tracked_when_vnet_creation_fails():
 
 
 @pytest.mark.asyncio
-async def test_static_zone_is_never_tracked():
-    sdn = _sdn_commands(lambda *a, **k: None)
+async def test_zone_id_outside_the_ephemeral_pattern_is_rejected():
+    """cleanup_no_id owns zones by name, so no other name may be created."""
+    requests: list[tuple[str, str]] = []
 
-    zone_id, _ = await sdn.create_sdn(STATIC_SDN_START, SDN_CONFIG)
+    async def request(method, path, **kwargs):
+        requests.append((method, path))
+        return []
 
-    assert zone_id == f"{STATIC_SDN_START}z"
+    sdn = _sdn_commands(request)
+
+    with pytest.raises(ValueError, match="Invalid zone ID"):
+        await sdn.create_sdn("inspvm", SDN_CONFIG)
+
+    assert [r for r in requests if r[0] != "GET"] == []
     assert sdn._tracked_sdn_zone_ids == set()
 
 

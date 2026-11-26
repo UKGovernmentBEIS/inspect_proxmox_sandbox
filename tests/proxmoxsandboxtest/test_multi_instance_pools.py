@@ -33,11 +33,11 @@ def _make_mock_infra():
     infra.delete_sdn_and_vms = AsyncMock()
     infra.deregister_resources = MagicMock()
     infra.task_cleanup = AsyncMock()
-    infra.find_proxmox_ids_start = AsyncMock(return_value="tst100")
     infra.cleanup_no_id = AsyncMock()
     # Mock nested objects
     infra.sdn_commands = MagicMock()
     infra.sdn_commands.read_all_vnets = AsyncMock(return_value=[])
+    infra.sdn_commands.find_proxmox_ids_start = AsyncMock(return_value="tst100")
     infra.qemu_commands = MagicMock()
     infra.qemu_commands.list_vms = AsyncMock(return_value=[])
     infra.built_in_vm = AsyncMock()
@@ -399,7 +399,7 @@ async def test_sample_error_releases_instance(
 ):
     """Test that instance is returned to pool even when sample_init fails."""
     infra = _make_mock_infra()
-    infra.find_proxmox_ids_start.side_effect = Exception("Simulated error")
+    infra.sdn_commands.find_proxmox_ids_start.side_effect = Exception("Simulated error")
 
     with (
         patch.object(

@@ -572,14 +572,15 @@ See [ctf4.py](./src/proxmoxsandbox/experimental/ctf4.py) for an example capture-
 Every VM created by this sandbox provider is tagged `inspect`. 
 (Tags will also be duplicated if they exist on a VM already, for `existing_backup_name`- and `existing_vm_template_tag`-type VMs)
 
-SDN zones have the pattern `[3 letters from eval task name][random 3 digits][z]`. VNets are similar and can be identified from their containing zone.
+SDN zones have the pattern `[3 letters from eval task name][random 3 digits][z]`. VNets are similar and can be identified from their containing zone. Built-in VM templates are built in a zone of the same shape with the prefix `bi` instead of the task name letters. It is removed once the templates are built. If a build fails, the zone and the half-built VM are left like any other sandbox resource: removed at the end of the task, or kept under `--no-sandbox-cleanup`.
 
 Some resources will persist after the eval is complete:
 
 - the built-in VM feature creates a template VM `inspect-ubuntu24.04`
-- the built-in VM feature creates a SDN zone called `inspvmz`
 - uploaded OVAs are left in place
 - cloud-init ISOs are left in place
+
+A host that built a template with version 0.13.0 or earlier also has a permanent SDN zone `inspvmz` (VNet `inspvmv0`, subnet `192.168.99.0/24` with SNAT), and those templates still have a NIC on it. The provider no longer uses the zone and never deletes it. Clones of a `built_in` template get their NICs from the sample's own SDN whether or not the template has one, so the zone can be deleted by hand; delete the templates' `net0` first, since a NIC's IPAM entry stops Proxmox deleting the subnet.
 
 Environment cleanup is partially implemented. There is no way to tag all the resources
 created by a particular eval. Therefore the cleanup process for `inspect sandbox cleanup proxmox` 

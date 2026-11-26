@@ -5,7 +5,6 @@ import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable, Iterable
 from io import BytesIO
-from ipaddress import ip_address, ip_network
 from logging import getLogger
 from pathlib import Path
 from typing import BinaryIO, Dict, cast, get_args
@@ -20,15 +19,9 @@ from inspect_ai.util import trace_action
 from proxmoxsandbox._impl.agent_commands import AgentCommands
 from proxmoxsandbox._impl.async_proxmox import POLL_WAIT, AsyncProxmoxAPI
 from proxmoxsandbox._impl.qemu_commands import QemuCommands, proxmox_cpu
-from proxmoxsandbox._impl.sdn_commands import STATIC_SDN_START, SdnCommands
+from proxmoxsandbox._impl.sdn_commands import BUILT_IN_IDS_PREFIX, SdnCommands
 from proxmoxsandbox._impl.storage_commands import LOCAL_STORAGE, LocalStorageCommands
-from proxmoxsandbox.schema import (
-    DhcpRange,
-    SdnConfig,
-    SubnetConfig,
-    VmSourceConfig,
-    VnetConfig,
-)
+from proxmoxsandbox.schema import VmConfig, VmSourceConfig
 
 VM_TIMEOUT = 1200
 # /cluster/nextid reserves nothing, so concurrent builds read the same ID
@@ -48,8 +41,6 @@ UBUNTU_VMDK_FILENAME = "ubuntu-noble-24.04-cloudimg.vmdk"
 DEBIAN_13_URL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
 KALI_DOWNLOAD_URL = "https://kali.download/cloud-images/kali-2025.4/kali-linux-2025.4-cloud-genericcloud-amd64.tar.xz"
 KALI_DISK_RENAMED = "kali-2025.4-genericcloud-amd64.raw"
-
-STATIC_VNET_ID = f"{STATIC_SDN_START}v0"
 
 # built-in name -> filename of its source image in local storage
 SOURCE_IMAGE_NAMES = {
@@ -344,29 +335,30 @@ runcmd:
         missing = sorted(set(built_in_names) - set(await self.known_builtins()))
         if not missing:
             return
-        # Up front: two builds that both found it missing would both create it
-        await self.ensure_static_sdn_exists()
-        builds = [asyncio.create_task(self.ensure_exists(name)) for name in missing]
+        sdn_zone_id, vnet_id = await self._create_build_sdn()
+        builds = [asyncio.create_task(self._build(name, vnet_id)) for name in missing]
         try:
-            await asyncio.gather(*builds)
+            # asyncio.wait, not gather: a cancelled gather cancels the builds itself
+            finished, _ = await asyncio.wait(
+                builds, return_when=asyncio.FIRST_EXCEPTION
+            )
         finally:
             # A build outliving a failed sibling would run on under the next
             # sample's pre-clean
             for build in builds:
                 build.cancel()
             await asyncio.gather(*builds, return_exceptions=True)
+        for build in finished:
+            build.result()
+        # Not in a finally: a failed build's VM is still on the zone, and
+        # task_cleanup removes both
+        await self._tear_down_build_sdn(sdn_zone_id)
 
-    async def ensure_exists(self, built_in_name: str) -> None:
-        if built_in_name is None:
-            raise ValueError("built_in_name must be set")
-
-        # we could cache the known_builtins here
-        if built_in_name in await self.known_builtins():
-            return
-
+    async def _build(self, built_in_name: str, vnet_id: str) -> None:
         if built_in_name == "ubuntu24.04":
             await self.ensure_exists_from_ova(
                 built_in=built_in_name,
+                vnet_id=vnet_id,
                 source_image_source_url=UBUNTU_URL,
                 ova_vmdk_filename=UBUNTU_VMDK_FILENAME,
             )
@@ -374,12 +366,14 @@ runcmd:
             await self.ensure_version(9)
             await self.ensure_exists_from_qcow2(
                 built_in=built_in_name,
+                vnet_id=vnet_id,
                 source_image_source_url=DEBIAN_13_URL,
             )
         elif built_in_name == "kali2025.4":
             await self.ensure_version(9)
             await self.ensure_exists_from_xz(
                 built_in=built_in_name,
+                vnet_id=vnet_id,
                 source_image_source_url=KALI_DOWNLOAD_URL,
                 disk_renamed=KALI_DISK_RENAMED,
                 user_data=self.KALI_USER_DATA,
@@ -392,6 +386,7 @@ runcmd:
     async def ensure_exists_from_ova(
         self,
         built_in: str,
+        vnet_id: str,
         source_image_source_url: str,
         ova_vmdk_filename: str,
     ) -> None:
@@ -401,16 +396,16 @@ runcmd:
             built_in, source_image_name, source_image_source_url
         )
 
-        await self.ensure_static_sdn_exists()
-
         await self.startup_vm(
             built_in,
             f"import/{source_image_name}/{ova_vmdk_filename}",
+            vnet_id=vnet_id,
         )
 
     async def ensure_exists_from_qcow2(
         self,
         built_in: str,
+        vnet_id: str,
         source_image_source_url: str,
     ) -> None:
         source_image_name = Path(urlparse(source_image_source_url).path).name
@@ -419,13 +414,12 @@ runcmd:
             built_in, source_image_name, source_image_source_url
         )
 
-        await self.ensure_static_sdn_exists()
-
-        await self.startup_vm(built_in, f"import/{source_image_name}")
+        await self.startup_vm(built_in, f"import/{source_image_name}", vnet_id=vnet_id)
 
     async def ensure_exists_from_xz(
         self,
         built_in: str,
+        vnet_id: str,
         source_image_source_url: str,
         disk_renamed: str,
         user_data: str,
@@ -490,11 +484,10 @@ runcmd:
                 Path(download_path).unlink()
                 Path(source_image_name).unlink()
 
-        await self.ensure_static_sdn_exists()
-
         await self.startup_vm(
             built_in,
             f"import/{disk_renamed}",
+            vnet_id=vnet_id,
             user_data=user_data,
             disk_gib=disk_gib,
             cloud_init_timeout=cloud_init_timeout,
@@ -551,6 +544,7 @@ runcmd:
         self,
         built_in: str,
         import_source: str,
+        vnet_id: str,
         user_data: str = DEFAULT_USER_DATA,
         disk_gib: int | None = None,
         cloud_init_timeout: int = CLOUD_INIT_TIMEOUT,
@@ -580,13 +574,24 @@ runcmd:
                             + f"import-from={LOCAL_STORAGE}:{import_source},"
                             + "format=qcow2,cache=writeback",
                             "scsihw": "virtio-scsi-single",
-                            "net0": f"virtio,bridge={STATIC_VNET_ID}",
+                            "net0": f"virtio,bridge={vnet_id}",
                             "serial0": "socket",
                             "vga": "none",
                             "tablet": 0,
                             "start": False,
                             "agent": "enabled=1",
+                            # cleanup_no_id finds a failed build's VM by tag
+                            "tags": f"inspect,builtin-{built_in}",
                         },
+                    )
+                    # Tracked until it is a template: task_cleanup has to destroy
+                    # a failed build's VM before the build zone can go
+                    self.qemu_commands.register_vm(
+                        vm_id=vm_id,
+                        vm_config=VmConfig(
+                            name=name,
+                            vm_source_config=VmSourceConfig(built_in=built_in),
+                        ),
                     )
                     await self.async_proxmox.wait_for_task(upid=upid)
 
@@ -611,15 +616,6 @@ runcmd:
                     vm_id=next_available_vm_id,
                     user_data=user_data,
                 )
-
-            upid = await self.async_proxmox.request(
-                "POST",
-                f"/nodes/{self.node}/qemu/{next_available_vm_id}/config",
-                json={
-                    "tags": f"inspect,builtin-{built_in}",
-                },
-            )
-            await self.async_proxmox.wait_for_task(upid=upid)
 
             with trace_action(
                 self.logger, TRACE_NAME, f"start VM {next_available_vm_id=}"
@@ -719,34 +715,48 @@ runcmd:
 
             await remove_cdrom()
 
-    async def ensure_static_sdn_exists(self):
-        existing_zones = await self.sdn_commands.list_sdn_zones()
+            # A NIC's IPAM entry stops Proxmox deleting the build zone's subnet
+            await self.qemu_commands.remove_existing_nics(next_available_vm_id)
+            self.qemu_commands.deregister_vm(next_available_vm_id)
 
-        exists_already = any(
-            zone_info["zone"] and zone_info["zone"] == f"{STATIC_SDN_START}z"
-            for zone_info in existing_zones
+    async def _create_build_sdn(self) -> tuple[str, str]:
+        """Create the zone built-in templates are built in; return (zone ID, VNET ID).
+
+        An `auto` SDN like a sample's default: DHCP, and SNAT for the apt runs.
+        """
+        proxmox_ids_start = await self.sdn_commands.find_proxmox_ids_start(
+            prefix=BUILT_IN_IDS_PREFIX
         )
+        sdn_zone_id, vnet_aliases = await self.sdn_commands.create_sdn(
+            proxmox_ids_start=proxmox_ids_start, sdn_config="auto"
+        )
+        assert sdn_zone_id is not None  # only sdn_config=None returns no zone
+        return sdn_zone_id, vnet_aliases[0][0]
 
-        if not exists_already:
-            await self.sdn_commands.create_sdn(
-                proxmox_ids_start=STATIC_SDN_START,
-                sdn_config=SdnConfig(
-                    vnet_configs=(
-                        VnetConfig(
-                            subnets=(
-                                SubnetConfig(
-                                    cidr=ip_network("192.168.99.0/24"),
-                                    gateway=ip_address("192.168.99.1"),
-                                    snat=True,
-                                    dhcp_ranges=(
-                                        DhcpRange(
-                                            start=ip_address("192.168.99.50"),
-                                            end=ip_address("192.168.99.100"),
-                                        ),
-                                    ),
-                                ),
-                            )
-                        ),
-                    )
-                ),
+    async def _tear_down_build_sdn(self, sdn_zone_id: str) -> None:
+        """Remove the build zone; if it survives, log and leave it tracked."""
+        try:
+            leases = await self.sdn_commands.read_zone_ipam_mappings(
+                zone_ids={sdn_zone_id}
             )
+        except Exception as e:
+            self.logger.warning(
+                f"failed to read IPAM leases in build zone {sdn_zone_id}: {e}"
+            )
+            leases = []
+        try:
+            gone = await self.sdn_commands.tear_down_sdn_zone_and_vnet(
+                sdn_zone_id=sdn_zone_id, ipam_mappings=leases
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"failed to tear down build zone {sdn_zone_id}; "
+                f"leaving it for task_cleanup: {e}"
+            )
+            return
+        if not gone:
+            self.logger.warning(
+                f"build zone {sdn_zone_id} was not removed; leaving it for task_cleanup"
+            )
+            return
+        self.sdn_commands.deregister_sdn_resources_for_zones({sdn_zone_id})

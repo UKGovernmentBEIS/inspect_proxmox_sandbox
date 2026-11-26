@@ -395,7 +395,7 @@ async def test_task_cleanup_then_cli_cleanup(
     assert await vm_ids() == existing_vm_ids
     assert await zones() == existing_zones
 
-    # A clean host: the sweep must leave templates and the static SDN alone.
+    # A clean host: the sweep must leave templates alone.
     await ProxmoxSandboxEnvironment.cli_cleanup(id=None)
     assert await vm_ids() == existing_vm_ids
     assert await zones() == existing_zones
