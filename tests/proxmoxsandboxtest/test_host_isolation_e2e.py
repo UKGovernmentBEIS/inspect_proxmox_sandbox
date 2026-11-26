@@ -85,14 +85,14 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
         gw = gw_res.stdout.strip()
         assert gw, "no default gateway found inside the sandbox VM"
 
-        # Without isolation this returns HTTP 401 in ~30ms; with it, the TCP
-        # connection never completes and curl exits 28 (http_code 000).
+        # Without isolation this returns HTTP 401 in ~30ms; with it, curl exits 28
+        # (http_code 000). 2s tells a dropped SYN from a slow answer.
         api_res = await env.exec(
             [
                 "curl",
                 "-sk",
                 "--max-time",
-                "5",
+                "2",
                 "-o",
                 "/dev/null",
                 "-w",
@@ -111,7 +111,7 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
             [
                 "sh",
                 "-c",
-                f'timeout 3 bash -c "</dev/tcp/{gw}/22" && echo open || echo blocked',
+                f'timeout 2 bash -c "</dev/tcp/{gw}/22" && echo open || echo blocked',
             ],
             timeout=10,
         )
@@ -129,7 +129,7 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
                 "--silent",
                 "--show-error",
                 "--max-time",
-                "5",
+                "2",
                 "-o",
                 "/dev/null",
                 "-w",
@@ -150,7 +150,7 @@ async def test_sandbox_vm_cannot_reach_host_or_cloud_metadata(
                 "--silent",
                 "--show-error",
                 "--max-time",
-                "5",
+                "2",
                 "-o",
                 "/dev/null",
                 "-w",
